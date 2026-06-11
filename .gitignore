@@ -1,0 +1,11 @@
+# Rust build artifacts
+/target/
+
+# TensorRT serialized engines — binary and machine-specific, must not be committed
+*.engine
+
+# ONNX model files — large binaries, distribute separately
+*.onnx
+
+# Environment variables
+.env

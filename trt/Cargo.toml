@@ -1,0 +1,17 @@
+[package]
+name = "trt"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Safe idiomatic Rust wrapper for TensorRT 10.x"
+
+[features]
+default = []
+yolo = ["dep:half"]
+builder = []
+
+[dependencies]
+trt-sys = { path = "../trt-sys" }
+thiserror = "2.0"
+log = "0.4"
+half = { version = "2.4", optional = true }
