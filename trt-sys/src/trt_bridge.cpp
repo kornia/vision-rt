@@ -1,32 +1,25 @@
-// TENSORRT SHIM — compiled against TensorRT 10.3.x
+// TRT bridge: runtime, engine, execution context, and CUDA helpers.
+// Compiled directly against TRT C++ headers — no hand-written abstract class
+// subclassing needed here. autocxx-generated types are used for type resolution
+// at compile time; the actual function bodies call the TRT C++ API directly.
 //
-// HOW TO UPDATE FOR A NEW TRT VERSION:
-// 1. Install new TRT headers (apt). Confirm NV_TENSORRT_MAJOR in NvInferVersion.h.
-// 2. Update TENSORRT_REQUIRED_MAJOR/MINOR/PATCH in build.rs.
-// 3. Fix any compilation errors here (usually renamed/removed methods).
-// 4. Run: cargo build -p trt-sys
-// See UPDATING.md in the repo root for the full checklist.
-//
-// IMPORTANT TRT 10 CHANGES (vs TRT 8):
-// - Use `delete obj` NOT `obj->destroy()` (destroy() removed in TRT 10)
-// - Dims are Dims64 with int64_t d[8] (not int32_t as in TRT 8)
-// - setMaxWorkspaceSize -> setMemoryPoolLimit(kWORKSPACE, n) (builder only)
-// - enqueueV2 -> enqueueV3(stream) (named-tensor I/O, no binding indices)
-// - kEXPLICIT_BATCH flag removed from createNetworkV2() (always explicit-batch)
+// When TensorRT updates:
+//   1. Install new TRT headers (apt)
+//   2. Run `cargo build -p trt-sys` — fix any compile errors here
+//   3. Most changes will be method renames or signature changes in the
+//      IRuntime/ICudaEngine/IExecutionContext interfaces.
+//   See UPDATING.md for the full checklist.
 
 #include "NvInferRuntime.h"
 #include "NvInferPlugin.h"
 #include "cuda_runtime_api.h"
 
-#include "../include/shim.h"
+#include "../include/trt_bridge.h"
 
-#include <mutex>
 #include <string>
-#include <cstring>
 
-// ── Thread-local error storage ───────────────────────────────────────────────
-
-static thread_local std::string g_last_error;
+// Shared thread-local error storage — defined in logger_shim.cpp.
+extern thread_local std::string g_last_error;
 
 static void set_error(const char* msg) {
     g_last_error = msg ? msg : "";
@@ -35,50 +28,6 @@ static void set_error(const char* msg) {
 static void clear_error() {
     g_last_error.clear();
 }
-
-// ── ShimLogger ───────────────────────────────────────────────────────────────
-
-// Wraps nvinfer1::ILogger and forwards log calls to an optional Rust callback.
-struct ShimLogger {
-    // Inner class that implements the TRT ILogger interface.
-    class Inner final : public nvinfer1::ILogger {
-    public:
-        explicit Inner(int32_t min_severity) : m_min_severity(min_severity) {}
-
-        // TRT API: ILogger::log(Severity, AsciiChar const*) — NvInferRuntimeBase.h
-        void log(Severity severity, nvinfer1::AsciiChar const* msg) noexcept override {
-            int32_t sev = static_cast<int32_t>(severity);
-            if (sev > m_min_severity) return;
-
-            std::lock_guard<std::mutex> lock(m_mutex);
-            if (m_callback) {
-                // Callback must be panic-safe; we catch C++ exceptions defensively.
-                try {
-                    m_callback(sev, msg);
-                } catch (...) {
-                    // Never propagate exceptions back into TRT.
-                }
-            }
-        }
-
-        void set_callback(btrt_log_fn cb) noexcept {
-            std::lock_guard<std::mutex> lock(m_mutex);
-            m_callback = cb;
-        }
-
-        nvinfer1::ILogger* ilogger() noexcept { return this; }
-
-    private:
-        int32_t     m_min_severity;
-        btrt_log_fn m_callback{nullptr};
-        std::mutex  m_mutex;
-    };
-
-    explicit ShimLogger(int32_t min_severity)
-        : inner(min_severity) {}
-
-    Inner inner;
-};
 
 // ── ShimRuntime ──────────────────────────────────────────────────────────────
 
@@ -98,37 +47,7 @@ struct ShimContext {
     nvinfer1::IExecutionContext* ctx{nullptr};
 };
 
-// ── Logger API ───────────────────────────────────────────────────────────────
-
 extern "C" {
-
-// TRT API: ILogger — NvInferRuntimeBase.h
-btrt_logger_t* btrt_logger_create(int32_t min_severity) {
-    clear_error();
-    try {
-        auto* sl = new ShimLogger(min_severity);
-        return reinterpret_cast<btrt_logger_t*>(sl);
-    } catch (std::exception const& e) {
-        set_error(e.what());
-        return nullptr;
-    } catch (...) {
-        set_error("btrt_logger_create: unknown exception");
-        return nullptr;
-    }
-}
-
-void btrt_logger_set_callback(btrt_logger_t* logger, btrt_log_fn callback) {
-    if (!logger) return;
-    auto* sl = reinterpret_cast<ShimLogger*>(logger);
-    sl->inner.set_callback(callback);
-}
-
-// TRT API: ILogger — NvInferRuntimeBase.h
-void btrt_logger_destroy(btrt_logger_t* logger) {
-    if (!logger) return;
-    auto* sl = reinterpret_cast<ShimLogger*>(logger);
-    delete sl;
-}
 
 // ── Runtime API ──────────────────────────────────────────────────────────────
 
@@ -140,8 +59,14 @@ btrt_runtime_t* btrt_runtime_create(btrt_logger_t* logger) {
         return nullptr;
     }
     try {
-        auto* sl = reinterpret_cast<ShimLogger*>(logger);
-        nvinfer1::IRuntime* rt = nvinfer1::createInferRuntime(sl->inner);
+        // Get the ILogger* from the logger shim via the pure-C accessor.
+        nvinfer1::ILogger* ilogger =
+            reinterpret_cast<nvinfer1::ILogger*>(btrt_logger_get_ilogger(logger));
+        if (!ilogger) {
+            set_error("btrt_runtime_create: null ilogger");
+            return nullptr;
+        }
+        nvinfer1::IRuntime* rt = nvinfer1::createInferRuntime(*ilogger);
         if (!rt) {
             set_error("btrt_runtime_create: createInferRuntime returned null");
             return nullptr;
@@ -238,7 +163,6 @@ int32_t btrt_engine_tensor_shape(btrt_engine_t* engine, const char* name,
     auto* se = reinterpret_cast<ShimEngine*>(engine);
     nvinfer1::Dims64 dims = se->engine->getTensorShape(name);
     if (dims.nbDims < 0) {
-        // nbDims == -1 signals tensor not found or unknown shape
         *out_ndims = 0;
         return -1;
     }
@@ -373,25 +297,6 @@ int32_t btrt_cuda_memcpy_d2h(void* dst, const void* src, size_t bytes, void* str
     cudaError_t err = cudaMemcpyAsync(dst, src, bytes, cudaMemcpyDeviceToHost,
                                       static_cast<cudaStream_t>(stream));
     return static_cast<int32_t>(err);
-}
-
-// ── Plugin initialization ─────────────────────────────────────────────────────
-
-// TRT API: initLibNvInferPlugins(void* logger, const char* libNamespace) — NvInferPlugin.h
-int32_t btrt_init_plugins(btrt_logger_t* logger) {
-    void* ilogger_ptr = nullptr;
-    if (logger) {
-        auto* sl = reinterpret_cast<ShimLogger*>(logger);
-        ilogger_ptr = static_cast<void*>(sl->inner.ilogger());
-    }
-    bool ok = initLibNvInferPlugins(ilogger_ptr, "");
-    return ok ? 0 : -1;
-}
-
-// ── Error reporting ──────────────────────────────────────────────────────────
-
-const char* btrt_last_error(void) {
-    return g_last_error.c_str();
 }
 
 } // extern "C"

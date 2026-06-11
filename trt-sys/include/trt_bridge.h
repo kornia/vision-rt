@@ -1,6 +1,10 @@
-#ifndef BTRT_SHIM_H
-#define BTRT_SHIM_H
+#ifndef BTRT_TRT_BRIDGE_H
+#define BTRT_TRT_BRIDGE_H
 
+/* Full btrt_* C bridge: runtime, engine, context, CUDA helpers.
+   The logger API lives in logger_shim.h and is included here for convenience. */
+
+#include "logger_shim.h"
 #include <stdint.h>
 #include <stddef.h>
 
@@ -9,29 +13,9 @@ extern "C" {
 #endif
 
 /* ── Opaque handles ─────────────────────────────────────────────────────── */
-typedef struct btrt_logger_s   btrt_logger_t;
 typedef struct btrt_runtime_s  btrt_runtime_t;
 typedef struct btrt_engine_s   btrt_engine_t;
 typedef struct btrt_context_s  btrt_context_t;
-
-/* ── Logger ─────────────────────────────────────────────────────────────── */
-
-/* Callback type: Rust registers one via btrt_logger_set_callback.
-   severity: 0=INTERNAL_ERROR, 1=ERROR, 2=WARNING, 3=INFO, 4=VERBOSE (ILogger::Severity)
-   msg: null-terminated UTF-8 string owned by TRT (caller must NOT free) */
-typedef void (*btrt_log_fn)(int32_t severity, const char* msg);
-
-/* Create a logger. min_severity: minimum severity to forward (0=all, 3=INFO+, 4=VERBOSE).
-   TRT API: ILogger — NvInferRuntimeBase.h */
-btrt_logger_t* btrt_logger_create(int32_t min_severity);
-
-/* Register Rust log callback. Safe to call multiple times.
-   The callback MUST be panic-safe (use catch_unwind on the Rust side). */
-void btrt_logger_set_callback(btrt_logger_t* logger, btrt_log_fn callback);
-
-/* Destroy the logger. MUST be called AFTER the runtime (and engine, context) is destroyed.
-   TRT API: ILogger — NvInferRuntimeBase.h */
-void btrt_logger_destroy(btrt_logger_t* logger);
 
 /* ── Runtime ─────────────────────────────────────────────────────────────── */
 
@@ -139,19 +123,8 @@ int32_t btrt_cuda_memcpy_h2d(void* dst, const void* src, size_t bytes, void* str
 /* cudaMemcpyAsync device->host. Returns 0 on success. */
 int32_t btrt_cuda_memcpy_d2h(void* dst, const void* src, size_t bytes, void* stream);
 
-/* ── Plugin initialization (optional) ────────────────────────────────────── */
-/* Call BEFORE deserializing any engine that uses TensorRT plugin layers
-   (e.g. EfficientNMS_TRT). Safe to call even if plugins aren't used.
-   TRT API: initLibNvInferPlugins(void* logger, const char* libNamespace) — NvInferPlugin.h */
-int32_t btrt_init_plugins(btrt_logger_t* logger);
-
-/* ── Error reporting ─────────────────────────────────────────────────────── */
-/* Returns the last error message from any btrt_* call (thread-local). May be "".
-   Pointer valid until the next btrt_* call on this thread. */
-const char* btrt_last_error(void);
-
 #ifdef __cplusplus
 }
 #endif
 
-#endif /* BTRT_SHIM_H */
+#endif /* BTRT_TRT_BRIDGE_H */
