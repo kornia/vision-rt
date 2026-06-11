@@ -3,7 +3,7 @@ resolver = "2"
 members = [
     "trt-sys",
     "trt",
-    "trt-detector-node",
+    # trt-detector-node is a separate optional bubbaloop node — not part of the core library
 ]
 
 [workspace.package]
