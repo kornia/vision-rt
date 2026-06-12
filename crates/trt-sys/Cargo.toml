@@ -14,3 +14,7 @@ cc = "1"
 bindgen = "0.70"
 
 [dependencies]
+
+[features]
+# In-process ONNX -> engine builder (links libnvonnxparser)
+builder = []

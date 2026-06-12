@@ -76,15 +76,37 @@ fn main() -> Result<(), trt::BoxError> {
 
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 3 {
-        eprintln!("Usage: rtsp_xfeat <engine_path> <rtsp_url> [save_dir]");
+        eprintln!("Usage: rtsp_xfeat <model.onnx|model.engine> <rtsp_url> [save_dir]");
+        eprintln!("  .onnx   — built on-device into ~/.cache/trt-rs/engines (one-time)");
+        eprintln!("  .engine — used directly (must match this machine's TRT + GPU)");
         std::process::exit(1);
     }
-    let (engine_path, rtsp_url) = (&args[1], &args[2]);
+    let (model_path, rtsp_url) = (&args[1], &args[2]);
     let save_dir = args.get(3).map(String::as_str).unwrap_or(".");
+
+    // .onnx → versioned engine cache (build on first run); .engine → as-is.
+    let engine_path = if model_path.ends_with(".onnx") {
+        let profile = trt_hub::EngineProfile {
+            input: Some((
+                "image".into(),
+                vec![1, 3, 240, 320],
+                vec![1, 3, 640, 640],
+                vec![1, 3, 1088, 1920],
+            )),
+            fp16: true,
+            workspace_mb: 2048,
+        };
+        trt_hub::EngineCache::default()
+            .get_or_build("xfeat-backbone", std::path::Path::new(model_path), &profile)?
+            .to_string_lossy()
+            .into_owned()
+    } else {
+        model_path.clone()
+    };
 
     let logger  = Logger::new(Severity::Warning)?;
     let runtime = Runtime::new(logger)?;
-    let engine  = Engine::from_file(runtime, engine_path)?;
+    let engine  = Engine::from_file(runtime, &engine_path)?;
 
     // Hardware-resize to 1280×720 via VIC before any CUDA work.
     // Matches the engine's opt profile area (640×640 ≈ 409k px; 1280×720 = 921k px — within max).

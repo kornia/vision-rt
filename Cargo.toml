@@ -8,6 +8,7 @@ members = [
     "crates/trt-yolo",
     "crates/trt-gst",
     "crates/nvbuf-sys",
+    "crates/trt-hub",
     "examples/rtsp_yolo",
     "examples/rtsp_xfeat",
 ]

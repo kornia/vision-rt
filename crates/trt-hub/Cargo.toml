@@ -1,0 +1,18 @@
+[package]
+name = "trt-hub"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Model weights distribution + on-device TensorRT engine cache for trt-rs"
+
+[features]
+default = []
+# Download pinned ONNX weights from Hugging Face Hub
+hub = ["dep:hf-hub"]
+# Build engines in-process via nvonnxparser instead of the trtexec subprocess
+builder = ["trt/builder"]
+
+[dependencies]
+trt    = { path = "../trt" }
+sha2   = "0.10"
+hf-hub = { version = "0.4", optional = true }

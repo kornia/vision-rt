@@ -30,13 +30,17 @@ pub mod session;
 pub mod tensor;
 pub mod pipeline;
 pub mod cuda;
+#[cfg(feature = "builder")]
+pub mod builder;
 
 pub use error::{TrtError, Result};
 pub use logger::Logger;
 pub use runtime::Runtime;
 pub use engine::{Engine, TensorSpec, TensorMode, DataType};
 pub use buffer::{DeviceBuffer, Stream};
+pub use cudarc;
 pub use cudarc::driver::CudaStream;
+pub use trt_sys::TENSORRT_VERSION;
 pub use session::{Session, OutputTensor, TensorView};
 pub use tensor::{TRTensor, DType};
 pub use pipeline::{Source, Stage, Chain, TRTensorMap, TrtInferStage, Pipeline, PipelineTiming, BoxError};

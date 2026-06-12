@@ -25,11 +25,15 @@
 // This is the complete stable API consumed by the `trt/` safe-wrapper crate.
 include!(concat!(env!("OUT_DIR"), "/bridge_bindings.rs"));
 
+// In-process ONNX -> engine builder (feature = "builder", links nvonnxparser).
+#[cfg(feature = "builder")]
+include!(concat!(env!("OUT_DIR"), "/builder_bindings.rs"));
+
 // ── Version constants ────────────────────────────────────────────────────────
-pub const TENSORRT_VERSION_MAJOR: u32 = 10;
-pub const TENSORRT_VERSION_MINOR: u32 = 3;
-pub const TENSORRT_VERSION_PATCH: u32 = 0;
-pub const TENSORRT_VERSION_BUILD: u32 = 30;
+
+/// Installed TensorRT version "MAJOR.MINOR.PATCH.BUILD", parsed from
+/// NvInferVersion.h at build time.  Engine-cache keys depend on this.
+pub const TENSORRT_VERSION: &str = env!("TENSORRT_VERSION");
 
 /// Returns `true` if `status` indicates success (status == 0).
 #[inline]

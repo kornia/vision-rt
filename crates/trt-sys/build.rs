@@ -30,6 +30,22 @@ fn main() {
         .flag_if_supported("-Wno-deprecated-declarations")
         .compile("btrt_trt_bridge");
 
+    // ── 2b. Builder shim (feature = "builder"): ONNX -> engine via nvonnxparser ────────
+    let builder_feature = env::var("CARGO_FEATURE_BUILDER").is_ok();
+    if builder_feature {
+        cc::Build::new()
+            .cpp(true)
+            .std("c++17")
+            .file("src/builder_shim.cpp")
+            .include(&trt_inc)
+            .include(&cuda_inc)
+            .include("include")
+            .flag_if_supported("-Wno-deprecated-declarations")
+            .compile("btrt_builder_shim");
+        println!("cargo:rerun-if-changed=src/builder_shim.cpp");
+        println!("cargo:rerun-if-changed=include/builder_shim.h");
+    }
+
     // ── 3. bindgen for the btrt_* C bridge (logger + runtime/engine/context + CUDA) ────
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
 
@@ -45,19 +61,38 @@ fn main() {
         .write_to_file(out_dir.join("bridge_bindings.rs"))
         .expect("failed to write bridge_bindings.rs");
 
+    if builder_feature {
+        let builder_bindings = bindgen::Builder::default()
+            .header("include/builder_shim.h")
+            .allowlist_function("btrt_build_engine_from_onnx")
+            .allowlist_function("btrt_blob_free")
+            // btrt_logger_t already comes from bridge_bindings.rs
+            .blocklist_type("btrt_logger_.*")
+            .blocklist_function("btrt_logger_.*")
+            .blocklist_function("btrt_init_plugins")
+            .generate()
+            .expect("bindgen failed on builder_shim.h");
+        builder_bindings
+            .write_to_file(out_dir.join("builder_bindings.rs"))
+            .expect("failed to write builder_bindings.rs");
+    }
+
     // ── 4. Link directives ──────────────────────────────────────────────────────────────
     println!("cargo:rustc-link-search=native={trt_lib}");
     println!("cargo:rustc-link-search=native={cuda_lib}");
     println!("cargo:rustc-link-lib=dylib=nvinfer");
     println!("cargo:rustc-link-lib=dylib=nvinfer_plugin");
+    if builder_feature {
+        println!("cargo:rustc-link-lib=dylib=nvonnxparser");
+    }
     println!("cargo:rustc-link-lib=dylib=cudart");
     println!("cargo:rustc-link-lib=dylib=stdc++");
 
-    // ── 5. Version constants ────────────────────────────────────────────────────────────
-    println!("cargo:rustc-env=TENSORRT_VERSION_MAJOR=10");
-    println!("cargo:rustc-env=TENSORRT_VERSION_MINOR=3");
-    println!("cargo:rustc-env=TENSORRT_VERSION_PATCH=0");
-    println!("cargo:rustc-env=TENSORRT_VERSION_BUILD=30");
+    // ── 5. Version constants — parsed from NvInferVersion.h, not hardcoded ─────────────
+    let version = parse_trt_version(&trt_inc)
+        .unwrap_or_else(|| "10.3.0.30".to_string());
+    println!("cargo:rustc-env=TENSORRT_VERSION={version}");
+    println!("cargo:rerun-if-changed={trt_inc}/NvInferVersion.h");
 
     // ── 6. Rebuild triggers ─────────────────────────────────────────────────────────────
     println!("cargo:rerun-if-changed=build.rs");
@@ -68,4 +103,23 @@ fn main() {
     println!("cargo:rerun-if-env-changed=TRT_INCLUDE_DIR");
     println!("cargo:rerun-if-env-changed=TRT_LIB_DIR");
     println!("cargo:rerun-if-env-changed=CUDA_HOME");
+}
+
+/// Parse "MAJOR.MINOR.PATCH.BUILD" from NvInferVersion.h so the version
+/// constant tracks the actually-installed TRT (engine-cache keys depend on it).
+fn parse_trt_version(trt_inc: &str) -> Option<String> {
+    let text = std::fs::read_to_string(format!("{trt_inc}/NvInferVersion.h")).ok()?;
+    let grab = |name: &str| -> Option<u32> {
+        text.lines()
+            .find(|l| l.contains(&format!("#define {name} ")))
+            .and_then(|l| l.split_whitespace().last())
+            .and_then(|v| v.parse().ok())
+    };
+    Some(format!(
+        "{}.{}.{}.{}",
+        grab("NV_TENSORRT_MAJOR")?,
+        grab("NV_TENSORRT_MINOR")?,
+        grab("NV_TENSORRT_PATCH")?,
+        grab("NV_TENSORRT_BUILD")?,
+    ))
 }
