@@ -310,6 +310,14 @@ impl Stage for NvmmPreprocessStage {
     type Output = TRTensor;
 
     fn enqueue(&mut self, frame: &NvmmFrame) -> Result<(), BoxError> {
+        // A still-pending import means the previous frame never reached
+        // finalize (error path).  Recover in the mandatory release order:
+        // drain the GPU, drop the texture object, then the NVMM import.
+        if self._pending.is_some() {
+            self.preproc.stream().synchronize().map_err(|e| e.to_string())?;
+            self.preproc.finalize()?;  // drops TextureGuard first ✓
+            self._pending = None;       // then CudaMemory ✓
+        }
         let mem = unsafe { frame.cuda_import().map_err(|e| e.to_string())? };
         let device_frame = DeviceFrame { dev_ptr: mem.dev_ptr, pitch: frame.pitch };
         self._pending = Some(mem);

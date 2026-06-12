@@ -251,28 +251,45 @@ where
     /// GPU time is measured with CUDA events bracketing the `enqueue` call:
     /// both events are recorded on the shared stream so `gpu_ms` reflects
     /// only the GPU execution portion, free of CPU scheduling jitter.
+    ///
+    /// ## Error safety
+    /// Any error return first drains the stream (best-effort sync).  This is
+    /// load-bearing: a partial `enqueue` may have launched kernels that read
+    /// stage-held resources (NVMM imports, texture objects, the source frame),
+    /// and those are dropped/replaced as soon as this call returns.  Returning
+    /// with work in flight would be a use-after-free on the GPU timeline.
     pub fn next(&mut self) -> Option<Result<(&Stg::Output, PipelineTiming), BoxError>> {
         let t0 = Instant::now();
         let frame = self.source.next_frame()?;
         let t1 = Instant::now();
 
+        // Drain the stream before surfacing an error — see "Error safety" above.
+        let fail = |stream: &Arc<CudaStream>, e: BoxError| {
+            let _ = stream.synchronize();
+            Some(Err(e))
+        };
+
         // Place a start-marker on the stream before queuing any GPU work.
         let gpu_start = match self.stream.record_event(None) {
             Ok(e)  => e,
-            Err(e) => return Some(Err(e.into())),
+            Err(e) => return fail(&self.stream, e.into()),
         };
 
-        if let Err(e) = self.stage.enqueue(&frame) { return Some(Err(e)); }
+        if let Err(e) = self.stage.enqueue(&frame) {
+            return fail(&self.stream, e);
+        }
 
         // Place a stop-marker after all GPU work has been submitted.
         let gpu_stop = match self.stream.record_event(None) {
             Ok(e)  => e,
-            Err(e) => return Some(Err(e.into())),
+            Err(e) => return fail(&self.stream, e.into()),
         };
 
         let t2 = Instant::now();
         if let Err(e) = Stream::from_cuda_stream(self.stream.clone()).sync() {
-            return Some(Err(e.into()));
+            // The sync itself failed — retry once so resources aren't freed
+            // under in-flight work; a sticky CUDA error will fail again fast.
+            return fail(&self.stream, e.into());
         }
         let t3 = Instant::now();
 

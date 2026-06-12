@@ -153,6 +153,9 @@ impl Preprocessor {
         Ok(Self { func, stream, src_w, src_h, dst_w, dst_h, scale, pad_x, pad_y, output, _pending: None })
     }
 
+    /// The CUDA stream this preprocessor launches on.
+    pub fn stream(&self) -> &Arc<CudaStream> { &self.stream }
+
     /// H2D + kernel: RGBA host bytes → device, then letterbox into `dst_dev_ptr`.
     ///
     /// Returns a [`TextureGuard`] that must be kept alive until the stream is synced.
@@ -256,6 +259,13 @@ impl Stage for Preprocessor {
     type Output = TRTensor;
 
     fn enqueue(&mut self, frame: &DeviceFrame) -> Result<(), BoxError> {
+        // A still-pending texture means the previous frame never reached
+        // finalize (error path).  Drain the stream before dropping it —
+        // the in-flight kernel may still read through the texture object.
+        if self._pending.is_some() {
+            self.stream.synchronize().map_err(|e| e.to_string())?;
+            self._pending = None;
+        }
         let dst = self.output.as_mut_ptr() as *mut f32;
         let tex = self.process_device_ptr_tex(frame.dev_ptr, frame.pitch, dst)
             .map_err(|e| e.to_string())?;
