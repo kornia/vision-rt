@@ -5,9 +5,9 @@ edition.workspace = true
 publish = false
 
 [dependencies]
-trt       = { path = "../../crates/trt" }
-trt-xfeat = { path = "../../crates/trt-xfeat" }
-trt-gst   = { path = "../../crates/trt-gst" }
+trt-rs       = { path = "../../crates/trt" }
+trt-rs-xfeat = { path = "../../crates/trt-xfeat" }
+trt-rs-gst   = { path = "../../crates/trt-gst" }
 env_logger = "0.11"
 image      = "0.25"
-trt-hub    = { path = "../../crates/trt-hub", features = ["builder"] }
+trt-rs-hub   = { path = "../../crates/trt-hub", features = ["builder"] }

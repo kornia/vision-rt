@@ -18,8 +18,21 @@
 use std::sync::Arc;
 use cudarc::driver::{CudaSlice, CudaStream, PushKernelArg};
 use cudarc::driver::sys::CUdeviceptr;
-use trt::BoxError;
+
 use trt::cuda::{Kernels, cfg_2d, cfg_per_item};
+
+/// Errors from XFeat post-processing and matching.
+#[derive(Debug, thiserror::Error)]
+pub enum XFeatError {
+    #[error(transparent)]
+    Trt(#[from] trt::TrtError),
+    #[error("CUDA driver: {0}")]
+    Driver(#[from] cudarc::driver::DriverError),
+    #[error("backbone output '{0}' missing from engine")]
+    MissingOutput(&'static str),
+    #[error("XFeat: finalize called before enqueue")]
+    FinalizeBeforeEnqueue,
+}
 
 // ── Kernel source ─────────────────────────────────────────────────────────────
 
@@ -247,7 +260,7 @@ impl XFeatPostproc {
         stream:    Arc<CudaStream>,
         top_k:     usize,
         threshold: f32,
-    ) -> Result<Self, BoxError> {
+    ) -> Result<Self, XFeatError> {
         let kernels = Kernels::compile(stream.clone(), KERNELS_SRC)?;
 
         let fn_score_nms      = kernels.function("xfeat_score_nms")?;
@@ -270,7 +283,7 @@ impl XFeatPostproc {
         score_dev: &CudaSlice<f32>,
         h:         usize,
         w:         usize,
-    ) -> Result<(), BoxError> {
+    ) -> Result<(), XFeatError> {
         use cudarc::driver::DevicePtr;
         let heat_raw:  CUdeviceptr = heat_ptr  as usize as CUdeviceptr;
         let rel_raw:   CUdeviceptr = rel_ptr   as usize as CUdeviceptr;
@@ -301,7 +314,7 @@ impl XFeatPostproc {
         score_dev: &CudaSlice<f32>,
         h:         usize,
         w:         usize,
-    ) -> Result<XFeatResult, BoxError> {
+    ) -> Result<XFeatResult, XFeatError> {
         use cudarc::driver::DevicePtr;
         let hd = h / 8;
         let wd = w / 8;
@@ -401,7 +414,7 @@ impl XFeatPostproc {
         rel_ptr:  *const f32,
         h: usize,
         w: usize,
-    ) -> Result<XFeatResult, BoxError> {
+    ) -> Result<XFeatResult, XFeatError> {
         let score_dev: CudaSlice<f32> = unsafe { self.stream.alloc(h * w)? };
         self.launch_score_nms(heat_ptr, rel_ptr, &score_dev, h, w)?;
         self.stream.synchronize()?;
@@ -417,7 +430,7 @@ impl XFeatPostproc {
         res0:       &XFeatResult,
         res1:       &XFeatResult,
         min_cossim: f32,
-    ) -> Result<Vec<(usize, usize)>, BoxError> {
+    ) -> Result<Vec<(usize, usize)>, XFeatError> {
         let n0 = res0.scores.len();
         let n1 = res1.scores.len();
         if n0 == 0 || n1 == 0 { return Ok(Vec::new()); }

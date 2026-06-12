@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Hosted x86 runner: no TensorRT/CUDA — trt-rs-sys runs in stub mode
+  # (TRT_STUB=1 uses committed pregenerated bindings, compiles/links nothing
+  # native).  Jetson-only crates (trt-rs-gst, nvbuf-sys) are excluded.
+  check:
+    runs-on: ubuntu-latest
+    env:
+      TRT_STUB: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo check (stub)
+        run: >
+          cargo check
+          -p trt-rs-sys -p trt-rs -p trt-rs-preproc
+          -p trt-rs-xfeat -p trt-rs-yolo -p trt-rs-hub
+      - name: cargo clippy (stub)
+        run: >
+          cargo clippy
+          -p trt-rs-sys -p trt-rs -p trt-rs-preproc
+          -p trt-rs-xfeat -p trt-rs-yolo -p trt-rs-hub
+          -- -D warnings
+
+  # Self-hosted Jetson runner: real TensorRT + CUDA + GStreamer.
+  # Register a runner on the Orin with labels [self-hosted, jetson], then
+  # remove the `if: false` guard.
+  jetson:
+    if: false  # enable once a self-hosted Jetson runner is registered
+    runs-on: [self-hosted, jetson]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build workspace (release)
+        run: cargo build --release
+      - name: CPU unit tests
+        run: cargo test -p trt-rs-yolo -p trt-rs-hub
+      - name: GPU tests (kernels vs CPU reference)
+        run: cargo test -p trt-rs-xfeat --release -- --ignored

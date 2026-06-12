@@ -18,6 +18,17 @@ use cudarc::driver::sys::CUdeviceptr;
 use trt::{Stage, BoxError, TRTensor, DType};
 use trt::cuda::{Kernels, cfg_2d};
 
+/// Errors from GPU preprocessing.
+#[derive(Debug, thiserror::Error)]
+pub enum PreprocError {
+    #[error(transparent)]
+    Trt(#[from] trt::TrtError),
+    #[error("CUDA driver: {0}")]
+    Driver(#[from] cudarc::driver::DriverError),
+    #[error("cudaCreateTextureObject failed (err={0})")]
+    TextureCreate(i32),
+}
+
 // ── C helpers (preproc_helpers.cpp) ─────────────────────────────────────────
 
 extern "C" {
@@ -130,7 +141,7 @@ impl Preprocessor {
         stream: Arc<CudaStream>,
         src_w: u32, src_h: u32,
         dst_w: u32, dst_h: u32,
-    ) -> Result<Self, BoxError> {
+    ) -> Result<Self, PreprocError> {
         let kernels = Kernels::compile(stream.clone(), KERNEL_SRC)?;
         let func    = kernels.function("letterbox_rgba_to_chw")?;
 
@@ -158,7 +169,7 @@ impl Preprocessor {
         rgba_host: &[u8],
         src_pitch: u32,
         dst_dev_ptr: *mut f32,
-    ) -> Result<TextureGuard, BoxError> {
+    ) -> Result<TextureGuard, PreprocError> {
         let src_dev = self.stream.memcpy_stod(rgba_host)?;
         let raw_ptr: u64 = {
             let (ptr, _guard) = src_dev.device_ptr(self.stream.as_ref());
@@ -174,7 +185,7 @@ impl Preprocessor {
             )
         };
         if rc != 0 {
-            return Err(format!("cudaCreateTextureObject failed (err={rc})").into());
+            return Err(PreprocError::TextureCreate(rc));
         }
 
         self.launch_kernel(tex, dst_dev_ptr)?;
@@ -186,12 +197,12 @@ impl Preprocessor {
     /// # Safety
     /// `src_dev_ptr` must be a valid CUDA device pointer of at least
     /// `src_h × src_pitch` bytes, alive for the kernel's duration.
-    pub fn process_device_ptr_tex(
+    pub unsafe fn process_device_ptr_tex(
         &self,
         src_dev_ptr: *mut c_void,
         src_pitch: u32,
         dst_dev_ptr: *mut f32,
-    ) -> Result<TextureGuard, BoxError> {
+    ) -> Result<TextureGuard, PreprocError> {
         let mut tex: u64 = 0;
         let rc = unsafe {
             preproc_create_tex2d(
@@ -201,7 +212,7 @@ impl Preprocessor {
             )
         };
         if rc != 0 {
-            return Err(format!("cudaCreateTextureObject failed (err={rc})").into());
+            return Err(PreprocError::TextureCreate(rc));
         }
 
         self.launch_kernel(tex, dst_dev_ptr)?;
@@ -212,7 +223,7 @@ impl Preprocessor {
         &self,
         src_tex: u64,
         dst_dev_ptr: *mut f32,
-    ) -> Result<(), BoxError> {
+    ) -> Result<(), PreprocError> {
         let dst_raw: CUdeviceptr = dst_dev_ptr as usize as CUdeviceptr;
 
         let cfg = cfg_2d(self.dst_w as usize, self.dst_h as usize);
@@ -255,7 +266,7 @@ impl Stage for Preprocessor {
             self._pending = None;
         }
         let dst = self.output.as_mut_ptr() as *mut f32;
-        let tex = self.process_device_ptr_tex(frame.dev_ptr, frame.pitch, dst)
+        let tex = unsafe { self.process_device_ptr_tex(frame.dev_ptr, frame.pitch, dst) }
             ?;
         self._pending = Some(tex);
         Ok(())

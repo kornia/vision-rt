@@ -26,6 +26,26 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use gstreamer::prelude::*;
 use trt::{Source, Stage, BoxError, TRTensor};
+use trt_preproc::PreprocError;
+
+/// Errors from the GStreamer NVMM source and preprocessing stage.
+#[derive(Debug, thiserror::Error)]
+pub enum GstSourceError {
+    #[error("GStreamer: {0}")]
+    Glib(#[from] gstreamer::glib::Error),
+    #[error("GStreamer state change: {0}")]
+    StateChange(#[from] gstreamer::StateChangeError),
+    #[error("pipeline setup: {0}")]
+    Setup(&'static str),
+    #[error("stream ended before first frame — check RTSP URL and H.264 codec")]
+    NoFirstFrame,
+    #[error("cudaImportExternalMemory failed (fd={fd}, size={size}, err={code})")]
+    NvmmImport { fd: i32, size: u64, code: i32 },
+    #[error(transparent)]
+    Preproc(#[from] PreprocError),
+    #[error("CUDA driver: {0}")]
+    Driver(#[from] cudarc::driver::DriverError),
+}
 
 // ── CudaMemory ────────────────────────────────────────────────────────────────
 
@@ -72,15 +92,12 @@ impl NvmmFrame {
     /// # Safety
     /// Calls `nvbuf_cuda_import`.  `self` must remain alive for the duration
     /// of any CUDA work using the returned `dev_ptr`.
-    pub unsafe fn cuda_import(&self) -> Result<CudaMemory, BoxError> {
+    pub unsafe fn cuda_import(&self) -> Result<CudaMemory, GstSourceError> {
         let mut ext_mem: *mut c_void = std::ptr::null_mut();
         let mut dev_ptr: *mut c_void = std::ptr::null_mut();
         let rc = nvbuf_sys::nvbuf_cuda_import(self.fd, self.size, &mut ext_mem, &mut dev_ptr);
         if rc != 0 {
-            return Err(format!(
-                "cudaImportExternalMemory failed (fd={}, size={}, err={})",
-                self.fd, self.size, rc
-            ).into());
+            return Err(GstSourceError::NvmmImport { fd: self.fd, size: self.size, code: rc });
         }
         Ok(CudaMemory { dev_ptr, ext_mem })
     }
@@ -114,7 +131,7 @@ impl RtspSource {
     /// Use [`connect_resized`] to have the VIC scaler downsize before CUDA.
     ///
     /// [`connect_resized`]: RtspSource::connect_resized
-    pub fn connect(url: &str) -> Result<Self, BoxError> {
+    pub fn connect(url: &str) -> Result<Self, GstSourceError> {
         Self::connect_internal(url, None)
     }
 
@@ -124,11 +141,11 @@ impl RtspSource {
     /// The resize is done by the Jetson VIC hardware scaler inside `nvvidconv`,
     /// so it costs no CUDA or CPU cycles.  `source.width()` / `source.height()`
     /// return the resized dimensions.
-    pub fn connect_resized(url: &str, width: u32, height: u32) -> Result<Self, BoxError> {
+    pub fn connect_resized(url: &str, width: u32, height: u32) -> Result<Self, GstSourceError> {
         Self::connect_internal(url, Some((width, height)))
     }
 
-    fn connect_internal(url: &str, resize: Option<(u32, u32)>) -> Result<Self, BoxError> {
+    fn connect_internal(url: &str, resize: Option<(u32, u32)>) -> Result<Self, GstSourceError> {
         gstreamer::init()?;
 
         // Optional VIC resize: add width/height to nvvidconv output caps.
@@ -152,17 +169,17 @@ impl RtspSource {
 
         let pipeline = gstreamer::parse_launch(&pipeline_str)?
             .dynamic_cast::<gstreamer::Pipeline>()
-            .map_err(|_| "pipeline cast failed")?;
+            .map_err(|_| GstSourceError::Setup("pipeline cast failed"))?;
 
         let appsink = pipeline
-            .by_name("sink").ok_or("no appsink")?
+            .by_name("sink").ok_or(GstSourceError::Setup("no appsink"))?
             .dynamic_cast::<gstreamer_app::AppSink>()
-            .map_err(|_| "element is not AppSink")?;
+            .map_err(|_| GstSourceError::Setup("element is not AppSink"))?;
 
         let appsink_cpu = pipeline
-            .by_name("sink_cpu").ok_or("no sink_cpu")?
+            .by_name("sink_cpu").ok_or(GstSourceError::Setup("no sink_cpu"))?
             .dynamic_cast::<gstreamer_app::AppSink>()
-            .map_err(|_| "sink_cpu is not AppSink")?;
+            .map_err(|_| GstSourceError::Setup("sink_cpu is not AppSink"))?;
 
         let (frame_tx, frame_rx) = mpsc::sync_channel::<NvmmFrame>(2);
         let (dim_tx, dim_rx)     = mpsc::sync_channel::<(u32, u32)>(1);
@@ -241,7 +258,7 @@ impl RtspSource {
         pipeline.set_state(gstreamer::State::Playing)?;
 
         let (width, height) = dim_rx.recv()
-            .map_err(|_| "stream ended before first frame — check RTSP URL and H.264 codec")?;
+            .map_err(|_| GstSourceError::NoFirstFrame)?;
 
         Ok(Self { pipeline, rx: frame_rx, width, height, cpu_frame })
     }
@@ -299,7 +316,7 @@ impl NvmmPreprocessStage {
         stream: Arc<trt::CudaStream>,
         src_w: u32, src_h: u32,
         dst_w: u32, dst_h: u32,
-    ) -> Result<Self, BoxError> {
+    ) -> Result<Self, GstSourceError> {
         let preproc = Preprocessor::new(stream, src_w, src_h, dst_w, dst_h)?;
         Ok(Self { preproc, _pending: None })
     }

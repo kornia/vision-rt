@@ -27,7 +27,7 @@ impl OutputTensor {
         // from_raw_parts requires f32 alignment; Vec<u8> only guarantees 1.
         // The global allocator aligns these sizes in practice — verify anyway.
         assert!(
-            ptr as usize % std::mem::align_of::<f32>() == 0,
+            (ptr as usize).is_multiple_of(std::mem::align_of::<f32>()),
             "output buffer misaligned for f32 view"
         );
         unsafe { std::slice::from_raw_parts(ptr as *const f32, self.data.len() / 4) }

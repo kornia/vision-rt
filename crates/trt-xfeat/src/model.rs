@@ -4,7 +4,7 @@
 use std::sync::Arc;
 use cudarc::driver::CudaSlice;
 use trt::{Engine, Runtime, Session, CudaStream, Stage, BoxError, TRTensor, TRTensorMap};
-use crate::postprocess::{XFeatPostproc, XFeatResult};
+use crate::postprocess::{XFeatPostproc, XFeatResult, XFeatError};
 
 // ── Params ────────────────────────────────────────────────────────────────────
 
@@ -57,7 +57,7 @@ impl XFeatBuilder {
     }
 
     /// Load the engine and create a session with all pipeline stages wired to its stream.
-    pub fn build(self) -> Result<XFeat, BoxError> {
+    pub fn build(self) -> Result<XFeat, XFeatError> {
         let engine  = Engine::from_file(Arc::clone(&self.runtime), &self.engine_path)?;
         let session = Session::new(Arc::clone(&engine))?;
         let stream  = session.stream().cuda_stream().clone();
@@ -253,7 +253,7 @@ impl XFeat {
         runtime:     Arc<Runtime>,
         engine_path: impl Into<String>,
         params:      XFeatParams,
-    ) -> Result<Self, BoxError> {
+    ) -> Result<Self, XFeatError> {
         XFeatBuilder::new(runtime, engine_path, params).build()
     }
 
@@ -286,7 +286,7 @@ impl XFeat {
     ///
     /// Runs backbone + sync + postproc in one call.  The tensor must already be on
     /// device (shape `[1, 3, H, W]`, values in `[0, 1]`).
-    pub fn extract(&mut self, input: &TRTensor) -> Result<XFeatResult, BoxError> {
+    pub fn extract(&mut self, input: &TRTensor) -> Result<XFeatResult, XFeatError> {
         let shape   = input.shape_i64();
         let dev_ptr = input.as_mut_ptr();
 
@@ -295,9 +295,9 @@ impl XFeat {
         };
         self.session.stream().sync()?;
 
-        let desc_ptr = views.get("descriptors").ok_or("no 'descriptors' output")?.f32_ptr()?;
-        let heat_ptr = views.get("heatmap").ok_or("no 'heatmap' output")?.f32_ptr()?;
-        let rel_ptr  = views.get("reliability").ok_or("no 'reliability' output")?.f32_ptr()?;
+        let desc_ptr = views.get("descriptors").ok_or(XFeatError::MissingOutput("descriptors"))?.f32_ptr()?;
+        let heat_ptr = views.get("heatmap").ok_or(XFeatError::MissingOutput("heatmap"))?.f32_ptr()?;
+        let rel_ptr  = views.get("reliability").ok_or(XFeatError::MissingOutput("reliability"))?.f32_ptr()?;
 
         self.postproc.process(desc_ptr, heat_ptr, rel_ptr, self.h, self.w)
     }

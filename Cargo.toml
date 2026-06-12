@@ -17,4 +17,5 @@ members = [
 version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
+repository = "https://github.com/edgarriba/trt-rs"
 authors = ["Edgar Riba <edgar.riba@gmail.com>"]

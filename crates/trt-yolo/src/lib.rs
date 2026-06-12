@@ -11,6 +11,19 @@ use kornia_imgproc::{
 };
 use trt::{Engine, Session, DeviceBuffer, CudaStream, Stage, BoxError, TRTensor};
 
+/// Errors from YOLO pre/post-processing and inference.
+#[derive(Debug, thiserror::Error)]
+pub enum YoloError {
+    #[error(transparent)]
+    Trt(#[from] trt::TrtError),
+    #[error("image processing: {0}")]
+    Image(#[from] kornia_image::error::ImageError),
+    #[error("CUDA driver: {0}")]
+    Driver(#[from] cudarc::driver::DriverError),
+    #[error("no output tensor '{0}' in engine")]
+    MissingOutput(String),
+}
+
 // ── Public types ──────────────────────────────────────────────────────────────
 
 /// A detected object in original-image coordinate space.
@@ -52,7 +65,7 @@ pub fn letterbox_rgb_to_chw(
     img:   &Image<u8, 3, CpuAllocator>,
     dst_w: u32,
     dst_h: u32,
-) -> Result<(Vec<f32>, LetterboxInfo), Box<dyn std::error::Error>> {
+) -> Result<(Vec<f32>, LetterboxInfo), YoloError> {
     let scale     = f32::min(dst_w as f32 / img.width() as f32, dst_h as f32 / img.height() as f32);
     let new_w     = (img.width()  as f32 * scale).round() as usize;
     let new_h     = (img.height() as f32 * scale).round() as usize;
@@ -115,8 +128,8 @@ pub fn decode_output(
     for i in 0..num_anchors {
         let (cx, cy, w, h) = if col_first {
             (
-                output[0 * num_anchors + i],
-                output[1 * num_anchors + i],
+                output[i],
+                output[num_anchors + i],
                 output[2 * num_anchors + i],
                 output[3 * num_anchors + i],
             )
@@ -242,7 +255,7 @@ impl Yolo {
         model_h:     u32,
         conf_thresh: f32,
         iou_thresh:  f32,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
+    ) -> Result<Self, YoloError> {
         let session   = Session::new(Arc::clone(&engine))?;
         let input_dev = DeviceBuffer::alloc_with_stream(
             session.stream().cuda_stream(),
@@ -259,7 +272,7 @@ impl Yolo {
     /// Write normalised `[0, 1]` f32 values here on `self.stream()` before
     /// calling `detect()`.
     pub fn input_ptr(&self) -> *mut std::ffi::c_void {
-        self.input_dev.as_device_ptr(self.session.stream()) as *mut std::ffi::c_void
+        self.input_dev.as_device_ptr(self.session.stream())
     }
 
     /// Detect objects from device-side CHW FP32 input already in `input_ptr()`.
@@ -270,13 +283,13 @@ impl Yolo {
         &mut self,
         lb_info: &LetterboxInfo,
         labels:  Option<&[&str]>,
-    ) -> Result<Vec<Detection>, Box<dyn std::error::Error>> {
+    ) -> Result<Vec<Detection>, YoloError> {
         let ptr   = self.input_ptr();
         let shape = &[1i64, 3, self.model_h as i64, self.model_w as i64];
         let outputs = unsafe {
             self.session.run_device_inputs(&[("images", ptr, shape)])?
         };
-        let tensor = outputs.values().next().ok_or("no output tensor")?;
+        let tensor = outputs.values().next().ok_or_else(|| YoloError::MissingOutput("any".into()))?;
         Ok(postprocess(tensor.as_f32(), &tensor.shape, lb_info, self.conf_thresh, self.iou_thresh, labels))
     }
 
@@ -288,9 +301,9 @@ impl Yolo {
         chw:     &[f32],
         lb_info: &LetterboxInfo,
         labels:  Option<&[&str]>,
-    ) -> Result<Vec<Detection>, Box<dyn std::error::Error>> {
+    ) -> Result<Vec<Detection>, YoloError> {
         let outputs = self.session.run(&[("images", chw)])?;
-        let tensor  = outputs.values().next().ok_or("no output tensor")?;
+        let tensor  = outputs.values().next().ok_or_else(|| YoloError::MissingOutput("any".into()))?;
         Ok(postprocess(tensor.as_f32(), &tensor.shape, lb_info, self.conf_thresh, self.iou_thresh, labels))
     }
 }

@@ -27,10 +27,37 @@
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+#[cfg(not(feature = "builder"))]
 use std::process::Command;
 
 use sha2::{Digest, Sha256};
-use trt::BoxError;
+
+/// Errors from model resolution and engine building.
+#[derive(Debug, thiserror::Error)]
+pub enum HubError {
+    #[error("I/O: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("unknown model '{0}' — see trt_hub::REGISTRY for known names")]
+    UnknownModel(String),
+    #[error("model '{0}' has no files in the registry")]
+    EmptyModel(String),
+    #[error("sha256 mismatch for {path}: expected {expected}, got {actual} (corrupted download? delete and retry)")]
+    Sha256Mismatch { path: PathBuf, expected: String, actual: String },
+    #[cfg(feature = "hub")]
+    #[error("Hugging Face Hub: {0}")]
+    Hf(#[from] hf_hub::api::sync::ApiError),
+    #[cfg(not(feature = "hub"))]
+    #[error("trt-hub built without the 'hub' feature — enable it to download '{0}', or pass an explicit ONNX path")]
+    HubFeatureDisabled(String),
+    #[error(transparent)]
+    Trt(#[from] trt::TrtError),
+    #[error("CUDA driver: {0}")]
+    Driver(#[from] cudarc::driver::DriverError),
+    #[error("engine build: {0}")]
+    Build(String),
+}
+
+
 
 // ── Model registry ────────────────────────────────────────────────────────────
 
@@ -92,11 +119,8 @@ impl ModelHub {
     ///
     /// Without the feature this returns an error — pass explicit paths instead.
     #[cfg(feature = "hub")]
-    pub fn get(name: &str) -> Result<PathBuf, BoxError> {
-        let spec = spec(name).ok_or_else(|| format!(
-            "unknown model '{name}' — known: {:?}",
-            REGISTRY.iter().map(|m| m.name).collect::<Vec<_>>()
-        ))?;
+    pub fn get(name: &str) -> Result<PathBuf, HubError> {
+        let spec = spec(name).ok_or_else(|| HubError::UnknownModel(name.into()))?;
 
         let api = hf_hub::api::sync::Api::new()?;
         let repo = api.repo(hf_hub::Repo::with_revision(
@@ -111,32 +135,29 @@ impl ModelHub {
             verify_sha256(&path, f.sha256)?;
             if entry.is_none() { entry = Some(path); }
         }
-        entry.ok_or_else(|| format!("model '{name}' has no files").into())
+        entry.ok_or_else(|| HubError::EmptyModel(name.into()))
     }
 
     #[cfg(not(feature = "hub"))]
-    pub fn get(name: &str) -> Result<PathBuf, BoxError> {
-        Err(format!(
-            "trt-hub built without the 'hub' feature — enable it to download \
-             '{name}', or pass an explicit ONNX path"
-        ).into())
+    pub fn get(name: &str) -> Result<PathBuf, HubError> {
+        Err(HubError::HubFeatureDisabled(name.into()))
     }
 }
 
 /// Verify a file against an expected sha256 hex digest.
-pub fn verify_sha256(path: &Path, expected: &str) -> Result<(), BoxError> {
+pub fn verify_sha256(path: &Path, expected: &str) -> Result<(), HubError> {
     let actual = sha256_file(path)?;
     if actual != expected {
-        return Err(format!(
-            "sha256 mismatch for {}: expected {expected}, got {actual} \
-             (corrupted download? delete and retry)",
-            path.display()
-        ).into());
+        return Err(HubError::Sha256Mismatch {
+            path:     path.to_path_buf(),
+            expected: expected.into(),
+            actual,
+        });
     }
     Ok(())
 }
 
-fn sha256_file(path: &Path) -> Result<String, BoxError> {
+fn sha256_file(path: &Path) -> Result<String, HubError> {
     let mut file = fs::File::open(path)?;
     let mut hasher = Sha256::new();
     let mut buf = [0u8; 1 << 16];
@@ -150,10 +171,13 @@ fn sha256_file(path: &Path) -> Result<String, BoxError> {
 
 // ── EngineCache ───────────────────────────────────────────────────────────────
 
+/// `(input_name, min_dims, opt_dims, max_dims)` for a dynamic-shape input.
+pub type ShapeProfile = (String, Vec<i64>, Vec<i64>, Vec<i64>);
+
 /// Optimization profile + build options for an engine.
 pub struct EngineProfile {
-    /// `(input_name, min, opt, max)` for dynamic-shape models; None = static.
-    pub input:        Option<(String, Vec<i64>, Vec<i64>, Vec<i64>)>,
+    /// Profile for dynamic-shape models; None = static shapes.
+    pub input:        Option<ShapeProfile>,
     pub fp16:         bool,
     pub workspace_mb: i64,
 }
@@ -188,7 +212,7 @@ impl EngineCache {
     }
 
     /// Cache path for a model — exists or not.
-    pub fn key_path(&self, name: &str, onnx: &Path) -> Result<PathBuf, BoxError> {
+    pub fn key_path(&self, name: &str, onnx: &Path) -> Result<PathBuf, HubError> {
         let onnx_sha8 = &sha256_file(onnx)?[..8];
         let trt_ver = trt_sys_version();
         let sm = compute_capability()?;
@@ -205,7 +229,7 @@ impl EngineCache {
         name: &str,
         onnx: &Path,
         profile: &EngineProfile,
-    ) -> Result<PathBuf, BoxError> {
+    ) -> Result<PathBuf, HubError> {
         let path = self.key_path(name, onnx)?;
         if path.exists() {
             return Ok(path);
@@ -233,20 +257,20 @@ fn trt_sys_version() -> &'static str {
 }
 
 /// GPU compute capability as e.g. "87".
-fn compute_capability() -> Result<String, BoxError> {
+fn compute_capability() -> Result<String, HubError> {
     let ctx = cudarc_context()?;
     let (major, minor) = ctx.compute_capability()?;
     Ok(format!("{major}{minor}"))
 }
 
-fn cudarc_context() -> Result<std::sync::Arc<trt::cudarc::driver::CudaContext>, BoxError> {
+fn cudarc_context() -> Result<std::sync::Arc<trt::cudarc::driver::CudaContext>, HubError> {
     Ok(trt::cudarc::driver::CudaContext::new(0)?)
 }
 
 // ── Engine building ───────────────────────────────────────────────────────────
 
 #[cfg(feature = "builder")]
-fn build_engine(onnx: &Path, profile: &EngineProfile) -> Result<Vec<u8>, BoxError> {
+fn build_engine(onnx: &Path, profile: &EngineProfile) -> Result<Vec<u8>, HubError> {
     use trt::logger::Severity;
     let logger = trt::Logger::new(Severity::Warning)?;
     let mut b = trt::builder::EngineBuilder::from_onnx(onnx.to_string_lossy())
@@ -259,12 +283,12 @@ fn build_engine(onnx: &Path, profile: &EngineProfile) -> Result<Vec<u8>, BoxErro
 }
 
 #[cfg(not(feature = "builder"))]
-fn build_engine(onnx: &Path, profile: &EngineProfile) -> Result<Vec<u8>, BoxError> {
+fn build_engine(onnx: &Path, profile: &EngineProfile) -> Result<Vec<u8>, HubError> {
     // trtexec subprocess fallback (JetPack ships it outside PATH).
     let trtexec = ["/usr/src/tensorrt/bin/trtexec", "trtexec"]
         .iter()
         .find(|p| Path::new(p).exists() || which(p))
-        .ok_or("trtexec not found and 'builder' feature is disabled")?;
+        .ok_or_else(|| HubError::Build("trtexec not found and 'builder' feature is disabled".into()))?;
 
     let out = tempfile_path("engine")?;
     let mut cmd = Command::new(trtexec);
@@ -282,7 +306,7 @@ fn build_engine(onnx: &Path, profile: &EngineProfile) -> Result<Vec<u8>, BoxErro
 
     let status = cmd.status()?;
     if !status.success() {
-        return Err(format!("trtexec failed with {status}").into());
+        return Err(HubError::Build(format!("trtexec failed with {status}")));
     }
     let blob = fs::read(&out)?;
     let _ = fs::remove_file(&out);
@@ -302,7 +326,7 @@ fn which(bin: &str) -> bool {
 }
 
 #[cfg(not(feature = "builder"))]
-fn tempfile_path(ext: &str) -> Result<PathBuf, BoxError> {
+fn tempfile_path(ext: &str) -> Result<PathBuf, HubError> {
     Ok(std::env::temp_dir().join(format!("trt-hub-{}.{ext}", std::process::id())))
 }
 

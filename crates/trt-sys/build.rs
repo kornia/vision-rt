@@ -1,6 +1,20 @@
 use std::{env, path::PathBuf};
 
 fn main() {
+    println!("cargo:rustc-check-cfg=cfg(trt_stub)");
+
+    // Stub mode (docs.rs / hosted CI without TRT headers): skip the C++
+    // shims, bindgen, and link directives entirely; lib.rs falls back to
+    // src/pregenerated_bindings.rs.  `cargo check`/`clippy`/`doc` work;
+    // anything that links or runs requires a real TRT install.
+    if env::var("DOCS_RS").is_ok() || env::var("TRT_STUB").is_ok() {
+        println!("cargo:rustc-cfg=trt_stub");
+        println!("cargo:rustc-env=TENSORRT_VERSION=0.0.0.0-stub");
+        println!("cargo:rerun-if-env-changed=TRT_STUB");
+        return;
+    }
+    println!("cargo:rerun-if-env-changed=TRT_STUB");
+
     let trt_inc = env::var("TRT_INCLUDE_DIR")
         .unwrap_or_else(|_| "/usr/include/aarch64-linux-gnu".into());
     let trt_lib = env::var("TRT_LIB_DIR")

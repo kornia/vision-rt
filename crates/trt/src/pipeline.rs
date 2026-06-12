@@ -270,6 +270,7 @@ where
     /// stage-held resources (NVMM imports, texture objects, the source frame),
     /// and those are dropped/replaced as soon as this call returns.  Returning
     /// with work in flight would be a use-after-free on the GPU timeline.
+    #[allow(clippy::should_implement_trait)] // returns borrowed output; Iterator can't
     pub fn next(&mut self) -> Option<Result<(&Stg::Output, PipelineTiming), BoxError>> {
         let t0 = Instant::now();
         let frame = self.source.next_frame()?;

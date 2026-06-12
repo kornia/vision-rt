@@ -2,6 +2,8 @@
 name = "nvbuf-sys"
 version.workspace = true
 edition.workspace = true
+repository.workspace = true
+publish = false
 license.workspace = true
 description = "Raw FFI bindings for Jetson NvBufSurface — extract CUDA device pointers from GStreamer NVMM buffers on Orin"
 links = "nvbufsurface"

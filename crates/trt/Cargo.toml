@@ -1,17 +1,21 @@
 [package]
-name = "trt"
+name = "trt-rs"
 version.workspace = true
 edition.workspace = true
+repository.workspace = true
 license.workspace = true
 description = "Safe idiomatic Rust wrapper for TensorRT 10.x"
+
+[lib]
+name = "trt"
 
 [features]
 default = []
 # In-process ONNX -> engine builder (links libnvonnxparser via trt-sys)
-builder = ["trt-sys/builder"]
+builder = ["trt-rs-sys/builder"]
 
 [dependencies]
-trt-sys = { path = "../trt-sys" }
+trt-rs-sys = { path = "../trt-sys" }
 thiserror = "2.0"
 log = "0.4"
 half = "2.4"

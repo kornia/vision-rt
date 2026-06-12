@@ -1428,6 +1428,8 @@ dependencies = [
 [[package]]
 name = "kornia-algebra"
 version = "0.1.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "501785e1507c9b7b5c1346e4b1d7b00aafd8c94a13aca5601ca37d648eb68f8d"
 dependencies = [
  "glam",
  "nalgebra",
@@ -1438,6 +1440,8 @@ dependencies = [
 [[package]]
 name = "kornia-image"
 version = "0.1.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "be96e08b0a366771510e8e3c113dd432491ca30b6a94f8cb9e804de4bb33cfec"
 dependencies = [
  "kornia-tensor",
  "num-traits",
@@ -1448,6 +1452,8 @@ dependencies = [
 [[package]]
 name = "kornia-imgproc"
 version = "0.1.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2a23243158114ac4e1416050c372d6cee59e75c3d528c9bf6a4a477a9775bd67"
 dependencies = [
  "kornia-algebra",
  "kornia-image",
@@ -1461,6 +1467,8 @@ dependencies = [
 [[package]]
 name = "kornia-tensor"
 version = "0.1.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e6c8de4d7b5972bf6c2756f663d483a588a4c2ba5f74f6fe87ec93bfc694f81b"
 dependencies = [
  "num-traits",
  "rayon",
@@ -2250,10 +2258,10 @@ version = "0.1.0"
 dependencies = [
  "env_logger",
  "image",
- "trt",
- "trt-gst",
- "trt-hub",
- "trt-xfeat",
+ "trt-rs",
+ "trt-rs-gst",
+ "trt-rs-hub",
+ "trt-rs-xfeat",
 ]
 
 [[package]]
@@ -2261,9 +2269,9 @@ name = "rtsp_yolo"
 version = "0.1.0"
 dependencies = [
  "env_logger",
- "trt",
- "trt-gst",
- "trt-yolo",
+ "trt-rs",
+ "trt-rs-gst",
+ "trt-rs-yolo",
 ]
 
 [[package]]
@@ -2870,47 +2878,52 @@ dependencies = [
 ]
 
 [[package]]
-name = "trt"
+name = "trt-rs"
 version = "0.1.0"
 dependencies = [
  "cudarc",
  "half",
  "log",
  "thiserror 2.0.18",
- "trt-sys",
+ "trt-rs-sys",
 ]
 
 [[package]]
-name = "trt-gst"
+name = "trt-rs-gst"
 version = "0.1.0"
 dependencies = [
+ "cudarc",
  "gstreamer",
  "gstreamer-app",
  "nvbuf-sys",
- "trt",
- "trt-preproc",
+ "thiserror 2.0.18",
+ "trt-rs",
+ "trt-rs-preproc",
 ]
 
 [[package]]
-name = "trt-hub"
+name = "trt-rs-hub"
 version = "0.1.0"
 dependencies = [
+ "cudarc",
  "hf-hub",
  "sha2",
- "trt",
+ "thiserror 2.0.18",
+ "trt-rs",
 ]
 
 [[package]]
-name = "trt-preproc"
+name = "trt-rs-preproc"
 version = "0.1.0"
 dependencies = [
  "cc",
  "cudarc",
- "trt",
+ "thiserror 2.0.18",
+ "trt-rs",
 ]
 
 [[package]]
-name = "trt-sys"
+name = "trt-rs-sys"
 version = "0.1.0"
 dependencies = [
  "bindgen",
@@ -2918,21 +2931,24 @@ dependencies = [
 ]
 
 [[package]]
-name = "trt-xfeat"
+name = "trt-rs-xfeat"
 version = "0.1.0"
 dependencies = [
  "cudarc",
- "trt",
- "trt-preproc",
+ "thiserror 2.0.18",
+ "trt-rs",
+ "trt-rs-preproc",
 ]
 
 [[package]]
-name = "trt-yolo"
+name = "trt-rs-yolo"
 version = "0.1.0"
 dependencies = [
+ "cudarc",
  "kornia-image",
  "kornia-imgproc",
- "trt",
+ "thiserror 2.0.18",
+ "trt-rs",
 ]
 
 [[package]]

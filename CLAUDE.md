@@ -6,6 +6,10 @@ the library crates.
 
 ## Workspace layout
 
+Package names use the `trt-rs-*` namespace (crates.io: `trt` was taken), but
+`[lib] name` keeps the short names — code uses `use trt::`, `use trt_xfeat::`.
+Errors: per-crate thiserror enums; `BoxError` only in the `Stage` trait.
+
 | Crate | Role |
 |-------|------|
 | `crates/trt-sys` | Raw FFI: pure-C shim over TensorRT C++ (bindgen never sees C++ headers) |
