@@ -1,0 +1,11 @@
+[package]
+name = "rtsp_yolo"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+trt      = { path = "../../crates/trt" }
+trt-yolo = { path = "../../crates/trt-yolo" }
+trt-gst  = { path = "../../crates/trt-gst" }
+env_logger  = "0.11"

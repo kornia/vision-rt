@@ -1,0 +1,9 @@
+[package]
+name = "trt-yolo"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+trt            = { path = "../trt" }
+kornia-image   = { path = "/home/nvidia/kornia-rs/crates/kornia-image" }
+kornia-imgproc = { path = "/home/nvidia/kornia-rs/crates/kornia-imgproc" }

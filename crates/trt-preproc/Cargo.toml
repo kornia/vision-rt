@@ -1,0 +1,13 @@
+[package]
+name = "trt-preproc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Zero-copy GPU preprocessing for TensorRT — bilinear letterbox + RGBA→CHW via cudarc nvrtc"
+
+[build-dependencies]
+cc = "1"
+
+[dependencies]
+cudarc    = { version = "0.17", features = ["cuda-12060", "nvrtc"] }
+trt = { path = "../trt" }

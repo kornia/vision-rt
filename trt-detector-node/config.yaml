@@ -1,6 +1,0 @@
-name: entrance_detector
-camera: tapo_entrance
-engine_path: /home/nvidia/models/yolo11n.fp16.engine
-model_size: 640
-conf_threshold: 0.25
-iou_threshold: 0.45

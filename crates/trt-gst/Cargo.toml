@@ -1,0 +1,11 @@
+[package]
+name = "trt-gst"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+nvbuf-sys     = { path = "../nvbuf-sys" }
+gstreamer     = "0.20"
+gstreamer-app = "0.20"
+trt           = { path = "../trt" }
+trt-preproc   = { path = "../trt-preproc" }

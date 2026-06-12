@@ -1,0 +1,11 @@
+[package]
+name = "trt-xfeat"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "XFeat post-processing: NMS, TopK keypoint selection, descriptor sampling"
+
+[dependencies]
+cudarc      = { version = "0.17", features = ["cuda-12060", "nvrtc"] }
+trt         = { path = "../trt" }
+trt-preproc = { path = "../trt-preproc" }

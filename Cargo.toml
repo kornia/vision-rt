@@ -1,9 +1,15 @@
 [workspace]
 resolver = "2"
 members = [
-    "trt-sys",
-    "trt",
-    # trt-detector-node is a separate optional bubbaloop node — not part of the core library
+    "crates/trt-sys",
+    "crates/trt",
+    "crates/trt-preproc",
+    "crates/trt-xfeat",
+    "crates/trt-yolo",
+    "crates/trt-gst",
+    "crates/nvbuf-sys",
+    "examples/rtsp_yolo",
+    "examples/rtsp_xfeat",
 ]
 
 [workspace.package]

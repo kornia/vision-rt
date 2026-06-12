@@ -4,8 +4,15 @@
 # TensorRT serialized engines — binary and machine-specific, must not be committed
 *.engine
 
-# ONNX model files — large binaries, distribute separately
+# Model weights — distributed via model hub, never in-repo
 *.onnx
+*.onnx.data
+*.pt
+models/
+
+# Debug / output images at repo root
+/*.jpg
+/*.png
 
 # Environment variables
 .env
