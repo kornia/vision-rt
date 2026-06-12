@@ -1,0 +1,18 @@
+[package]
+name = "vrt-gst"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+name = "vrt_gst"
+
+[dependencies]
+nvbuf-sys     = { path = "../nvbuf-sys" }
+gstreamer     = "0.20"
+gstreamer-app = "0.20"
+vision-rt     = { path = "../vrt" }
+vrt-preproc   = { path = "../vrt-preproc" }
+thiserror     = "2.0"
+cudarc        = { version = "0.17", features = ["cuda-12060"] }

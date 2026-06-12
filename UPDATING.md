@@ -2,25 +2,25 @@
 
 ---
 
-## Files to change in `trt-sys`
+## Files to change in `vrt-sys`
 
-### `trt-sys/src/trt_bridge.cpp`
+### `vrt-sys/src/trt_bridge.cpp`
 
 This is the C++ bridge that wraps TRT's abstract C++ API and exposes a flat C surface (`btrt_*` functions). Each function has a comment referencing the exact TRT header and method it wraps.
 
-When TRT renames or changes a method, the C++ compiler reports an error here on `cargo build -p trt-sys`. Fix the error, then proceed.
+When TRT renames or changes a method, the C++ compiler reports an error here on `cargo build -p vrt-sys`. Fix the error, then proceed.
 
-### `trt-sys/src/logger_shim.cpp`
+### `vrt-sys/src/logger_shim.cpp`
 
 The ONLY hand-written C++ that cannot be replaced by code generation: `ShimLogger : public nvinfer1::ILogger`. Only change this file if TRT changes the `ILogger::log()` virtual signature.
 
-### `trt-sys/include/trt_bridge.h`
+### `vrt-sys/include/trt_bridge.h`
 
 The pure-C header that `bindgen` uses to generate `OUT_DIR/bridge_bindings.rs`. Only change this if the C API surface changes (new `btrt_*` function, changed return type, etc.). `bindgen` regenerates `bridge_bindings.rs` automatically on every build — never edit it by hand.
 
-### `trt-sys/src/lib.rs`
+### `vrt-sys/src/lib.rs`
 
-Update the four `TENSORRT_VERSION_*` constants to match the new version.
+Nothing — `TENSORRT_VERSION` is parsed from `NvInferVersion.h` at build time.
 
 ---
 
@@ -47,17 +47,15 @@ TRT 10.x minor releases: the named-tensor I/O API (`setTensorAddress`, `getIOTen
    cat /usr/include/aarch64-linux-gnu/NvInferVersion.h | grep NV_TENSORRT
    ```
 
-2. Build `trt-sys` — the C++ compiler catches API breakage:
+2. Build `vrt-sys` — the C++ compiler catches API breakage:
    ```
-   cargo build -p trt-sys
+   cargo build -p vrt-sys
    ```
    Fix any errors in `trt_bridge.cpp` (and rarely `logger_shim.cpp`).
 
-3. Update `TENSORRT_VERSION_*` constants in `trt-sys/src/lib.rs`.
-
 4. Run the unit tests (no GPU required):
    ```
-   cargo test -p trt-yolo -p trt
+   cargo test -p vrt-yolo -p vision-rt
    ```
 
 5. Rebuild all `.engine` files — TRT engines are tied to the exact runtime version:

@@ -1,6 +1,6 @@
 ---
 name: model-tensor-semantics
-description: Use when working on model pre/post-processing, keypoints, descriptors, detections, or matching — XFeat and YOLO tensor shapes, coordinate spaces, normalization, NMS, and the exact algorithm steps implemented in trt-xfeat and trt-yolo.
+description: Use when working on model pre/post-processing, keypoints, descriptors, detections, or matching — XFeat and YOLO tensor shapes, coordinate spaces, normalization, NMS, and the exact algorithm steps implemented in vrt-xfeat and vrt-yolo.
 ---
 
 # Model Tensor Semantics (XFeat & YOLO)
@@ -19,7 +19,7 @@ Viz code scales model→frame with `sx = fw/dst_w, sy = fh/dst_h`
 (see rtsp_xfeat `save_kpts`). Skipping the letterbox pad offset when
 mapping back is the classic off-by-pad bug.
 
-## Preprocessing (trt-preproc, GPU kernel `letterbox_rgba_to_chw`)
+## Preprocessing (vrt-preproc, GPU kernel `letterbox_rgba_to_chw`)
 
 - Input: RGBA pitch-linear device buffer (NVMM import), read via
   `cudaTextureObject_t` (bilinear hardware sampling).
@@ -29,7 +29,7 @@ mapping back is the classic off-by-pad bug.
 - H and W must be multiples of 32 (`pad32`) — XFeat downsamples ×8 and
   TRT profiles assume it.
 
-## XFeat (trt-xfeat)
+## XFeat (vrt-xfeat)
 
 Backbone outputs (TRT engine, all FP32 on device):
 
@@ -57,7 +57,7 @@ are L2-normalized, so dot = cosine), mutual nearest-neighbor check via two
 calls of one tiled argmax kernel (`xfeat_match_argmax` — one thread per
 query, candidates tiled through shared memory), with min-similarity cutoff.
 
-## YOLO11/v8 (trt-yolo)
+## YOLO11/v8 (vrt-yolo)
 
 - Input: `images` `[1,3,640,640]`, [0,1] RGB, letterboxed with 114-grey pad.
 - Output: `[1, 84, 8400]` — 84 = 4 box (cx,cy,w,h in model space) + 80 class

@@ -1,0 +1,22 @@
+[package]
+name = "vision-rt"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+description = "vision-rt: computer vision for TensorRT — safe Rust wrapper and real-time pipelines"
+
+[lib]
+name = "vrt"
+
+[features]
+default = []
+# In-process ONNX -> engine builder (links libnvonnxparser via trt-sys)
+builder = ["vrt-sys/builder"]
+
+[dependencies]
+vrt-sys = { path = "../vrt-sys" }
+thiserror = "2.0"
+log = "0.4"
+half = "2.4"
+cudarc = { version = "0.17", features = ["cuda-12060", "nvrtc"] }

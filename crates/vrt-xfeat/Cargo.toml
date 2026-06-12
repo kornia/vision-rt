@@ -1,0 +1,16 @@
+[package]
+name = "vrt-xfeat"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+description = "XFeat post-processing: NMS, TopK keypoint selection, descriptor sampling"
+
+[lib]
+name = "vrt_xfeat"
+
+[dependencies]
+cudarc      = { version = "0.17", features = ["cuda-12060", "nvrtc"] }
+vision-rt   = { path = "../vrt" }
+vrt-preproc = { path = "../vrt-preproc" }
+thiserror   = "2.0"

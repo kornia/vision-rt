@@ -1,14 +1,14 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/trt-sys",
-    "crates/trt",
-    "crates/trt-preproc",
-    "crates/trt-xfeat",
-    "crates/trt-yolo",
-    "crates/trt-gst",
+    "crates/vrt-sys",
+    "crates/vrt",
+    "crates/vrt-preproc",
+    "crates/vrt-xfeat",
+    "crates/vrt-yolo",
+    "crates/vrt-gst",
     "crates/nvbuf-sys",
-    "crates/trt-hub",
+    "crates/vrt-hub",
     "examples/rtsp_yolo",
     "examples/rtsp_xfeat",
 ]
@@ -17,5 +17,5 @@ members = [
 version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
-repository = "https://github.com/edgarriba/trt-rs"
+repository = "https://github.com/edgarriba/vision-rt"
 authors = ["Edgar Riba <edgar.riba@gmail.com>"]

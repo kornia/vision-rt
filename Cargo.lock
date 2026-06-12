@@ -2258,10 +2258,10 @@ version = "0.1.0"
 dependencies = [
  "env_logger",
  "image",
- "trt-rs",
- "trt-rs-gst",
- "trt-rs-hub",
- "trt-rs-xfeat",
+ "vision-rt",
+ "vrt-gst",
+ "vrt-hub",
+ "vrt-xfeat",
 ]
 
 [[package]]
@@ -2269,9 +2269,9 @@ name = "rtsp_yolo"
 version = "0.1.0"
 dependencies = [
  "env_logger",
- "trt-rs",
- "trt-rs-gst",
- "trt-rs-yolo",
+ "vision-rt",
+ "vrt-gst",
+ "vrt-yolo",
 ]
 
 [[package]]
@@ -2878,80 +2878,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "trt-rs"
-version = "0.1.0"
-dependencies = [
- "cudarc",
- "half",
- "log",
- "thiserror 2.0.18",
- "trt-rs-sys",
-]
-
-[[package]]
-name = "trt-rs-gst"
-version = "0.1.0"
-dependencies = [
- "cudarc",
- "gstreamer",
- "gstreamer-app",
- "nvbuf-sys",
- "thiserror 2.0.18",
- "trt-rs",
- "trt-rs-preproc",
-]
-
-[[package]]
-name = "trt-rs-hub"
-version = "0.1.0"
-dependencies = [
- "cudarc",
- "hf-hub",
- "sha2",
- "thiserror 2.0.18",
- "trt-rs",
-]
-
-[[package]]
-name = "trt-rs-preproc"
-version = "0.1.0"
-dependencies = [
- "cc",
- "cudarc",
- "thiserror 2.0.18",
- "trt-rs",
-]
-
-[[package]]
-name = "trt-rs-sys"
-version = "0.1.0"
-dependencies = [
- "bindgen",
- "cc",
-]
-
-[[package]]
-name = "trt-rs-xfeat"
-version = "0.1.0"
-dependencies = [
- "cudarc",
- "thiserror 2.0.18",
- "trt-rs",
- "trt-rs-preproc",
-]
-
-[[package]]
-name = "trt-rs-yolo"
-version = "0.1.0"
-dependencies = [
- "cudarc",
- "kornia-image",
- "kornia-imgproc",
- "thiserror 2.0.18",
- "trt-rs",
-]
-
-[[package]]
 name = "try-lock"
 version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3053,6 +2979,80 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
+
+[[package]]
+name = "vision-rt"
+version = "0.1.0"
+dependencies = [
+ "cudarc",
+ "half",
+ "log",
+ "thiserror 2.0.18",
+ "vrt-sys",
+]
+
+[[package]]
+name = "vrt-gst"
+version = "0.1.0"
+dependencies = [
+ "cudarc",
+ "gstreamer",
+ "gstreamer-app",
+ "nvbuf-sys",
+ "thiserror 2.0.18",
+ "vision-rt",
+ "vrt-preproc",
+]
+
+[[package]]
+name = "vrt-hub"
+version = "0.1.0"
+dependencies = [
+ "cudarc",
+ "hf-hub",
+ "sha2",
+ "thiserror 2.0.18",
+ "vision-rt",
+]
+
+[[package]]
+name = "vrt-preproc"
+version = "0.1.0"
+dependencies = [
+ "cc",
+ "cudarc",
+ "thiserror 2.0.18",
+ "vision-rt",
+]
+
+[[package]]
+name = "vrt-sys"
+version = "0.1.0"
+dependencies = [
+ "bindgen",
+ "cc",
+]
+
+[[package]]
+name = "vrt-xfeat"
+version = "0.1.0"
+dependencies = [
+ "cudarc",
+ "thiserror 2.0.18",
+ "vision-rt",
+ "vrt-preproc",
+]
+
+[[package]]
+name = "vrt-yolo"
+version = "0.1.0"
+dependencies = [
+ "cudarc",
+ "kornia-image",
+ "kornia-imgproc",
+ "thiserror 2.0.18",
+ "vision-rt",
+]
 
 [[package]]
 name = "want"

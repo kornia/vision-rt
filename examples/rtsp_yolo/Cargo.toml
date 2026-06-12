@@ -5,7 +5,7 @@ edition.workspace = true
 publish = false
 
 [dependencies]
-trt-rs      = { path = "../../crates/trt" }
-trt-rs-yolo = { path = "../../crates/trt-yolo" }
-trt-rs-gst  = { path = "../../crates/trt-gst" }
+vision-rt   = { path = "../../crates/vrt" }
+vrt-yolo    = { path = "../../crates/vrt-yolo" }
+vrt-gst     = { path = "../../crates/vrt-gst" }
 env_logger  = "0.11"

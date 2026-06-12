@@ -15,7 +15,7 @@ sudo nvpmodel -m 2 && sudo jetson_clocks   # if not
 Numbers taken in the default 15W mode are ~3× slower and **not comparable**
 to MAXN numbers. Never mix them in a before/after claim.
 
-## Reading PipelineTiming (crates/trt/src/pipeline.rs)
+## Reading PipelineTiming (crates/vrt/src/pipeline.rs)
 
 | Field | Meaning | Use for |
 |-------|---------|---------|

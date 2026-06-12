@@ -1,11 +1,11 @@
 ---
 name: nvmm-gstreamer-debug
-description: Use when modifying or debugging the GStreamer pipeline in trt-gst — RTSP connection failures, caps negotiation errors, NVMM/DMA-BUF import failures, VIC resize, tee branches, or frames not arriving.
+description: Use when modifying or debugging the GStreamer pipeline in vrt-gst — RTSP connection failures, caps negotiation errors, NVMM/DMA-BUF import failures, VIC resize, tee branches, or frames not arriving.
 ---
 
-# NVMM GStreamer Pipeline Debugging (trt-gst)
+# NVMM GStreamer Pipeline Debugging (vrt-gst)
 
-## Pipeline anatomy (crates/trt-gst/src/lib.rs)
+## Pipeline anatomy (crates/vrt-gst/src/lib.rs)
 
 ```
 rtspsrc → rtph264depay → h264parse → nvv4l2decoder → nvvidconv → caps → tee

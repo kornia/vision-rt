@@ -9,9 +9,9 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # Hosted x86 runner: no TensorRT/CUDA — trt-rs-sys runs in stub mode
+  # Hosted x86 runner: no TensorRT/CUDA — vrt-sys runs in stub mode
   # (TRT_STUB=1 uses committed pregenerated bindings, compiles/links nothing
-  # native).  Jetson-only crates (trt-rs-gst, nvbuf-sys) are excluded.
+  # native).  Jetson-only crates (vrt-gst, nvbuf-sys) are excluded.
   check:
     runs-on: ubuntu-latest
     env:
@@ -25,13 +25,13 @@ jobs:
       - name: cargo check (stub)
         run: >
           cargo check
-          -p trt-rs-sys -p trt-rs -p trt-rs-preproc
-          -p trt-rs-xfeat -p trt-rs-yolo -p trt-rs-hub
+          -p vrt-sys -p vision-rt -p vrt-preproc
+          -p vrt-xfeat -p vrt-yolo -p vrt-hub
       - name: cargo clippy (stub)
         run: >
           cargo clippy
-          -p trt-rs-sys -p trt-rs -p trt-rs-preproc
-          -p trt-rs-xfeat -p trt-rs-yolo -p trt-rs-hub
+          -p vrt-sys -p vision-rt -p vrt-preproc
+          -p vrt-xfeat -p vrt-yolo -p vrt-hub
           -- -D warnings
 
   # Self-hosted Jetson runner: real TensorRT + CUDA + GStreamer.
@@ -45,6 +45,6 @@ jobs:
       - name: Build workspace (release)
         run: cargo build --release
       - name: CPU unit tests
-        run: cargo test -p trt-rs-yolo -p trt-rs-hub
+        run: cargo test -p vrt-yolo -p vrt-hub
       - name: GPU tests (kernels vs CPU reference)
-        run: cargo test -p trt-rs-xfeat --release -- --ignored
+        run: cargo test -p vrt-xfeat --release -- --ignored

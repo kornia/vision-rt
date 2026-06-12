@@ -1,4 +1,4 @@
-# trt-rs
+# vision-rt
 
 Rust TensorRT bindings and real-time neural-vision pipelines for NVIDIA
 Jetson — composable operators (in the spirit of NVIDIA VPI, oriented around
@@ -12,16 +12,16 @@ CUDA 12.6.
 
 | Crate (crates.io name) | Path | Role |
 |---|---|---|
-| `trt-rs-sys` | `crates/trt-sys` | Raw FFI: pure-C shim over TensorRT C++, bindgen, optional in-process engine builder (`builder` feature, links nvonnxparser) |
-| `trt-rs` | `crates/trt` | Safe wrapper: Logger→Runtime→Engine→Session, typed `Pipeline`/`Stage`, `TensorView`, CUDA-event timing, `cuda::Kernels` nvrtc helper |
-| `trt-rs-preproc` | `crates/trt-preproc` | GPU letterbox RGBA→CHW (hardware bilinear via texture objects) |
-| `trt-rs-xfeat` | `crates/trt-xfeat` | XFeat keypoints: TRT backbone + GPU NMS / top-K compaction / descriptor sampling / mutual-NN matching |
-| `trt-rs-yolo` | `crates/trt-yolo` | YOLO11/v8: CPU letterbox, decode, NMS |
-| `trt-rs-gst` | `crates/trt-gst` | GStreamer RTSP source: NVMM DMA-BUF → CUDA zero-copy, VIC hardware resize (Jetson-only, not published) |
+| `vrt-sys` | `crates/vrt-sys` | Raw FFI: pure-C shim over TensorRT C++, bindgen, optional in-process engine builder (`builder` feature, links nvonnxparser) |
+| `vision-rt` | `crates/vrt` | Safe wrapper: Logger→Runtime→Engine→Session, typed `Pipeline`/`Stage`, `TensorView`, CUDA-event timing, `cuda::Kernels` nvrtc helper |
+| `vrt-preproc` | `crates/vrt-preproc` | GPU letterbox RGBA→CHW (hardware bilinear via texture objects) |
+| `vrt-xfeat` | `crates/vrt-xfeat` | XFeat keypoints: TRT backbone + GPU NMS / top-K compaction / descriptor sampling / mutual-NN matching |
+| `vrt-yolo` | `crates/vrt-yolo` | YOLO11/v8: CPU letterbox, decode, NMS |
+| `vrt-gst` | `crates/vrt-gst` | GStreamer RTSP source: NVMM DMA-BUF → CUDA zero-copy, VIC hardware resize (Jetson-only, not published) |
 | `nvbuf-sys` | `crates/nvbuf-sys` | NvBufSurface helpers (Jetson-only, not published) |
-| `trt-rs-hub` | `crates/trt-hub` | Model weights (HF Hub, sha256-pinned) + on-device engine cache |
+| `vrt-hub` | `crates/vrt-hub` | Model weights (HF Hub, sha256-pinned) + on-device engine cache |
 
-In Rust code the crates keep short names: `use trt::…`, `use trt_xfeat::…`.
+In Rust code the crates keep short names: `use vrt::…`, `use vrt_xfeat::…`.
 
 ## Execution model
 
@@ -37,9 +37,9 @@ GPU time is measured with CUDA events (`PipelineTiming.gpu_ms`).
 ## Models & engines
 
 - **ONNX is the portable artifact** — distributed via Hugging Face Hub with
-  sha256 pins (`trt-rs-hub`), never committed to this repo.
+  sha256 pins (`vrt-hub`), never committed to this repo.
 - **Engines are machine-locked** (TRT version + GPU arch) and built
-  **on-device** into `~/.cache/trt-rs/engines/<name>-<onnx_sha8>-trt<ver>-sm<cc>.engine`
+  **on-device** into `~/.cache/vision-rt/engines/<name>-<onnx_sha8>-trt<ver>-sm<cc>.engine`
   — first run builds (~minutes, once), every run after is a cache hit.
 
 ## Examples (live RTSP cameras)
@@ -60,8 +60,8 @@ On Jetson everything builds out of the box (TRT headers via JetPack):
 
 ```bash
 cargo build --release
-cargo test -p trt-rs-yolo -p trt-rs-hub          # CPU-only unit tests
-cargo test -p trt-rs-xfeat --release -- --ignored # GPU kernel tests (on-device)
+cargo test -p vrt-yolo -p vrt-hub          # CPU-only unit tests
+cargo test -p vrt-xfeat --release -- --ignored # GPU kernel tests (on-device)
 ```
 
 Off-Jetson (no TensorRT): `TRT_STUB=1 cargo check` / `clippy` work using a

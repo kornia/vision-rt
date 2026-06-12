@@ -1,11 +1,11 @@
 ---
 name: writing-pipeline-stages
-description: Use when adding, modifying, or debugging a Stage in the trt-rs pipeline (preprocess, inference, postprocess stages) — covers the two-phase enqueue/finalize contract, stream sharing, and Send safety for device pointers.
+description: Use when adding, modifying, or debugging a Stage in the vision-rt pipeline (preprocess, inference, postprocess stages) — covers the two-phase enqueue/finalize contract, stream sharing, and Send safety for device pointers.
 ---
 
 # Writing Pipeline Stages
 
-## The two-phase contract (crates/trt/src/pipeline.rs)
+## The two-phase contract (crates/vrt/src/pipeline.rs)
 
 Every `Stage` runs in two phases, separated by ONE `cudaStreamSynchronize` issued by the `Pipeline` — never by the stage itself:
 
@@ -39,8 +39,8 @@ requires CPU data mid-stage (document why if so — see `XFeatInferStage` legacy
 
 ## Separation of concerns
 
-- Platform adapters (NVMM → TRTensor) live in `trt-gst` (e.g. `NvmmPreprocessStage`).
-- Models (TRTensor → result) live in their own crate (`trt-xfeat`, `trt-yolo`)
+- Platform adapters (NVMM → TRTensor) live in `vrt-gst` (e.g. `NvmmPreprocessStage`).
+- Models (TRTensor → result) live in their own crate (`vrt-xfeat`, `vrt-yolo`)
   and present as ONE stage even if internally backbone + postproc.
 - Drop ordering matters with NVMM: release GPU texture objects in `finalize`
   BEFORE dropping the `CudaMemory` import (see `NvmmPreprocessStage` doc comment).

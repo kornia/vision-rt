@@ -12,15 +12,15 @@
 //! Usage:
 //!   cargo run --example rtsp_yolo -- <engine_path> <rtsp_url>
 
-use trt::{Engine, Logger, Runtime, Stream, Pipeline};
-use trt::logger::Severity;
-use trt_yolo::{YoloInferStage, LetterboxInfo};
-use trt_gst::{RtspSource, NvmmPreprocessStage};
+use vrt::{Engine, Logger, Runtime, Stream, Pipeline};
+use vrt::logger::Severity;
+use vrt_yolo::{YoloInferStage, LetterboxInfo};
+use vrt_gst::{RtspSource, NvmmPreprocessStage};
 
 const MODEL_W: u32 = 640;
 const MODEL_H: u32 = 640;
 
-fn main() -> Result<(), trt::BoxError> {
+fn main() -> Result<(), vrt::BoxError> {
     env_logger::init();
 
     let args: Vec<String> = std::env::args().collect();

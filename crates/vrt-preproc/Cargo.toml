@@ -1,0 +1,18 @@
+[package]
+name = "vrt-preproc"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+description = "Zero-copy GPU preprocessing for TensorRT — bilinear letterbox + RGBA→CHW via cudarc nvrtc"
+
+[lib]
+name = "vrt_preproc"
+
+[build-dependencies]
+cc = "1"
+
+[dependencies]
+cudarc    = { version = "0.17", features = ["cuda-12060", "nvrtc"] }
+vision-rt = { path = "../vrt" }
+thiserror = "2.0"

@@ -14,10 +14,10 @@
 //!       models/xfeat/xfeat_backbone_fp16.engine rtsp://camera/stream [--save-dir /tmp]
 
 use std::sync::Arc;
-use trt::{Engine, Logger, Runtime, Stream, Pipeline};
-use trt::logger::Severity;
-use trt_xfeat::{XFeat, XFeatParams};
-use trt_gst::{RtspSource, NvmmPreprocessStage};
+use vrt::{Engine, Logger, Runtime, Stream, Pipeline};
+use vrt::logger::Severity;
+use vrt_xfeat::{XFeat, XFeatParams};
+use vrt_gst::{RtspSource, NvmmPreprocessStage};
 use image::{ImageBuffer, Rgba};
 
 fn pad32(v: u32) -> u32 { ((v + 31) / 32) * 32 }
@@ -71,13 +71,13 @@ fn save_kpts(
 
 // ── Main ──────────────────────────────────────────────────────────────────────
 
-fn main() -> Result<(), trt::BoxError> {
+fn main() -> Result<(), vrt::BoxError> {
     env_logger::init();
 
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 3 {
         eprintln!("Usage: rtsp_xfeat <model.onnx|model.engine> <rtsp_url> [save_dir]");
-        eprintln!("  .onnx   — built on-device into ~/.cache/trt-rs/engines (one-time)");
+        eprintln!("  .onnx   — built on-device into ~/.cache/vision-rt/engines (one-time)");
         eprintln!("  .engine — used directly (must match this machine's TRT + GPU)");
         std::process::exit(1);
     }
@@ -86,7 +86,7 @@ fn main() -> Result<(), trt::BoxError> {
 
     // .onnx → versioned engine cache (build on first run); .engine → as-is.
     let engine_path = if model_path.ends_with(".onnx") {
-        let profile = trt_hub::EngineProfile {
+        let profile = vrt_hub::EngineProfile {
             input: Some((
                 "image".into(),
                 vec![1, 3, 240, 320],
@@ -96,7 +96,7 @@ fn main() -> Result<(), trt::BoxError> {
             fp16: true,
             workspace_mb: 2048,
         };
-        trt_hub::EngineCache::default()
+        vrt_hub::EngineCache::default()
             .get_or_build("xfeat-backbone", std::path::Path::new(model_path), &profile)?
             .to_string_lossy()
             .into_owned()

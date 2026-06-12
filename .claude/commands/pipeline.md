@@ -1,8 +1,8 @@
 # pipeline
 
-Reference for the trt-rs pipeline architecture.
+Reference for the vision-rt pipeline architecture.
 
-## Stage trait (crates/trt/src/pipeline.rs)
+## Stage trait (crates/vrt/src/pipeline.rs)
 
 ```
 enqueue(&input)  — queue all GPU work on the shared stream (non-blocking)

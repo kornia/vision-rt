@@ -55,7 +55,7 @@ max `1x3x1088x1920`. Inputs must be multiples of 32 (use `pad32`).
 
 Shows I/O tensor names, dtypes, and profile shapes — check this FIRST when
 inference fails with "unknown tensor" or shape errors. (Programmatic access:
-`Engine` exposes the same via the named-tensor API in `crates/trt`.)
+`Engine` exposes the same via the named-tensor API in `crates/vrt`.)
 
 ## Performance expectations (MAXN_SUPER)
 
