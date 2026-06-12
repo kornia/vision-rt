@@ -20,7 +20,7 @@ use trt_gst::{RtspSource, NvmmPreprocessStage};
 const MODEL_W: u32 = 640;
 const MODEL_H: u32 = 640;
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<(), trt::BoxError> {
     env_logger::init();
 
     let args: Vec<String> = std::env::args().collect();
@@ -43,7 +43,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let lb_info = LetterboxInfo::from_dims(src_w, src_h, MODEL_W, MODEL_H);
     let preproc = NvmmPreprocessStage::new(stream.clone(), src_w, src_h, MODEL_W, MODEL_H)?;
     let infer   = YoloInferStage::new(engine, stream.clone(), lb_info, 0.25, 0.45)
-        .map_err(std::io::Error::other)?;
+        ?;
 
     let mut pipeline = Pipeline::new(stream, source)
         .pipe(preproc)

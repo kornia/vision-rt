@@ -13,38 +13,39 @@ Two distinct FFI layers exist — don't mix them:
    Has its own minimal `btrt_cuda_*` helpers so `trt` core stays cudarc-free.
    New CUDA code goes through cudarc, NOT new shim functions.
 
-## Kernel authoring convention (see trt-preproc, trt-xfeat/postprocess.rs)
+## Kernel authoring convention — use `trt::cuda::Kernels`
 
-Kernels are CUDA C strings JIT-compiled at construction time with nvrtc:
+Kernels are CUDA C strings JIT-compiled at construction time. The repo helper
+handles arch detection (no hardcoded sm_87), compile options, and grid math:
 
 ```rust
-use cudarc::nvrtc::{compile_ptx_with_opts, CompileOptions};
-use cudarc::driver::{LaunchConfig, PushKernelArg};   // PushKernelArg gives .arg()
+use cudarc::driver::PushKernelArg;            // gives .arg()
+use trt::cuda::{Kernels, cfg_2d, cfg_per_item};
 
 const KERNELS_SRC: &str = r#"
 extern "C" __global__ void my_kernel(const float* __restrict__ in, ...) { ... }
 "#;
 
-// In the constructor (~10ms once; CUDA caches PTX):
-let opts   = CompileOptions { arch: Some("sm_87"), ..Default::default() };
-let ptx    = compile_ptx_with_opts(KERNELS_SRC, opts).map_err(|e| format!("nvrtc: {e:?}"))?;
-let module = stream.context().load_module(ptx)?;
-let func   = module.load_function("my_kernel")?;
+// In the constructor (~10ms once; CUDA caches PTX; arch auto-detected):
+let kernels = Kernels::compile(stream.clone(), KERNELS_SRC)?;
+let func    = kernels.function("my_kernel")?;
 
 // Per-frame launch (async on the shared stream):
 unsafe {
     stream.launch_builder(&func)
         .arg(&in_slice)      // CudaSlice<T> or &raw scalar
         .arg(&w).arg(&h)
-        .launch(LaunchConfig { grid_dim, block_dim, shared_mem_bytes: 0 })?;
+        .launch(cfg_2d(w, h))?;   // (32,8) block, ceil-div grid
 }
 ```
 
+- `cfg_2d(w, h)` for image kernels, `cfg_1d(n, block)` for flat arrays,
+  `cfg_per_item(items, threads)` for one-block-per-item (e.g. per keypoint).
 - `extern "C"` on every kernel — nvrtc mangles names otherwise.
 - `__restrict__` + `__ldg()` for read-only inputs (helps Orin's L1/tex path).
 - Compile ONCE in the constructor, never per-frame.
-- Raw device pointers from TRT cross into kernels as `CUdeviceptr`
-  (`cudarc::driver::sys::CUdeviceptr`) — cast `*const f32 as CUdeviceptr`.
+- Raw device pointers from TRT arrive as typed `trt::TensorView`s — use
+  `.f32_ptr()?` (dtype-checked); cast to `CUdeviceptr` only at the launch site.
 
 ## Memory / stream rules
 

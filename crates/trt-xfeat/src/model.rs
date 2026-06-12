@@ -1,6 +1,6 @@
 //! `XFeat` — complete pipeline: GPU preprocessing + TRT backbone + GPU post-processing.
 
-use std::error::Error;
+
 use std::sync::Arc;
 use cudarc::driver::CudaSlice;
 use trt::{Engine, Runtime, Session, CudaStream, Stage, BoxError, TRTensor, TRTensorMap};
@@ -57,7 +57,7 @@ impl XFeatBuilder {
     }
 
     /// Load the engine and create a session with all pipeline stages wired to its stream.
-    pub fn build(self) -> Result<XFeat, Box<dyn Error>> {
+    pub fn build(self) -> Result<XFeat, BoxError> {
         let engine  = Engine::from_file(Arc::clone(&self.runtime), &self.engine_path)?;
         let session = Session::new(Arc::clone(&engine))?;
         let stream  = session.stream().cuda_stream().clone();
@@ -99,8 +99,7 @@ impl XFeatInferStage {
         threshold:   f32,
     ) -> Result<Self, BoxError> {
         let session  = Session::with_stream(Arc::clone(&engine), Arc::clone(&cuda_stream))?;
-        let postproc = XFeatPostproc::new(cuda_stream, top_k, threshold)
-            .map_err(|e| e.to_string())?;
+        let postproc = XFeatPostproc::new(cuda_stream, top_k, threshold)?;
         Ok(Self { session, postproc, result: None })
     }
 
@@ -132,8 +131,7 @@ impl Stage for XFeatInferStage {
 
         let h = input.shape[2];
         let w = input.shape[3];
-        self.result = Some(self.postproc.process(desc_ptr, heat_ptr, rel_ptr, h, w)
-            .map_err(|e| e.to_string())?);
+        self.result = Some(self.postproc.process(desc_ptr, heat_ptr, rel_ptr, h, w)?);
         Ok(())
     }
 
@@ -183,8 +181,7 @@ impl XFeatPostprocStage {
         h:         usize,
         w:         usize,
     ) -> Result<Self, BoxError> {
-        let postproc = XFeatPostproc::new(stream.clone(), top_k, threshold)
-            .map_err(|e| e.to_string())?;
+        let postproc = XFeatPostproc::new(stream.clone(), top_k, threshold)?;
         let score_dev: CudaSlice<f32> = unsafe { stream.alloc(h * w)? };
         Ok(Self { postproc, score_dev, h, w, desc_ptr: None, result: None })
     }
@@ -199,8 +196,7 @@ impl Stage for XFeatPostprocStage {
         let heat_ptr = input.f32("heatmap")?;
         let rel_ptr  = input.f32("reliability")?;
 
-        self.postproc.launch_score_nms(heat_ptr, rel_ptr, &self.score_dev, self.h, self.w)
-            .map_err(|e| e.to_string())?;
+        self.postproc.launch_score_nms(heat_ptr, rel_ptr, &self.score_dev, self.h, self.w)?;
 
         self.desc_ptr = Some(desc_ptr);
         Ok(())
@@ -210,7 +206,7 @@ impl Stage for XFeatPostprocStage {
         let desc_ptr = self.desc_ptr.take().ok_or("finalize called before enqueue")?;
         self.result = Some(
             self.postproc.process_topk_sample(desc_ptr, &self.score_dev, self.h, self.w)
-                .map_err(|e| e.to_string())?
+                ?
         );
         Ok(())
     }
@@ -257,7 +253,7 @@ impl XFeat {
         runtime:     Arc<Runtime>,
         engine_path: impl Into<String>,
         params:      XFeatParams,
-    ) -> Result<Self, Box<dyn Error>> {
+    ) -> Result<Self, BoxError> {
         XFeatBuilder::new(runtime, engine_path, params).build()
     }
 
@@ -274,8 +270,7 @@ impl XFeat {
     ) -> Result<Self, BoxError> {
         let session   = Session::with_stream(Arc::clone(&engine), Arc::clone(&stream))?;
         let (h, w)    = (params.h, params.w);
-        let postproc  = XFeatPostproc::new(stream.clone(), params.top_k, params.threshold)
-            .map_err(|e| e.to_string())?;
+        let postproc  = XFeatPostproc::new(stream.clone(), params.top_k, params.threshold)?;
         let score_dev: CudaSlice<f32> = unsafe { stream.alloc(h * w)? };
 
         Ok(XFeat { session, postproc, score_dev, h, w, desc_ptr: None, result: None })
@@ -291,7 +286,7 @@ impl XFeat {
     ///
     /// Runs backbone + sync + postproc in one call.  The tensor must already be on
     /// device (shape `[1, 3, H, W]`, values in `[0, 1]`).
-    pub fn extract(&mut self, input: &TRTensor) -> Result<XFeatResult, Box<dyn Error>> {
+    pub fn extract(&mut self, input: &TRTensor) -> Result<XFeatResult, BoxError> {
         let shape   = input.shape_i64();
         let dev_ptr = input.as_mut_ptr();
 
@@ -332,8 +327,7 @@ impl trt::Stage for XFeat {
         let heat_ptr = views.get("heatmap").ok_or("no 'heatmap' output")?.f32_ptr()?;
         let rel_ptr  = views.get("reliability").ok_or("no 'reliability' output")?.f32_ptr()?;
 
-        self.postproc.launch_score_nms(heat_ptr, rel_ptr, &self.score_dev, self.h, self.w)
-            .map_err(|e| e.to_string())?;
+        self.postproc.launch_score_nms(heat_ptr, rel_ptr, &self.score_dev, self.h, self.w)?;
 
         self.desc_ptr = Some(desc_ptr);
         Ok(())
@@ -343,7 +337,7 @@ impl trt::Stage for XFeat {
         let desc_ptr = self.desc_ptr.take().ok_or("XFeat: finalize called before enqueue")?;
         self.result  = Some(
             self.postproc.process_topk_sample(desc_ptr, &self.score_dev, self.h, self.w)
-                .map_err(|e| e.to_string())?
+                ?
         );
         Ok(())
     }

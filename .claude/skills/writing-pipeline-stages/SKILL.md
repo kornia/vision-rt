@@ -28,8 +28,10 @@ requires CPU data mid-stage (document why if so — see `XFeatInferStage` legacy
 - **Raw device pointers in struct fields need `unsafe impl Send`** with a
   safety comment: stream ordering enforces exclusive access. See `XFeat` and
   `XFeatPostprocStage` for the pattern.
-- **Errors**: return `BoxError` (`Box<dyn Error + Send + Sync>`). Convert
-  non-Send errors with `.map_err(|e| e.to_string())?`.
+- **Errors**: every library API returns `BoxError` (`Box<dyn Error + Send +
+  Sync>`); `trt::TrtError`, cudarc `DriverError`, and `String` all convert
+  via plain `?`.  Never introduce non-Send `Box<dyn Error>` returns — the
+  whole workspace was unified off them (audit 2026-06-12).
 - **Chaining is type-checked**: `pipeline.pipe(stage)` requires
   `stage::Input == previous::Output`. If types don't line up, fix the stage
   types, don't add adapter copies.

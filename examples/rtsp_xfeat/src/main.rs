@@ -71,7 +71,7 @@ fn save_kpts(
 
 // ── Main ──────────────────────────────────────────────────────────────────────
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<(), trt::BoxError> {
     env_logger::init();
 
     let args: Vec<String> = std::env::args().collect();
@@ -105,7 +105,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Arc::clone(&engine),
         stream.clone(),
         XFeatParams::new(4096, 0.05, dst_h as usize, dst_w as usize),
-    ).map_err(std::io::Error::other)?;
+    )?;
 
     let mut pipeline = Pipeline::new(stream, source)
         .pipe(preproc)

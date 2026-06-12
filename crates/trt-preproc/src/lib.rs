@@ -1,6 +1,6 @@
 //! Zero-copy GPU preprocessing: bilinear letterbox + RGBA→CHW normalize.
 //!
-//! Uses cudarc nvrtc to JIT-compile a CUDA kernel compiled for sm_87, plus a
+//! Uses trt::cuda::Kernels to JIT-compile the kernel for the current device, plus a
 //! C helper that creates `cudaTextureObject_t` over pitch-2D RGBA device memory
 //! so the kernel uses the TMU's hardware bilinear sampler.
 //!
@@ -12,10 +12,11 @@
 
 use std::sync::Arc;
 use std::ffi::c_void;
-use cudarc::driver::{CudaSlice, CudaStream, DevicePtr, LaunchConfig, PushKernelArg};
+use cudarc::driver::{CudaSlice, CudaStream, DevicePtr, PushKernelArg};
 use cudarc::driver::sys::CUdeviceptr;
-use cudarc::nvrtc::{compile_ptx_with_opts, CompileOptions};
+
 use trt::{Stage, BoxError, TRTensor, DType};
+use trt::cuda::{Kernels, cfg_2d};
 
 // ── C helpers (preproc_helpers.cpp) ─────────────────────────────────────────
 
@@ -129,16 +130,9 @@ impl Preprocessor {
         stream: Arc<CudaStream>,
         src_w: u32, src_h: u32,
         dst_w: u32, dst_h: u32,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
-        let opts = CompileOptions {
-            arch: Some("sm_87"),
-            include_paths: vec!["/usr/local/cuda/include".into()],
-            ..Default::default()
-        };
-        let ptx = compile_ptx_with_opts(KERNEL_SRC, opts)
-            .map_err(|e| format!("nvrtc compile: {e:?}"))?;
-        let module = stream.context().load_module(ptx)?;
-        let func = module.load_function("letterbox_rgba_to_chw")?;
+    ) -> Result<Self, BoxError> {
+        let kernels = Kernels::compile(stream.clone(), KERNEL_SRC)?;
+        let func    = kernels.function("letterbox_rgba_to_chw")?;
 
         let scale = f32::min(dst_w as f32 / src_w as f32, dst_h as f32 / src_h as f32);
         let pad_x = (dst_w as f32 - src_w as f32 * scale) * 0.5;
@@ -164,7 +158,7 @@ impl Preprocessor {
         rgba_host: &[u8],
         src_pitch: u32,
         dst_dev_ptr: *mut f32,
-    ) -> Result<TextureGuard, Box<dyn std::error::Error>> {
+    ) -> Result<TextureGuard, BoxError> {
         let src_dev = self.stream.memcpy_stod(rgba_host)?;
         let raw_ptr: u64 = {
             let (ptr, _guard) = src_dev.device_ptr(self.stream.as_ref());
@@ -197,7 +191,7 @@ impl Preprocessor {
         src_dev_ptr: *mut c_void,
         src_pitch: u32,
         dst_dev_ptr: *mut f32,
-    ) -> Result<TextureGuard, Box<dyn std::error::Error>> {
+    ) -> Result<TextureGuard, BoxError> {
         let mut tex: u64 = 0;
         let rc = unsafe {
             preproc_create_tex2d(
@@ -218,16 +212,10 @@ impl Preprocessor {
         &self,
         src_tex: u64,
         dst_dev_ptr: *mut f32,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), BoxError> {
         let dst_raw: CUdeviceptr = dst_dev_ptr as usize as CUdeviceptr;
 
-        let bx: u32 = 32;
-        let by: u32 = 8;
-        let cfg = LaunchConfig {
-            grid_dim:  ((self.dst_w + bx - 1) / bx, (self.dst_h + by - 1) / by, 1),
-            block_dim: (bx, by, 1),
-            shared_mem_bytes: 0,
-        };
+        let cfg = cfg_2d(self.dst_w as usize, self.dst_h as usize);
 
         let dst_w = self.dst_w as i32;
         let dst_h = self.dst_h as i32;
@@ -263,12 +251,12 @@ impl Stage for Preprocessor {
         // finalize (error path).  Drain the stream before dropping it —
         // the in-flight kernel may still read through the texture object.
         if self._pending.is_some() {
-            self.stream.synchronize().map_err(|e| e.to_string())?;
+            self.stream.synchronize()?;
             self._pending = None;
         }
         let dst = self.output.as_mut_ptr() as *mut f32;
         let tex = self.process_device_ptr_tex(frame.dev_ptr, frame.pitch, dst)
-            .map_err(|e| e.to_string())?;
+            ?;
         self._pending = Some(tex);
         Ok(())
     }

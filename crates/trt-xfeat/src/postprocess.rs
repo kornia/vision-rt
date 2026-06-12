@@ -14,9 +14,10 @@
 //! Both GPU kernels are JIT-compiled via cudarc nvrtc targeting sm_87 (Jetson Orin).
 
 use std::sync::Arc;
-use cudarc::driver::{CudaSlice, CudaStream, LaunchConfig, PushKernelArg};
+use cudarc::driver::{CudaSlice, CudaStream, PushKernelArg};
 use cudarc::driver::sys::CUdeviceptr;
-use cudarc::nvrtc::{compile_ptx_with_opts, CompileOptions};
+use trt::BoxError;
+use trt::cuda::{Kernels, cfg_2d, cfg_per_item};
 
 // ── Kernel source ─────────────────────────────────────────────────────────────
 
@@ -239,21 +240,14 @@ impl XFeatPostproc {
         stream:    Arc<CudaStream>,
         top_k:     usize,
         threshold: f32,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
-        let opts = CompileOptions {
-            arch:          Some("sm_87"),
-            include_paths: vec!["/usr/local/cuda/include".into()],
-            ..Default::default()
-        };
-        let ptx    = compile_ptx_with_opts(KERNELS_SRC, opts)
-            .map_err(|e| format!("nvrtc: {e:?}"))?;
-        let module = stream.context().load_module(ptx)?;
+    ) -> Result<Self, BoxError> {
+        let kernels = Kernels::compile(stream.clone(), KERNELS_SRC)?;
 
-        let fn_score_nms    = module.load_function("xfeat_score_nms")?;
-        let fn_sample_descs = module.load_function("xfeat_sample_descs")?;
-        let fn_l2_norm      = module.load_function("xfeat_l2_norm")?;
-        let fn_match_rows   = module.load_function("xfeat_match_rows")?;
-        let fn_match_cols   = module.load_function("xfeat_match_cols")?;
+        let fn_score_nms    = kernels.function("xfeat_score_nms")?;
+        let fn_sample_descs = kernels.function("xfeat_sample_descs")?;
+        let fn_l2_norm      = kernels.function("xfeat_l2_norm")?;
+        let fn_match_rows   = kernels.function("xfeat_match_rows")?;
+        let fn_match_cols   = kernels.function("xfeat_match_cols")?;
 
         Ok(Self { fn_score_nms, fn_sample_descs, fn_l2_norm, fn_match_rows, fn_match_cols,
                   stream, top_k, threshold })
@@ -269,19 +263,13 @@ impl XFeatPostproc {
         score_dev: &CudaSlice<f32>,
         h:         usize,
         w:         usize,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), BoxError> {
         use cudarc::driver::DevicePtr;
         let heat_raw:  CUdeviceptr = heat_ptr  as usize as CUdeviceptr;
         let rel_raw:   CUdeviceptr = rel_ptr   as usize as CUdeviceptr;
         let score_raw: CUdeviceptr = score_dev.device_ptr(self.stream.as_ref()).0;
 
-        let bx: u32 = 32;
-        let by: u32 = 8;
-        let cfg = LaunchConfig {
-            grid_dim:  (((w as u32) + bx - 1) / bx, ((h as u32) + by - 1) / by, 1),
-            block_dim: (bx, by, 1),
-            shared_mem_bytes: 0,
-        };
+        let cfg = cfg_2d(w, h);
         let h_i = h as i32;
         let w_i = w as i32;
         let thr = self.threshold;
@@ -305,7 +293,7 @@ impl XFeatPostproc {
         score_dev: &CudaSlice<f32>,
         h:         usize,
         w:         usize,
-    ) -> Result<XFeatResult, Box<dyn std::error::Error>> {
+    ) -> Result<XFeatResult, BoxError> {
         use cudarc::driver::DevicePtr;
         let hd = h / 8;
         let wd = w / 8;
@@ -350,8 +338,8 @@ impl XFeatPostproc {
 
         let hd_i = hd as i32;  let wd_i = wd as i32;
         let h_i  = h  as i32;  let w_i  = w  as i32;
-        let k_u32 = k as u32;  let k_i  = k  as i32;
-        let cfg64 = LaunchConfig { grid_dim: (k_u32, 1, 1), block_dim: (64, 1, 1), shared_mem_bytes: 0 };
+        let k_i  = k as i32;
+        let cfg64 = cfg_per_item(k, 64);
 
         unsafe {
             self.stream.launch_builder(&self.fn_sample_descs)
@@ -383,7 +371,7 @@ impl XFeatPostproc {
         rel_ptr:  *const f32,
         h: usize,
         w: usize,
-    ) -> Result<XFeatResult, Box<dyn std::error::Error>> {
+    ) -> Result<XFeatResult, BoxError> {
         let hd       = h / 8;
         let wd       = w / 8;
         let n_pixels = h * w;
@@ -391,13 +379,7 @@ impl XFeatPostproc {
         // ── GPU: NMS score map ────────────────────────────────────────────────
         let score_dev: CudaSlice<f32> = unsafe { self.stream.alloc(n_pixels)? };
 
-        let bx: u32 = 32;
-        let by: u32 = 8;
-        let cfg_nms = LaunchConfig {
-            grid_dim:  (((w as u32) + bx - 1) / bx, ((h as u32) + by - 1) / by, 1),
-            block_dim: (bx, by, 1),
-            shared_mem_bytes: 0,
-        };
+        let cfg_nms = cfg_2d(w, h);
 
         let heat_raw:  CUdeviceptr = heat_ptr as usize as CUdeviceptr;
         let rel_raw:   CUdeviceptr = rel_ptr  as usize as CUdeviceptr;
@@ -458,10 +440,10 @@ impl XFeatPostproc {
 
         let hd_i  = hd as i32;
         let wd_i  = wd as i32;
-        let k_u32 = k as u32;
+
         let k_i   = k as i32;
 
-        let cfg64 = LaunchConfig { grid_dim: (k_u32, 1, 1), block_dim: (64, 1, 1), shared_mem_bytes: 0 };
+        let cfg64 = cfg_per_item(k, 64);
 
         unsafe {
             self.stream.launch_builder(&self.fn_sample_descs)
@@ -494,7 +476,7 @@ impl XFeatPostproc {
         res0:       &XFeatResult,
         res1:       &XFeatResult,
         min_cossim: f32,
-    ) -> Result<Vec<(usize, usize)>, Box<dyn std::error::Error>> {
+    ) -> Result<Vec<(usize, usize)>, BoxError> {
         let n0 = res0.scores.len();
         let n1 = res1.scores.len();
         if n0 == 0 || n1 == 0 { return Ok(Vec::new()); }
@@ -512,7 +494,7 @@ impl XFeatPostproc {
         let m21_raw: CUdeviceptr = { use cudarc::driver::DevicePtr; match21_dev.device_ptr(self.stream.as_ref()).0 };
         let s12_raw: CUdeviceptr = { use cudarc::driver::DevicePtr; sim12_dev.device_ptr(self.stream.as_ref()).0 };
 
-        let cfg_rows = LaunchConfig { grid_dim: (n0 as u32, 1, 1), block_dim: (64, 1, 1), shared_mem_bytes: 0 };
+        let cfg_rows = cfg_per_item(n0, 64);
         unsafe {
             self.stream.launch_builder(&self.fn_match_rows)
                 .arg(&d0_raw).arg(&d1_raw)
@@ -521,7 +503,7 @@ impl XFeatPostproc {
                 .launch(cfg_rows)?;
         }
 
-        let cfg_cols = LaunchConfig { grid_dim: (n1 as u32, 1, 1), block_dim: (64, 1, 1), shared_mem_bytes: 0 };
+        let cfg_cols = cfg_per_item(n1, 64);
         unsafe {
             self.stream.launch_builder(&self.fn_match_cols)
                 .arg(&d0_raw).arg(&d1_raw)

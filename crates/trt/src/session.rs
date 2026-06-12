@@ -20,15 +20,17 @@ pub struct OutputTensor {
 }
 
 impl OutputTensor {
-    /// Interpret as f32 slice (panics if dtype != Float32).
+    /// Interpret as f32 slice (panics if dtype != Float32 or data is misaligned).
     pub fn as_f32(&self) -> &[f32] {
         assert_eq!(self.dtype, DataType::Float32, "tensor is not f32");
-        unsafe {
-            std::slice::from_raw_parts(
-                self.data.as_ptr() as *const f32,
-                self.data.len() / 4,
-            )
-        }
+        let ptr = self.data.as_ptr();
+        // from_raw_parts requires f32 alignment; Vec<u8> only guarantees 1.
+        // The global allocator aligns these sizes in practice — verify anyway.
+        assert!(
+            ptr as usize % std::mem::align_of::<f32>() == 0,
+            "output buffer misaligned for f32 view"
+        );
+        unsafe { std::slice::from_raw_parts(ptr as *const f32, self.data.len() / 4) }
     }
 
     /// Convert FP16 output data to f32.
@@ -136,48 +138,33 @@ impl Session {
     /// stream instead of creating a private one.  The caller is responsible
     /// for syncing the stream (the [`Pipeline`](crate::Pipeline) does this).
     pub fn with_stream(engine: Arc<Engine>, cuda_stream: Arc<CudaStream>) -> Result<Self> {
-        let ctx = unsafe { btrt_context_create(engine.as_ptr()) };
-        if ctx.is_null() {
-            return Err(TrtError::Create("ExecutionContext"));
-        }
-
-        let stream = Stream::from_cuda_stream(cuda_stream);
-
-        let mut inputs = HashMap::new();
-        let mut outputs = HashMap::new();
-        for spec in engine.specs() {
-            let n_elems: i64 = spec.dims.iter()
-                .filter(|&&d| d > 0)
-                .product::<i64>()
-                .max(1);
-            let bytes_per_elem = dtype_bytes(spec.dtype);
-            let buf = DeviceBuffer::alloc_with_stream(
-                stream.cuda_stream(),
-                n_elems as usize * bytes_per_elem,
-            )?;
-            let state = TensorState { buf, shape: spec.dims.clone(), dtype: spec.dtype };
-            if spec.mode == TensorMode::Input {
-                inputs.insert(spec.name.clone(), state);
-            } else {
-                outputs.insert(spec.name.clone(), state);
-            }
-        }
-
-        Ok(Self { ctx, _engine: engine, stream, inputs, outputs,
-                  _not_sync: std::marker::PhantomData })
+        Self::init(engine, Stream::from_cuda_stream(cuda_stream))
     }
 
-    /// Create a new inference session for the given engine.
+    /// Create a new inference session for the given engine (private stream).
     pub fn new(engine: Arc<Engine>) -> Result<Self> {
         // Retain the primary CUDA context (same context TRT uses internally).
         let cuda_ctx = CudaContext::new(0)
             .map_err(|e| TrtError::Cuda { code: e.0 as i32, msg: "CudaContext" })?;
         let stream = Stream::new(&cuda_ctx)?;
+        Self::init(engine, stream)
+    }
+
+    fn init(engine: Arc<Engine>, stream: Stream) -> Result<Self> {
+        // Guard the raw context so it is destroyed on every early-exit path
+        // (e.g. a buffer allocation failure below).
+        struct CtxGuard(*mut btrt_context_t);
+        impl Drop for CtxGuard {
+            fn drop(&mut self) {
+                if !self.0.is_null() { unsafe { btrt_context_destroy(self.0) } }
+            }
+        }
 
         let ctx = unsafe { btrt_context_create(engine.as_ptr()) };
         if ctx.is_null() {
             return Err(TrtError::Create("ExecutionContext"));
         }
+        let mut guard = CtxGuard(ctx);
 
         let mut inputs = HashMap::new();
         let mut outputs = HashMap::new();
@@ -199,6 +186,7 @@ impl Session {
             }
         }
 
+        guard.0 = std::ptr::null_mut(); // ownership transfers to Session::drop
         Ok(Self { ctx, _engine: engine, stream, inputs, outputs,
                   _not_sync: std::marker::PhantomData })
     }

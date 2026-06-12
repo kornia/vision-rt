@@ -12,6 +12,10 @@ pub enum TrtError {
     Shape(String),
     #[error("CUDA error code {code}: {msg}")]
     Cuda { code: i32, msg: &'static str },
+    #[error("CUDA driver: {0}")]
+    Driver(#[from] cudarc::driver::DriverError),
+    #[error("nvrtc compile: {0}")]
+    Nvrtc(String),
     #[error("TensorRT error: {0}")]
     Trt(String),
 }

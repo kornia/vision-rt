@@ -29,6 +29,7 @@ pub mod buffer;
 pub mod session;
 pub mod tensor;
 pub mod pipeline;
+pub mod cuda;
 
 pub use error::{TrtError, Result};
 pub use logger::Logger;

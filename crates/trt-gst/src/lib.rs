@@ -19,7 +19,7 @@
 
 pub use trt_preproc::{DeviceFrame, Preprocessor};
 
-use std::error::Error;
+
 use std::ffi::c_void;
 use std::sync::{Arc, Mutex, mpsc};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -72,7 +72,7 @@ impl NvmmFrame {
     /// # Safety
     /// Calls `nvbuf_cuda_import`.  `self` must remain alive for the duration
     /// of any CUDA work using the returned `dev_ptr`.
-    pub unsafe fn cuda_import(&self) -> Result<CudaMemory, Box<dyn Error>> {
+    pub unsafe fn cuda_import(&self) -> Result<CudaMemory, BoxError> {
         let mut ext_mem: *mut c_void = std::ptr::null_mut();
         let mut dev_ptr: *mut c_void = std::ptr::null_mut();
         let rc = nvbuf_sys::nvbuf_cuda_import(self.fd, self.size, &mut ext_mem, &mut dev_ptr);
@@ -114,7 +114,7 @@ impl RtspSource {
     /// Use [`connect_resized`] to have the VIC scaler downsize before CUDA.
     ///
     /// [`connect_resized`]: RtspSource::connect_resized
-    pub fn connect(url: &str) -> Result<Self, Box<dyn Error>> {
+    pub fn connect(url: &str) -> Result<Self, BoxError> {
         Self::connect_internal(url, None)
     }
 
@@ -124,11 +124,11 @@ impl RtspSource {
     /// The resize is done by the Jetson VIC hardware scaler inside `nvvidconv`,
     /// so it costs no CUDA or CPU cycles.  `source.width()` / `source.height()`
     /// return the resized dimensions.
-    pub fn connect_resized(url: &str, width: u32, height: u32) -> Result<Self, Box<dyn Error>> {
+    pub fn connect_resized(url: &str, width: u32, height: u32) -> Result<Self, BoxError> {
         Self::connect_internal(url, Some((width, height)))
     }
 
-    fn connect_internal(url: &str, resize: Option<(u32, u32)>) -> Result<Self, Box<dyn Error>> {
+    fn connect_internal(url: &str, resize: Option<(u32, u32)>) -> Result<Self, BoxError> {
         gstreamer::init()?;
 
         // Optional VIC resize: add width/height to nvvidconv output caps.
@@ -299,7 +299,7 @@ impl NvmmPreprocessStage {
         stream: Arc<trt::CudaStream>,
         src_w: u32, src_h: u32,
         dst_w: u32, dst_h: u32,
-    ) -> Result<Self, Box<dyn Error>> {
+    ) -> Result<Self, BoxError> {
         let preproc = Preprocessor::new(stream, src_w, src_h, dst_w, dst_h)?;
         Ok(Self { preproc, _pending: None })
     }
@@ -314,11 +314,11 @@ impl Stage for NvmmPreprocessStage {
         // finalize (error path).  Recover in the mandatory release order:
         // drain the GPU, drop the texture object, then the NVMM import.
         if self._pending.is_some() {
-            self.preproc.stream().synchronize().map_err(|e| e.to_string())?;
+            self.preproc.stream().synchronize()?;
             self.preproc.finalize()?;  // drops TextureGuard first ✓
             self._pending = None;       // then CudaMemory ✓
         }
-        let mem = unsafe { frame.cuda_import().map_err(|e| e.to_string())? };
+        let mem = unsafe { frame.cuda_import()? };
         let device_frame = DeviceFrame { dev_ptr: mem.dev_ptr, pitch: frame.pitch };
         self._pending = Some(mem);
         self.preproc.enqueue(&device_frame)
