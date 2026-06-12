@@ -42,8 +42,9 @@ Backbone outputs (TRT engine, all FP32 on device):
 Postproc algorithm (postprocess.rs):
 1. GPU `xfeat_score_nms` — 5×5 local-max NMS; score = heatmap×reliability,
    zeroed below `threshold` (default 0.05) or if any neighbour is greater.
-2. CPU top-K — D2H the H×W score map, select K best indices (default 4096).
-   This D2H is why the stage has a `finalize` phase.
+2. GPU `xfeat_compact_scores` — stream-compact NMS survivors (atomic
+   append), then D2H only the survivors (tens of KB, not the full map);
+   CPU selects K best (default 4096). This is why the stage has `finalize`.
 3. GPU `xfeat_sample_descs` — bilinear sample 64-D descriptors at kpt/8
    positions, **align_corners=False** convention (matches PyTorch grid_sample).
 4. GPU `xfeat_l2_norm` — in-place L2-normalize each descriptor row.
@@ -53,7 +54,8 @@ L2-normalized), `scores` (host), `kpts_cpu` (host copy, free — kept pre-upload
 
 Matching: `match_mutual_nn_gpu` — cosine similarity (valid because descriptors
 are L2-normalized, so dot = cosine), mutual nearest-neighbor check via two
-kernels (`xfeat_match_rows` / `xfeat_match_cols`), with min-similarity cutoff.
+calls of one tiled argmax kernel (`xfeat_match_argmax` — one thread per
+query, candidates tiled through shared memory), with min-similarity cutoff.
 
 ## YOLO11/v8 (trt-yolo)
 

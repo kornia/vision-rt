@@ -6,12 +6,14 @@
 //!   `reliability`  (1,  1,   H,   W)  — channel reliability  (FP32 on device)
 //!
 //! Pipeline:
-//!   GPU  xfeat_score_nms    → score_map (H×W), masked to local-max pixels above threshold
-//!   CPU  D2H + TopK select  → top-K flat indices (sorted by score descending)
-//!   GPU  xfeat_sample_descs → K×64 descriptor vectors (bilinear sample from desc_map)
-//!   GPU  xfeat_l2_norm      → in-place L2 normalise
+//!   GPU  xfeat_score_nms      → score_map (H×W), masked to local-max pixels above threshold
+//!   GPU  xfeat_compact_scores → stream-compact survivors (D2H ∝ survivors, not H×W)
+//!   CPU  TopK select          → top-K flat indices (sorted by score descending)
+//!   GPU  xfeat_sample_descs   → K×64 descriptor vectors (bilinear sample from desc_map)
+//!   GPU  xfeat_l2_norm        → in-place L2 normalise
+//!   GPU  xfeat_match_argmax   → tiled mutual-NN matching (two calls, swapped args)
 //!
-//! Both GPU kernels are JIT-compiled via cudarc nvrtc targeting sm_87 (Jetson Orin).
+//! Kernels are JIT-compiled via trt::cuda::Kernels (arch auto-detected).
 
 use std::sync::Arc;
 use cudarc::driver::{CudaSlice, CudaStream, PushKernelArg};
@@ -126,80 +128,85 @@ extern "C" __global__ void xfeat_l2_norm(
     descs[k * 64 + c] = v / norm;
 }
 
-/* xfeat_match_rows — argmax dot-product search: D0[i] → nearest in D1.
-   One block per query; block_dim=64 = 2 warps; warp-shuffle + shared-mem reduction. */
-extern "C" __global__ void xfeat_match_rows(
-    const float* __restrict__ D0,
-    const float* __restrict__ D1,
+/* xfeat_match_argmax — argmax dot-product search: Q[t] → nearest in R.
+   Direction-agnostic: call once with (D0, D1) and once with (D1, D0).
+
+   One THREAD per query (not one block): the 64-D query lives in registers
+   and reference descriptors stream through a shared-memory tile, so the
+   inner loop is a pure unrolled MAC chain with no per-candidate barrier.
+   (The previous one-block-per-query version spent ~10ms at K=4096 on two
+   __syncthreads per candidate; this shape is compute/bandwidth bound.)
+
+   Launch: grid = ceil(Nq/128), block = 128. Shared: 64×64 floats (16 KB).
+   sim_out may be NULL (the reverse direction doesn't need similarities). */
+#define MATCH_BLOCK 128
+#define MATCH_TILE   64
+extern "C" __global__ void xfeat_match_argmax(
+    const float* __restrict__ Q,
+    const float* __restrict__ R,
     int*   __restrict__ match_out,
     float* __restrict__ sim_out,
-    int N0, int N1
+    int Nq, int Nr
 ) {
-    int qi = blockIdx.x;
-    int c  = threadIdx.x;
-    if (qi >= N0) return;
+    int qi = blockIdx.x * blockDim.x + threadIdx.x;
 
-    __shared__ float shmem[2];
+    float q[64];
+    if (qi < Nq) {
+        #pragma unroll
+        for (int c = 0; c < 64; c++) q[c] = __ldg(&Q[qi * 64 + c]);
+    }
 
-    float qi_c = __ldg(&D0[qi * 64 + c]);
+    __shared__ float tile[MATCH_TILE][64];
+
     int   best_j = 0;
     float best_s = -1e30f;
 
-    for (int j = 0; j < N1; j++) {
-        float s = qi_c * __ldg(&D1[j * 64 + c]);
-        s += __shfl_down_sync(0xFFFFFFFF, s, 16);
-        s += __shfl_down_sync(0xFFFFFFFF, s,  8);
-        s += __shfl_down_sync(0xFFFFFFFF, s,  4);
-        s += __shfl_down_sync(0xFFFFFFFF, s,  2);
-        s += __shfl_down_sync(0xFFFFFFFF, s,  1);
-        if (c ==  0) shmem[0] = s;
-        if (c == 32) shmem[1] = s;
+    for (int j0 = 0; j0 < Nr; j0 += MATCH_TILE) {
+        int jt = min(MATCH_TILE, Nr - j0);
+
+        /* Cooperative, coalesced tile load (rows of R are contiguous). */
+        for (int idx = threadIdx.x; idx < jt * 64; idx += MATCH_BLOCK) {
+            tile[idx >> 6][idx & 63] = __ldg(&R[j0 * 64 + idx]);
+        }
         __syncthreads();
-        if (c == 0) {
-            float total = shmem[0] + shmem[1];
-            if (total > best_s) { best_s = total; best_j = j; }
+
+        if (qi < Nq) {
+            for (int j = 0; j < jt; j++) {
+                float s = 0.0f;
+                /* All threads read the same tile row in lockstep → broadcast. */
+                #pragma unroll
+                for (int c = 0; c < 64; c++) s += q[c] * tile[j][c];
+                if (s > best_s) { best_s = s; best_j = j0 + j; }
+            }
         }
         __syncthreads();
     }
 
-    if (c == 0) { match_out[qi] = best_j; sim_out[qi] = best_s; }
+    if (qi < Nq) {
+        match_out[qi] = best_j;
+        if (sim_out) sim_out[qi] = best_s;
+    }
 }
 
-/* xfeat_match_cols — argmax dot-product search: D1[j] → nearest in D0. */
-extern "C" __global__ void xfeat_match_cols(
-    const float* __restrict__ D0,
-    const float* __restrict__ D1,
-    int*   __restrict__ match_out,
-    int N0, int N1
+/* xfeat_compact_scores — stream-compact NMS survivors.
+   Appends (score, flat_index) of every score > 0 via an atomic counter, so
+   the host copies only survivors (tens of KB) instead of the full H×W map
+   (3.7 MB at 1280×736). Output order is nondeterministic — the host top-K
+   sorts anyway. Capacity equals the map size, so no overflow is possible. */
+extern "C" __global__ void xfeat_compact_scores(
+    const float* __restrict__ score_map,
+    float* __restrict__ out_scores,
+    int*   __restrict__ out_idx,
+    int*   __restrict__ count,
+    int total
 ) {
-    int qj = blockIdx.x;
-    int c  = threadIdx.x;
-    if (qj >= N1) return;
-
-    __shared__ float shmem[2];
-
-    float qj_c = __ldg(&D1[qj * 64 + c]);
-    int   best_i = 0;
-    float best_s = -1e30f;
-
-    for (int i = 0; i < N0; i++) {
-        float s = qj_c * __ldg(&D0[i * 64 + c]);
-        s += __shfl_down_sync(0xFFFFFFFF, s, 16);
-        s += __shfl_down_sync(0xFFFFFFFF, s,  8);
-        s += __shfl_down_sync(0xFFFFFFFF, s,  4);
-        s += __shfl_down_sync(0xFFFFFFFF, s,  2);
-        s += __shfl_down_sync(0xFFFFFFFF, s,  1);
-        if (c ==  0) shmem[0] = s;
-        if (c == 32) shmem[1] = s;
-        __syncthreads();
-        if (c == 0) {
-            float total = shmem[0] + shmem[1];
-            if (total > best_s) { best_s = total; best_i = i; }
-        }
-        __syncthreads();
-    }
-
-    if (c == 0) { match_out[qj] = best_i; }
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= total) return;
+    float s = __ldg(&score_map[i]);
+    if (s <= 0.0f) return;
+    int slot = atomicAdd(count, 1);
+    out_scores[slot] = s;
+    out_idx[slot]    = i;
 }
 "#;
 
@@ -221,14 +228,14 @@ pub struct XFeatResult {
 // ── XFeatPostproc ─────────────────────────────────────────────────────────────
 
 pub struct XFeatPostproc {
-    fn_score_nms:    cudarc::driver::CudaFunction,
-    fn_sample_descs: cudarc::driver::CudaFunction,
-    fn_l2_norm:      cudarc::driver::CudaFunction,
-    fn_match_rows:   cudarc::driver::CudaFunction,
-    fn_match_cols:   cudarc::driver::CudaFunction,
-    stream:          Arc<CudaStream>,
-    top_k:           usize,
-    threshold:       f32,
+    fn_score_nms:      cudarc::driver::CudaFunction,
+    fn_sample_descs:   cudarc::driver::CudaFunction,
+    fn_l2_norm:        cudarc::driver::CudaFunction,
+    fn_match_argmax:   cudarc::driver::CudaFunction,
+    fn_compact_scores: cudarc::driver::CudaFunction,
+    stream:            Arc<CudaStream>,
+    top_k:             usize,
+    threshold:         f32,
 }
 
 impl XFeatPostproc {
@@ -243,14 +250,14 @@ impl XFeatPostproc {
     ) -> Result<Self, BoxError> {
         let kernels = Kernels::compile(stream.clone(), KERNELS_SRC)?;
 
-        let fn_score_nms    = kernels.function("xfeat_score_nms")?;
-        let fn_sample_descs = kernels.function("xfeat_sample_descs")?;
-        let fn_l2_norm      = kernels.function("xfeat_l2_norm")?;
-        let fn_match_rows   = kernels.function("xfeat_match_rows")?;
-        let fn_match_cols   = kernels.function("xfeat_match_cols")?;
+        let fn_score_nms      = kernels.function("xfeat_score_nms")?;
+        let fn_sample_descs   = kernels.function("xfeat_sample_descs")?;
+        let fn_l2_norm        = kernels.function("xfeat_l2_norm")?;
+        let fn_match_argmax   = kernels.function("xfeat_match_argmax")?;
+        let fn_compact_scores = kernels.function("xfeat_compact_scores")?;
 
-        Ok(Self { fn_score_nms, fn_sample_descs, fn_l2_norm, fn_match_rows, fn_match_cols,
-                  stream, top_k, threshold })
+        Ok(Self { fn_score_nms, fn_sample_descs, fn_l2_norm, fn_match_argmax,
+                  fn_compact_scores, stream, top_k, threshold })
     }
 
     /// Enqueue the NMS score kernel into `score_dev` (async — caller must sync before reading).
@@ -284,9 +291,10 @@ impl XFeatPostproc {
 
     /// Complete post-processing after the stream has been synced.
     ///
-    /// Reads the NMS scores from `score_dev` (D2H), selects top-K keypoints,
-    /// samples descriptors, L2-normalises, and returns the [`XFeatResult`].
-    /// Performs one internal `stream.synchronize()` for the descriptor kernels.
+    /// GPU stream-compaction collects the NMS survivors, so the D2H copy is
+    /// proportional to the survivor count (tens of KB) instead of the full
+    /// H×W score map.  Then: top-K select → descriptor sampling → L2-norm.
+    /// Performs internal `stream.synchronize()` calls (compaction + kernels).
     pub fn process_topk_sample(
         &self,
         desc_ptr:  *const f32,
@@ -297,14 +305,36 @@ impl XFeatPostproc {
         use cudarc::driver::DevicePtr;
         let hd = h / 8;
         let wd = w / 8;
+        let n_pixels = h * w;
 
-        // D2H — stream is already synced by the pipeline before finalize.
-        let scores_host: Vec<f32> = self.stream.memcpy_dtov(score_dev)?;
+        // ── GPU: compact survivors (score > 0) ────────────────────────────────
+        let count_dev: CudaSlice<i32> = self.stream.alloc_zeros(1)?;
+        let cs_dev:    CudaSlice<f32> = unsafe { self.stream.alloc(n_pixels)? };
+        let ci_dev:    CudaSlice<i32> = unsafe { self.stream.alloc(n_pixels)? };
 
-        let mut candidates: Vec<(f32, u32)> = scores_host.iter().enumerate()
-            .filter(|(_, &s)| s > 0.0)
-            .map(|(i, &s)| (s, i as u32))
-            .collect();
+        {
+            let score_raw: CUdeviceptr = score_dev.device_ptr(self.stream.as_ref()).0;
+            let cs_raw:    CUdeviceptr = cs_dev.device_ptr(self.stream.as_ref()).0;
+            let ci_raw:    CUdeviceptr = ci_dev.device_ptr(self.stream.as_ref()).0;
+            let cnt_raw:   CUdeviceptr = count_dev.device_ptr(self.stream.as_ref()).0;
+            let total = n_pixels as i32;
+            unsafe {
+                self.stream.launch_builder(&self.fn_compact_scores)
+                    .arg(&score_raw).arg(&cs_raw).arg(&ci_raw).arg(&cnt_raw)
+                    .arg(&total)
+                    .launch(trt::cuda::cfg_1d(n_pixels, 256))?;
+            }
+        }
+        self.stream.synchronize()?;
+
+        let n_survivors = self.stream.memcpy_dtov(&count_dev)?[0] as usize;
+        let mut candidates: Vec<(f32, u32)> = if n_survivors == 0 {
+            Vec::new()
+        } else {
+            let cs: Vec<f32> = self.stream.memcpy_dtov(&cs_dev.slice(0..n_survivors))?;
+            let ci: Vec<i32> = self.stream.memcpy_dtov(&ci_dev.slice(0..n_survivors))?;
+            cs.into_iter().zip(ci).map(|(s, i)| (s, i as u32)).collect()
+        };
 
         let k = self.top_k.min(candidates.len());
         if k == 0 {
@@ -358,7 +388,7 @@ impl XFeatPostproc {
         Ok(XFeatResult { kpts: kpts_dev, descs: descs_dev, scores: scores_out, kpts_cpu: kpts_host })
     }
 
-    /// Run the full post-processing pipeline.
+    /// Run the full post-processing pipeline (NMS → top-K → sample → L2-norm).
     ///
     /// * `desc_ptr` — device pointer, shape `(1, 64, H/8, W/8)` CHW FP32
     /// * `heat_ptr` — device pointer, shape `(1, 1, H, W)` FP32
@@ -372,99 +402,10 @@ impl XFeatPostproc {
         h: usize,
         w: usize,
     ) -> Result<XFeatResult, BoxError> {
-        let hd       = h / 8;
-        let wd       = w / 8;
-        let n_pixels = h * w;
-
-        // ── GPU: NMS score map ────────────────────────────────────────────────
-        let score_dev: CudaSlice<f32> = unsafe { self.stream.alloc(n_pixels)? };
-
-        let cfg_nms = cfg_2d(w, h);
-
-        let heat_raw:  CUdeviceptr = heat_ptr as usize as CUdeviceptr;
-        let rel_raw:   CUdeviceptr = rel_ptr  as usize as CUdeviceptr;
-        let score_raw: CUdeviceptr = { use cudarc::driver::DevicePtr; score_dev.device_ptr(self.stream.as_ref()).0 };
-
-        let h_i  = h as i32;
-        let w_i  = w as i32;
-        let thr  = self.threshold;
-
-        unsafe {
-            self.stream.launch_builder(&self.fn_score_nms)
-                .arg(&heat_raw).arg(&rel_raw).arg(&score_raw)
-                .arg(&h_i).arg(&w_i).arg(&thr)
-                .launch(cfg_nms)?;
-        }
-
-        // ── D2H: score map → TopK ─────────────────────────────────────────────
+        let score_dev: CudaSlice<f32> = unsafe { self.stream.alloc(h * w)? };
+        self.launch_score_nms(heat_ptr, rel_ptr, &score_dev, h, w)?;
         self.stream.synchronize()?;
-        let scores_host: Vec<f32> = self.stream.memcpy_dtov(&score_dev)?;
-        drop(score_dev);
-
-        let mut candidates: Vec<(f32, u32)> = scores_host.iter().enumerate()
-            .filter(|(_, &s)| s > 0.0)
-            .map(|(i, &s)| (s, i as u32))
-            .collect();
-
-        let k = self.top_k.min(candidates.len());
-        if k == 0 {
-            let empty:  CudaSlice<f32> = unsafe { self.stream.alloc(0)? };
-            let empty2: CudaSlice<f32> = unsafe { self.stream.alloc(0)? };
-            return Ok(XFeatResult { kpts: empty, descs: empty2, scores: Vec::new(), kpts_cpu: Vec::new() });
-        }
-
-        candidates.select_nth_unstable_by(k - 1, |a, b| {
-            b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal)
-        });
-        candidates.truncate(k);
-        candidates.sort_unstable_by(|a, b| {
-            b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal)
-        });
-
-        let scores_out: Vec<f32> = candidates.iter().map(|(s, _)| *s).collect();
-
-        let kpts_host: Vec<f32> = candidates.iter()
-            .flat_map(|(_, idx)| {
-                let i = *idx as usize;
-                [(i % w) as f32, (i / w) as f32]
-            })
-            .collect();
-
-        // ── GPU: descriptor sampling ──────────────────────────────────────────
-        let kpts_dev:  CudaSlice<f32> = self.stream.memcpy_stod(&kpts_host)?;
-        let descs_dev: CudaSlice<f32> = unsafe { self.stream.alloc(k * 64)? };
-
-        let desc_raw:  CUdeviceptr = desc_ptr as usize as CUdeviceptr;
-        let kpts_raw:  CUdeviceptr = { use cudarc::driver::DevicePtr; kpts_dev.device_ptr(self.stream.as_ref()).0 };
-        let descs_raw: CUdeviceptr = { use cudarc::driver::DevicePtr; descs_dev.device_ptr(self.stream.as_ref()).0 };
-
-        let hd_i  = hd as i32;
-        let wd_i  = wd as i32;
-
-        let k_i   = k as i32;
-
-        let cfg64 = cfg_per_item(k, 64);
-
-        unsafe {
-            self.stream.launch_builder(&self.fn_sample_descs)
-                .arg(&desc_raw).arg(&kpts_raw).arg(&descs_raw)
-                .arg(&hd_i).arg(&wd_i).arg(&h_i).arg(&w_i)
-                .launch(cfg64)?;
-        }
-
-        // ── GPU: L2 normalise in-place ────────────────────────────────────────
-        // Re-acquire descs_raw after the sample launch (same address, safe).
-        let descs_raw: CUdeviceptr = { use cudarc::driver::DevicePtr; descs_dev.device_ptr(self.stream.as_ref()).0 };
-
-        unsafe {
-            self.stream.launch_builder(&self.fn_l2_norm)
-                .arg(&descs_raw).arg(&k_i)
-                .launch(cfg64)?;
-        }
-
-        self.stream.synchronize()?;
-
-        Ok(XFeatResult { kpts: kpts_dev, descs: descs_dev, scores: scores_out, kpts_cpu: kpts_host })
+        self.process_topk_sample(desc_ptr, &score_dev, h, w)
     }
 
     /// GPU mutual nearest-neighbour matching between two `XFeatResult`s.
@@ -493,23 +434,23 @@ impl XFeatPostproc {
         let m12_raw: CUdeviceptr = { use cudarc::driver::DevicePtr; match12_dev.device_ptr(self.stream.as_ref()).0 };
         let m21_raw: CUdeviceptr = { use cudarc::driver::DevicePtr; match21_dev.device_ptr(self.stream.as_ref()).0 };
         let s12_raw: CUdeviceptr = { use cudarc::driver::DevicePtr; sim12_dev.device_ptr(self.stream.as_ref()).0 };
+        let null_sim: CUdeviceptr = 0;
 
-        let cfg_rows = cfg_per_item(n0, 64);
+        // One tiled argmax kernel, both directions (sim only needed for 1→2).
+        // Block size must match MATCH_BLOCK in the kernel source.
         unsafe {
-            self.stream.launch_builder(&self.fn_match_rows)
+            self.stream.launch_builder(&self.fn_match_argmax)
                 .arg(&d0_raw).arg(&d1_raw)
                 .arg(&m12_raw).arg(&s12_raw)
                 .arg(&n0_i).arg(&n1_i)
-                .launch(cfg_rows)?;
+                .launch(trt::cuda::cfg_1d(n0, 128))?;
         }
-
-        let cfg_cols = cfg_per_item(n1, 64);
         unsafe {
-            self.stream.launch_builder(&self.fn_match_cols)
-                .arg(&d0_raw).arg(&d1_raw)
-                .arg(&m21_raw)
-                .arg(&n0_i).arg(&n1_i)
-                .launch(cfg_cols)?;
+            self.stream.launch_builder(&self.fn_match_argmax)
+                .arg(&d1_raw).arg(&d0_raw)
+                .arg(&m21_raw).arg(&null_sim)
+                .arg(&n1_i).arg(&n0_i)
+                .launch(trt::cuda::cfg_1d(n1, 128))?;
         }
 
         self.stream.synchronize()?;
@@ -575,4 +516,159 @@ pub fn match_mutual_nn(
         .filter(|&i| match21[match12[i]] == i && sim12[i] >= min_cossim)
         .map(|i| (i, match12[i]))
         .collect()
+}
+
+#[cfg(test)]
+mod gpu_tests {
+    use super::*;
+
+    /// Deterministic pseudo-random L2-normalized descriptors (LCG, no deps).
+    fn random_descs(n: usize, seed: u64) -> Vec<f32> {
+        let mut state = seed;
+        let mut next = || {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            ((state >> 33) as f32 / (1u64 << 31) as f32) - 1.0
+        };
+        let mut v: Vec<f32> = (0..n * 64).map(|_| next()).collect();
+        for row in v.chunks_exact_mut(64) {
+            let norm = row.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-8);
+            row.iter_mut().for_each(|x| *x /= norm);
+        }
+        v
+    }
+
+    /// GPU tiled-argmax matching must agree with the CPU reference.
+    /// Needs the Jetson GPU; run explicitly:
+    ///   cargo test -p trt-xfeat -- --ignored
+    #[test]
+    #[ignore]
+    fn gpu_match_agrees_with_cpu_reference() {
+        let ctx    = cudarc::driver::CudaContext::new(0).unwrap();
+        let stream = ctx.new_stream().unwrap();
+        let pp     = XFeatPostproc::new(stream.clone(), 4096, 0.05).unwrap();
+
+        for (n0, n1) in [(4096usize, 4096usize), (1000, 3000), (1, 4096), (130, 1)] {
+            let h0 = random_descs(n0, 42);
+            let h1 = random_descs(n1, 7);
+
+            let r0 = XFeatResult {
+                kpts:     stream.memcpy_stod(&vec![0.0f32; n0 * 2]).unwrap(),
+                descs:    stream.memcpy_stod(&h0).unwrap(),
+                scores:   vec![1.0; n0],
+                kpts_cpu: Vec::new(),
+            };
+            let r1 = XFeatResult {
+                kpts:     stream.memcpy_stod(&vec![0.0f32; n1 * 2]).unwrap(),
+                descs:    stream.memcpy_stod(&h1).unwrap(),
+                scores:   vec![1.0; n1],
+                kpts_cpu: Vec::new(),
+            };
+
+            // Warm-up (first launch pays module/alloc setup), then timed run.
+            let _ = pp.match_mutual_nn_gpu(&r0, &r1, -1.0).unwrap();
+            let t0 = std::time::Instant::now();
+            let gpu = pp.match_mutual_nn_gpu(&r0, &r1, -1.0).unwrap();
+            let gpu_ms = t0.elapsed().as_secs_f64() * 1000.0;
+
+            let cpu = match_mutual_nn(&h0, &h1, -1.0);
+
+            let gset: std::collections::HashSet<_> = gpu.iter().copied().collect();
+            let cset: std::collections::HashSet<_> = cpu.iter().copied().collect();
+            assert_eq!(gset, cset, "GPU/CPU match mismatch at n0={n0} n1={n1}");
+            eprintln!("match n0={n0:5} n1={n1:5}: {} pairs, GPU wall {gpu_ms:.2} ms", gpu.len());
+        }
+    }
+
+    /// Kernel-only timing: pre-allocated buffers, CUDA-event bracketed,
+    /// averaged over 20 launches.  Run: cargo test -p trt-xfeat --release -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn gpu_match_kernel_only_timing() {
+        use cudarc::driver::DevicePtr;
+        let ctx    = cudarc::driver::CudaContext::new(0).unwrap();
+        let stream = ctx.new_stream().unwrap();
+        let pp     = XFeatPostproc::new(stream.clone(), 4096, 0.05).unwrap();
+
+        let n = 4096usize;
+        let d0 = stream.memcpy_stod(&random_descs(n, 42)).unwrap();
+        let d1 = stream.memcpy_stod(&random_descs(n, 7)).unwrap();
+        let m12: CudaSlice<i32> = unsafe { stream.alloc(n).unwrap() };
+        let s12: CudaSlice<f32> = unsafe { stream.alloc(n).unwrap() };
+
+        let d0r: CUdeviceptr = d0.device_ptr(stream.as_ref()).0;
+        let d1r: CUdeviceptr = d1.device_ptr(stream.as_ref()).0;
+        let mr:  CUdeviceptr = m12.device_ptr(stream.as_ref()).0;
+        let sr:  CUdeviceptr = s12.device_ptr(stream.as_ref()).0;
+        let n_i = n as i32;
+
+        let launch = || unsafe {
+            stream.launch_builder(&pp.fn_match_argmax)
+                .arg(&d0r).arg(&d1r).arg(&mr).arg(&sr).arg(&n_i).arg(&n_i)
+                .launch(trt::cuda::cfg_1d(n, 128)).unwrap();
+        };
+
+        launch(); stream.synchronize().unwrap();  // warm-up
+
+        let flags = Some(cudarc::driver::sys::CUevent_flags::CU_EVENT_DEFAULT);
+        let start = stream.record_event(flags).unwrap();
+        for _ in 0..20 { launch(); }
+        let stop = stream.record_event(flags).unwrap();
+        stream.synchronize().unwrap();
+        let ms = start.elapsed_ms(&stop).unwrap() / 20.0;
+        eprintln!("match_argmax kernel-only @ {n}x{n}: {ms:.3} ms/direction");
+    }
+}
+
+#[cfg(test)]
+mod gpu_compact_tests {
+    use super::*;
+
+    /// Compaction top-K must select the right keypoints from a synthetic
+    /// score map and produce L2-normalized descriptors.
+    #[test]
+    #[ignore]
+    fn compact_topk_selects_correct_keypoints() {
+        let ctx    = cudarc::driver::CudaContext::new(0).unwrap();
+        let stream = ctx.new_stream().unwrap();
+        let pp     = XFeatPostproc::new(stream.clone(), 2, 0.05).unwrap();  // top_k = 2
+
+        let (h, w) = (32usize, 32usize);
+        let (hd, wd) = (h / 8, w / 8);
+
+        // Three survivors; top-2 by score are at flat idx 100 (x=4,y=3) and 999 (x=7,y=31).
+        let mut scores = vec![0.0f32; h * w];
+        scores[100] = 0.9;
+        scores[999] = 0.7;
+        scores[500] = 0.1;
+        let score_dev = stream.memcpy_stod(&scores).unwrap();
+
+        // Constant-per-channel descriptor map: sampled vector = (c+1) before norm.
+        let mut desc_map = vec![0.0f32; 64 * hd * wd];
+        for c in 0..64 {
+            for i in 0..hd * wd { desc_map[c * hd * wd + i] = (c + 1) as f32; }
+        }
+        let desc_dev = stream.memcpy_stod(&desc_map).unwrap();
+        let desc_ptr = {
+            use cudarc::driver::DevicePtr;
+            desc_dev.device_ptr(stream.as_ref()).0 as *const f32
+        };
+
+        let res = pp.process_topk_sample(desc_ptr, &score_dev, h, w).unwrap();
+
+        assert_eq!(res.scores, vec![0.9, 0.7]);
+        assert_eq!(res.kpts_cpu, vec![
+            (100 % w) as f32, (100 / w) as f32,
+            (999 % w) as f32, (999 / w) as f32,
+        ]);
+
+        // Descriptors must be L2-normalized samples of the constant map.
+        let descs: Vec<f32> = stream.memcpy_dtov(&res.descs).unwrap();
+        for row in descs.chunks_exact(64) {
+            let norm: f32 = row.iter().map(|v| v * v).sum::<f32>().sqrt();
+            assert!((norm - 1.0).abs() < 1e-4, "descriptor not normalized: {norm}");
+            // direction must follow (1, 2, ..., 64) / |(1,...,64)|
+            let expect0 = 1.0 / (1..=64).map(|c| (c * c) as f32).sum::<f32>().sqrt();
+            assert!((row[0] - expect0).abs() < 1e-3, "row[0]={} expect {}", row[0], expect0);
+        }
+    }
 }

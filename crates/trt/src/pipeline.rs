@@ -282,7 +282,10 @@ where
         };
 
         // Place a start-marker on the stream before queuing any GPU work.
-        let gpu_start = match self.stream.record_event(None) {
+        // CU_EVENT_DEFAULT explicitly: cudarc's `None` means DISABLE_TIMING,
+        // which makes elapsed_ms fail (and gpu_ms silently 0).
+        let timing_flags = Some(cudarc::driver::sys::CUevent_flags::CU_EVENT_DEFAULT);
+        let gpu_start = match self.stream.record_event(timing_flags) {
             Ok(e)  => e,
             Err(e) => return fail(&self.stream, e.into()),
         };
@@ -292,7 +295,7 @@ where
         }
 
         // Place a stop-marker after all GPU work has been submitted.
-        let gpu_stop = match self.stream.record_event(None) {
+        let gpu_stop = match self.stream.record_event(timing_flags) {
             Ok(e)  => e,
             Err(e) => return fail(&self.stream, e.into()),
         };
