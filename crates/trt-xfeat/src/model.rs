@@ -117,7 +117,7 @@ impl Stage for XFeatInferStage {
         let shape   = input.shape_i64();
         let dev_ptr = input.as_mut_ptr();
 
-        let out_ptrs = unsafe {
+        let views = unsafe {
             self.session.run_device_inputs_on_device(
                 &[("image", dev_ptr, &shape)]
             )?
@@ -126,9 +126,9 @@ impl Stage for XFeatInferStage {
         // Sync before GPU postproc reads TRT output (top-K requires CPU scores).
         self.session.stream().sync()?;
 
-        let desc_ptr = *out_ptrs.get("descriptors").ok_or("no 'descriptors' output")? as *const f32;
-        let heat_ptr = *out_ptrs.get("heatmap").ok_or("no 'heatmap' output")?      as *const f32;
-        let rel_ptr  = *out_ptrs.get("reliability").ok_or("no 'reliability' output")? as *const f32;
+        let desc_ptr = views.get("descriptors").ok_or("no 'descriptors' output")?.f32_ptr()?;
+        let heat_ptr = views.get("heatmap").ok_or("no 'heatmap' output")?.f32_ptr()?;
+        let rel_ptr  = views.get("reliability").ok_or("no 'reliability' output")?.f32_ptr()?;
 
         let h = input.shape[2];
         let w = input.shape[3];
@@ -165,7 +165,10 @@ pub struct XFeatPostprocStage {
     result:    Option<XFeatResult>,
 }
 
-// SAFETY: desc_ptr is a stable device address; CUDA stream ordering enforces access.
+// SAFETY: desc_ptr is a device address owned by the upstream session's output
+// buffer.  It is valid only from enqueue to the same frame's finalize — the
+// session's next enqueue may reallocate it.  finalize() take()s it every frame,
+// so it never dangles across frames.  Stream ordering serializes GPU access.
 unsafe impl Send for XFeatPostprocStage {}
 
 impl XFeatPostprocStage {
@@ -192,9 +195,9 @@ impl Stage for XFeatPostprocStage {
     type Output = XFeatResult;
 
     fn enqueue(&mut self, input: &TRTensorMap) -> Result<(), BoxError> {
-        let desc_ptr = input.get("descriptors").ok_or("no 'descriptors' output")? as *const f32;
-        let heat_ptr = input.get("heatmap").ok_or("no 'heatmap' output")?      as *const f32;
-        let rel_ptr  = input.get("reliability").ok_or("no 'reliability' output")? as *const f32;
+        let desc_ptr = input.f32("descriptors")?;
+        let heat_ptr = input.f32("heatmap")?;
+        let rel_ptr  = input.f32("reliability")?;
 
         self.postproc.launch_score_nms(heat_ptr, rel_ptr, &self.score_dev, self.h, self.w)
             .map_err(|e| e.to_string())?;
@@ -240,7 +243,10 @@ pub struct XFeat {
     result:    Option<XFeatResult>,
 }
 
-// SAFETY: desc_ptr is a stable device address; CUDA stream ordering enforces exclusive access.
+// SAFETY: desc_ptr is a device address owned by this struct's own Session
+// output buffer.  Valid from enqueue to the same frame's finalize (the next
+// run may reallocate it); finalize() take()s it every frame so it never
+// dangles across frames.  Stream ordering serializes GPU access.
 unsafe impl Send for XFeat {}
 
 impl XFeat {
@@ -289,14 +295,14 @@ impl XFeat {
         let shape   = input.shape_i64();
         let dev_ptr = input.as_mut_ptr();
 
-        let out_ptrs = unsafe {
+        let views = unsafe {
             self.session.run_device_inputs_on_device(&[("image", dev_ptr, &shape)])?
         };
         self.session.stream().sync()?;
 
-        let desc_ptr = *out_ptrs.get("descriptors").ok_or("no 'descriptors' output")? as *const f32;
-        let heat_ptr = *out_ptrs.get("heatmap").ok_or("no 'heatmap' output")? as *const f32;
-        let rel_ptr  = *out_ptrs.get("reliability").ok_or("no 'reliability' output")? as *const f32;
+        let desc_ptr = views.get("descriptors").ok_or("no 'descriptors' output")?.f32_ptr()?;
+        let heat_ptr = views.get("heatmap").ok_or("no 'heatmap' output")?.f32_ptr()?;
+        let rel_ptr  = views.get("reliability").ok_or("no 'reliability' output")?.f32_ptr()?;
 
         self.postproc.process(desc_ptr, heat_ptr, rel_ptr, self.h, self.w)
     }
@@ -318,13 +324,13 @@ impl trt::Stage for XFeat {
         let shape   = input.shape_i64();
         let dev_ptr = input.as_mut_ptr();
 
-        let out_ptrs = unsafe {
+        let views = unsafe {
             self.session.run_device_inputs_on_device(&[("image", dev_ptr, &shape)])?
         };
 
-        let desc_ptr = *out_ptrs.get("descriptors").ok_or("no 'descriptors' output")? as *const f32;
-        let heat_ptr = *out_ptrs.get("heatmap").ok_or("no 'heatmap' output")?      as *const f32;
-        let rel_ptr  = *out_ptrs.get("reliability").ok_or("no 'reliability' output")? as *const f32;
+        let desc_ptr = views.get("descriptors").ok_or("no 'descriptors' output")?.f32_ptr()?;
+        let heat_ptr = views.get("heatmap").ok_or("no 'heatmap' output")?.f32_ptr()?;
+        let rel_ptr  = views.get("reliability").ok_or("no 'reliability' output")?.f32_ptr()?;
 
         self.postproc.launch_score_nms(heat_ptr, rel_ptr, &self.score_dev, self.h, self.w)
             .map_err(|e| e.to_string())?;

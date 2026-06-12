@@ -41,6 +41,53 @@ impl OutputTensor {
     }
 }
 
+/// Typed view of a device tensor owned by a [`Session`].
+///
+/// Carries the resolved shape, dtype and byte length alongside the raw device
+/// pointer, so downstream stages never re-derive dimensions out of band.
+///
+/// ## Validity window
+/// The pointer aliases Session-owned device memory.  It is valid **until the
+/// owning Session's next `run_*` call** (a shape change reallocates the
+/// buffer) **or Session drop** — not indefinitely.  Pipeline stages must
+/// consume views within the same frame (enqueue → sync → finalize) and never
+/// store them across frames.
+#[derive(Debug, Clone)]
+pub struct TensorView {
+    ptr:      *mut std::ffi::c_void,
+    shape:    Vec<i64>,
+    dtype:    DataType,
+    byte_len: usize,
+}
+
+// SAFETY: the pointer is a CUDA device address only dereferenced by kernels;
+// cross-thread moves are safe as long as the validity window above is honored.
+unsafe impl Send for TensorView {}
+
+impl TensorView {
+    /// Raw device pointer (see "Validity window").
+    pub fn ptr(&self) -> *mut std::ffi::c_void { self.ptr }
+
+    /// Device pointer as `*const f32`, checked against the tensor dtype.
+    pub fn f32_ptr(&self) -> Result<*const f32> {
+        if self.dtype != DataType::Float32 {
+            return Err(TrtError::Shape(format!(
+                "tensor is {:?}, not Float32", self.dtype
+            )));
+        }
+        Ok(self.ptr as *const f32)
+    }
+
+    /// Resolved shape (after dynamic-shape inference).
+    pub fn shape(&self) -> &[i64] { &self.shape }
+
+    /// Dimension `i` of the resolved shape.
+    pub fn dim(&self, i: usize) -> i64 { self.shape[i] }
+
+    pub fn dtype(&self) -> DataType { self.dtype }
+    pub fn byte_len(&self) -> usize { self.byte_len }
+}
+
 /// Per-tensor device buffer state for one inference session.
 struct TensorState {
     buf: DeviceBuffer,
@@ -212,18 +259,20 @@ impl Session {
 
     /// Like `run_device_inputs` but leaves outputs in GPU memory.
     ///
-    /// Returns raw device pointers (`*mut c_void`) for each output tensor.
-    /// The pointers remain valid until the next `run_*` call or `Session` drop.
+    /// Returns a [`TensorView`] per output tensor: device pointer plus the
+    /// resolved shape, dtype, and byte length.  The views remain valid until
+    /// the next `run_*` call or `Session` drop (see [`TensorView`]).
     ///
     /// **Caller must call `session.stream().sync()` before reading the outputs.**
     ///
     /// # Safety
-    /// Same as `run_device_inputs`.  Additionally the returned pointers alias
-    /// Session-owned device memory — do not outlive the Session.
+    /// Same as `run_device_inputs`.  Additionally the returned views alias
+    /// Session-owned device memory — do not outlive the Session or hold them
+    /// across a subsequent `run_*` call.
     pub unsafe fn run_device_inputs_on_device(
         &mut self,
         device_inputs: &[(&str, *mut std::ffi::c_void, &[i64])],
-    ) -> Result<HashMap<String, *mut std::ffi::c_void>> {
+    ) -> Result<HashMap<String, TensorView>> {
         for (name, dev_ptr, shape) in device_inputs {
             let c_name = CString::new(*name)
                 .map_err(|_| TrtError::UnknownTensor((*name).into()))?;
@@ -238,7 +287,7 @@ impl Session {
         self.enqueue_outputs_only()
     }
 
-    fn enqueue_outputs_only(&mut self) -> Result<HashMap<String, *mut std::ffi::c_void>> {
+    fn enqueue_outputs_only(&mut self) -> Result<HashMap<String, TensorView>> {
         for (name, state) in &self.outputs {
             let c_name = CString::new(name.as_str()).unwrap();
             let dev_ptr = state.buf.as_device_ptr(&self.stream);
@@ -253,7 +302,12 @@ impl Session {
 
         let mut result = HashMap::new();
         for (name, state) in &self.outputs {
-            result.insert(name.clone(), state.buf.as_device_ptr(&self.stream));
+            result.insert(name.clone(), TensorView {
+                ptr:      state.buf.as_device_ptr(&self.stream),
+                shape:    state.shape.clone(),
+                dtype:    state.dtype,
+                byte_len: state.buf.len_bytes,
+            });
         }
         Ok(result)
     }
@@ -311,8 +365,10 @@ impl Session {
             if self.outputs[&name].buf.len_bytes != new_len {
                 self.outputs.get_mut(&name).unwrap().buf =
                     DeviceBuffer::alloc_with_stream(self.stream.cuda_stream(), new_len)?;
-                self.outputs.get_mut(&name).unwrap().shape = shape;
             }
+            // Shape can change without the byte length changing (e.g. a
+            // transposed dynamic profile) — always record the resolved shape.
+            self.outputs.get_mut(&name).unwrap().shape = shape;
         }
         Ok(())
     }

@@ -352,34 +352,29 @@ impl Stage for YoloInferStage {
     fn enqueue(&mut self, input: &TRTensor) -> Result<(), BoxError> {
         let shape   = input.shape_i64();
         let dev_ptr = input.as_mut_ptr();
-        let out_ptrs = unsafe {
+        let views = unsafe {
             self.session.run_device_inputs_on_device(
                 &[("images", dev_ptr, &shape)]
             )?
         };
 
-        // Resolve output tensor name (in case it changed after first inference).
-        let out_dev = *out_ptrs.get(&self.output_name)
+        // The view carries pointer + resolved shape + byte length together.
+        let view = views.get(&self.output_name)
             .ok_or_else(|| format!("no output tensor '{}'", self.output_name))?;
-        let out_bytes = self.session
-            .output_byte_len(&self.output_name)
-            .ok_or("unknown output byte length")?;
+        let out_bytes = view.byte_len();
 
-        // Resize host buffer and cache shape on first run.
+        // Resize host buffer and cache shape on first run (or shape change).
         let n_floats = out_bytes / 4;
-        if self.output_cpu.len() != n_floats {
+        if self.output_cpu.len() != n_floats || self.output_shape != view.shape() {
             self.output_cpu.resize(n_floats, 0.0);
-            self.output_shape = self.session
-                .output_shape(&self.output_name)
-                .unwrap_or_default()
-                .to_vec();
+            self.output_shape = view.shape().to_vec();
         }
 
         // Async D2H — data will be ready after the pipeline syncs the stream.
         unsafe {
             self.session.stream().memcpy_d2h_raw(
                 self.output_cpu.as_mut_ptr() as *mut u8,
-                out_dev as *const _,
+                view.ptr() as *const _,
                 out_bytes,
             )?;
         }

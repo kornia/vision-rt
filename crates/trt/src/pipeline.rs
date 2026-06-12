@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use cudarc::driver::CudaStream;
 use crate::buffer::Stream;
+use crate::session::TensorView;
 use crate::tensor::TRTensor;
 use crate::{Engine, Session};
 
@@ -68,17 +69,32 @@ where
 
 /// Device-side output map from a TRT inference stage.
 ///
-/// Keys are output tensor names; values are raw CUDA device pointers valid
-/// until the next `enqueue` call on the owning session.  Downstream GPU
-/// postprocessing stages read directly from these pointers without D2H.
-pub struct TRTensorMap(pub HashMap<String, *const std::ffi::c_void>);
-
-// SAFETY: pointers are stable device addresses; callers enforce ordering via the shared stream.
-unsafe impl Send for TRTensorMap {}
+/// Keys are output tensor names; values are typed [`TensorView`]s carrying
+/// the device pointer plus resolved shape/dtype/byte-length, so downstream
+/// stages never re-derive dimensions out of band.
+///
+/// Views are valid until the owning session's next `enqueue` (or drop) —
+/// consume them within the same frame, never store them across frames.
+pub struct TRTensorMap(HashMap<String, TensorView>);
 
 impl TRTensorMap {
-    pub fn get(&self, name: &str) -> Option<*const std::ffi::c_void> {
-        self.0.get(name).copied()
+    pub fn new(views: HashMap<String, TensorView>) -> Self { Self(views) }
+
+    /// Typed view of a named output tensor.
+    pub fn get(&self, name: &str) -> Option<&TensorView> {
+        self.0.get(name)
+    }
+
+    /// Device pointer of a named FP32 output, dtype-checked.
+    pub fn f32(&self, name: &str) -> Result<*const f32, BoxError> {
+        self.0.get(name)
+            .ok_or_else(|| format!("no output tensor '{name}'"))?
+            .f32_ptr()
+            .map_err(Into::into)
+    }
+
+    pub fn names(&self) -> impl Iterator<Item = &str> {
+        self.0.keys().map(String::as_str)
     }
 }
 
@@ -105,7 +121,7 @@ impl TrtInferStage {
         Ok(Self {
             session,
             input_name: input_name.into(),
-            outputs: TRTensorMap(HashMap::new()),
+            outputs: TRTensorMap::new(HashMap::new()),
         })
     }
 
@@ -121,16 +137,12 @@ impl Stage for TrtInferStage {
     fn enqueue(&mut self, input: &TRTensor) -> Result<(), BoxError> {
         let shape = input.shape_i64();
         let dev_ptr = input.as_mut_ptr();
-        let out_ptrs = unsafe {
+        let views = unsafe {
             self.session.run_device_inputs_on_device(
                 &[(self.input_name.as_str(), dev_ptr, &shape)]
             )?
         };
-        self.outputs = TRTensorMap(
-            out_ptrs.into_iter()
-                .map(|(k, v)| (k, v as *const _))
-                .collect()
-        );
+        self.outputs = TRTensorMap::new(views);
         Ok(())
     }
 

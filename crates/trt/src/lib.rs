@@ -36,6 +36,6 @@ pub use runtime::Runtime;
 pub use engine::{Engine, TensorSpec, TensorMode, DataType};
 pub use buffer::{DeviceBuffer, Stream};
 pub use cudarc::driver::CudaStream;
-pub use session::{Session, OutputTensor};
+pub use session::{Session, OutputTensor, TensorView};
 pub use tensor::{TRTensor, DType};
 pub use pipeline::{Source, Stage, Chain, TRTensorMap, TrtInferStage, Pipeline, PipelineTiming, BoxError};

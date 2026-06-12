@@ -8,6 +8,8 @@ pub enum TrtError {
     Deserialize(String),
     #[error("tensor '{0}' not found in engine")]
     UnknownTensor(String),
+    #[error("shape/dtype mismatch: {0}")]
+    Shape(String),
     #[error("CUDA error code {code}: {msg}")]
     Cuda { code: i32, msg: &'static str },
     #[error("TensorRT error: {0}")]
