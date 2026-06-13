@@ -58,15 +58,21 @@ Backbone outputs (TRT engine, all FP32 on device):
 Postproc algorithm (postprocess.rs):
 1. GPU `xfeat_score_nms` — 5×5 local-max NMS; score = heatmap×reliability,
    zeroed below `threshold` (default 0.05) or if any neighbour is greater.
-2. GPU `xfeat_compact_scores` — stream-compact NMS survivors (atomic
-   append), then D2H only the survivors (tens of KB, not the full map);
-   CPU selects K best (default 4096). This is why the stage has `finalize`.
+2. GPU top-K (all on device — no CPU round trip): `xfeat_topk_histogram`
+   bins survivor scores, `xfeat_topk_cutoff` finds the score threshold for
+   ~K survivors, `xfeat_topk_select` atomically gathers survivors ≥ cutoff
+   capped at K (default 4096). Approximate only at the boundary bucket
+   (1024 bins). Output is in atomic-append order, NOT score-sorted.
 3. GPU `xfeat_sample_descs` — bilinear sample 64-D descriptors at kpt/8
    positions, **align_corners=False** convention (matches PyTorch grid_sample).
 4. GPU `xfeat_l2_norm` — in-place L2-normalize each descriptor row.
 
-`XFeatResult`: `kpts` (device, K×2 model-space xy), `descs` (device, K×64,
-L2-normalized), `scores` (host), `kpts_cpu` (host copy, free — kept pre-upload).
+The whole postproc is a pure async tail: `launch_topk` enqueues everything
++ async D2H (count/scores/xy) with NO sync; the pipeline's single per-frame
+sync makes it readable, and `finish_topk` (in the operator's finalize)
+assembles the result. `XFeatResult` device buffers are **capacity top_k**;
+the valid count is `scores.len()`. `kpts`/`descs`/`scores`/`kpts_cpu` share
+the GPU-select order (use `scores.len()` to bound device-buffer access).
 
 Matching: `match_mutual_nn_gpu` — cosine similarity (valid because descriptors
 are L2-normalized, so dot = cosine), mutual nearest-neighbor check via two

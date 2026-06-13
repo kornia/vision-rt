@@ -7,6 +7,6 @@
 pub mod postprocess;
 pub mod model;
 
-pub use postprocess::{XFeatResult, XFeatPostproc, XFeatError, match_mutual_nn};
+pub use postprocess::{XFeatResult, XFeatPostproc, XFeatError, TopkBufs, match_mutual_nn};
 pub use model::{XFeat, XFeatBuilder, XFeatParams, XFeatInferStage, XFeatPostprocStage};
 pub use vrt_preproc::{Preprocessor, TextureGuard};

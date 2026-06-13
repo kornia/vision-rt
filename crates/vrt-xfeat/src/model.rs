@@ -4,18 +4,7 @@
 use std::sync::Arc;
 use cudarc::driver::CudaSlice;
 use vrt::{Engine, Runtime, Session, CudaStream, Operator, ExecCtx, BoxError, VrtTensor, TRTensorMap};
-use crate::postprocess::{XFeatPostproc, XFeatResult, XFeatError};
-
-/// Pending handle between `enqueue` and `finalize`: the `descriptors` device
-/// pointer captured at enqueue time (the NMS score map is already in the
-/// stage's `score_dev`).  Carrying it in the `Pending` value — rather than a
-/// stored `Option<*const f32>` — makes its enqueue→finalize lifetime explicit.
-///
-/// SAFETY (Send): a device address into the upstream session's output buffer,
-/// valid from enqueue to the same frame's finalize.  Stream ordering serializes
-/// GPU access; the value is consumed exactly once per frame in finalize.
-pub struct DescPending(*const f32);
-unsafe impl Send for DescPending {}
+use crate::postprocess::{XFeatPostproc, XFeatResult, XFeatError, TopkBufs};
 
 // ── Params ────────────────────────────────────────────────────────────────────
 
@@ -85,14 +74,10 @@ impl XFeatBuilder {
 
 /// Pipeline stage: [`VrtTensor`] → [`XFeatResult`].
 ///
-/// Runs TRT inference + GPU NMS/sampling async on the shared stream, then a
-/// D2H sync for the top-K score selection (inherent to the XFeat algorithm).
-/// All GPU kernels are enqueued in `enqueue`; `finalize` is a no-op.
-///
-/// ## Internal sync note
-/// XFeat's top-K selection requires scores on the CPU, so `enqueue` syncs the
-/// stream once internally.  The pipeline's outer sync after `enqueue` is
-/// harmless (the stream is already idle).
+/// Backbone + GPU NMS + GPU top-K + descriptor sampling are all enqueued async
+/// on the shared stream in `enqueue` (returning a [`TopkBufs`] handle); the
+/// result is assembled in `finalize` after the pipeline's single sync.  No
+/// internal `stream.sync()` — the top-K runs entirely on the GPU.
 pub struct XFeatInferStage {
     session:  Session,
     postproc: XFeatPostproc,
@@ -120,10 +105,10 @@ impl XFeatInferStage {
 
 impl Operator for XFeatInferStage {
     type Input   = VrtTensor;
-    type Pending = XFeatResult;   // this stage syncs internally and finishes in enqueue
+    type Pending = TopkBufs;
     type Output  = XFeatResult;
 
-    fn enqueue(&mut self, input: &VrtTensor, _ctx: &ExecCtx) -> Result<XFeatResult, BoxError> {
+    fn enqueue(&mut self, input: &VrtTensor, _ctx: &ExecCtx) -> Result<TopkBufs, BoxError> {
         let shape   = input.shape_i64();
         let dev_ptr = input.as_mut_ptr();
 
@@ -133,20 +118,21 @@ impl Operator for XFeatInferStage {
             )?
         };
 
-        // Sync before GPU postproc reads TRT output (top-K requires CPU scores).
-        self.session.stream().sync()?;
-
         let desc_ptr = views.get("descriptors").ok_or("no 'descriptors' output")?.f32_ptr()?;
         let heat_ptr = views.get("heatmap").ok_or("no 'heatmap' output")?.f32_ptr()?;
         let rel_ptr  = views.get("reliability").ok_or("no 'reliability' output")?.f32_ptr()?;
 
-        let h = input.dim(2);
-        let w = input.dim(3);
-        Ok(self.postproc.process(desc_ptr, heat_ptr, rel_ptr, h, w)?)
+        let (h, w) = (input.dim(2), input.dim(3));
+        // Per-frame NMS score buffer (this stage has no fixed h/w). Dropped at
+        // the end of enqueue; cudarc's stream-ordered free runs after the
+        // kernels that read it, so it stays valid for the launched work.
+        let score_dev: CudaSlice<f32> = unsafe { self.postproc.stream().alloc(h * w)? };
+        self.postproc.launch_score_nms(heat_ptr, rel_ptr, &score_dev, h, w)?;
+        Ok(self.postproc.launch_topk(desc_ptr, &score_dev, h, w)?)
     }
 
-    fn finalize(&mut self, pending: XFeatResult, _ctx: &ExecCtx) -> Result<XFeatResult, BoxError> {
-        Ok(pending)
+    fn finalize(&mut self, pending: TopkBufs, _ctx: &ExecCtx) -> Result<XFeatResult, BoxError> {
+        Ok(self.postproc.finish_topk(pending))
     }
 }
 
@@ -191,20 +177,20 @@ impl XFeatPostprocStage {
 
 impl Operator for XFeatPostprocStage {
     type Input   = TRTensorMap;
-    type Pending = DescPending;
+    type Pending = TopkBufs;
     type Output  = XFeatResult;
 
-    fn enqueue(&mut self, input: &TRTensorMap, _ctx: &ExecCtx) -> Result<DescPending, BoxError> {
+    fn enqueue(&mut self, input: &TRTensorMap, _ctx: &ExecCtx) -> Result<TopkBufs, BoxError> {
         let desc_ptr = input.f32("descriptors")?;
         let heat_ptr = input.f32("heatmap")?;
         let rel_ptr  = input.f32("reliability")?;
 
         self.postproc.launch_score_nms(heat_ptr, rel_ptr, &self.score_dev, self.h, self.w)?;
-        Ok(DescPending(desc_ptr))
+        Ok(self.postproc.launch_topk(desc_ptr, &self.score_dev, self.h, self.w)?)
     }
 
-    fn finalize(&mut self, pending: DescPending, _ctx: &ExecCtx) -> Result<XFeatResult, BoxError> {
-        Ok(self.postproc.process_topk_sample(pending.0, &self.score_dev, self.h, self.w)?)
+    fn finalize(&mut self, pending: TopkBufs, _ctx: &ExecCtx) -> Result<XFeatResult, BoxError> {
+        Ok(self.postproc.finish_topk(pending))
     }
 }
 
@@ -296,10 +282,10 @@ impl XFeat {
 /// - `finalize` (after stream sync): D2H scores → top-K → descriptor sampling + L2-norm
 impl Operator for XFeat {
     type Input   = VrtTensor;
-    type Pending = DescPending;
+    type Pending = TopkBufs;
     type Output  = XFeatResult;
 
-    fn enqueue(&mut self, input: &VrtTensor, _ctx: &ExecCtx) -> Result<DescPending, BoxError> {
+    fn enqueue(&mut self, input: &VrtTensor, _ctx: &ExecCtx) -> Result<TopkBufs, BoxError> {
         let shape   = input.shape_i64();
         let dev_ptr = input.as_mut_ptr();
 
@@ -312,10 +298,10 @@ impl Operator for XFeat {
         let rel_ptr  = views.get("reliability").ok_or("no 'reliability' output")?.f32_ptr()?;
 
         self.postproc.launch_score_nms(heat_ptr, rel_ptr, &self.score_dev, self.h, self.w)?;
-        Ok(DescPending(desc_ptr))
+        Ok(self.postproc.launch_topk(desc_ptr, &self.score_dev, self.h, self.w)?)
     }
 
-    fn finalize(&mut self, pending: DescPending, _ctx: &ExecCtx) -> Result<XFeatResult, BoxError> {
-        Ok(self.postproc.process_topk_sample(pending.0, &self.score_dev, self.h, self.w)?)
+    fn finalize(&mut self, pending: TopkBufs, _ctx: &ExecCtx) -> Result<XFeatResult, BoxError> {
+        Ok(self.postproc.finish_topk(pending))
     }
 }

@@ -79,6 +79,10 @@ description: Use when writing, optimizing, or reviewing CUDA kernel code itself 
   (kernel-level) or `nsys profile` (timeline). Run at MAXN_SUPER.
 - A kernel at < 0.2ms on 1280×736 is in the noise next to the ~10ms
   backbone — don't optimize it; fuse it or leave it.
+- GPU top-K without a CPU round trip: histogram-cutoff (bin scores → scan
+  for the K-th threshold → atomic-gather above it). Approximate at the
+  boundary bin but avoids the mid-frame device→host→device sort. See
+  xfeat_topk_* in vrt-xfeat. Output is atomic-append order, not sorted.
 - Fusing beats micro-tuning here: `xfeat_score_nms` fuses NMS + score
   multiply into one pass to halve traffic. Look for fusion (one read, one
   write) before tweaking block sizes.
