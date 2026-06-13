@@ -120,6 +120,14 @@ impl Stream {
     pub fn new_standalone() -> Result<Self> {
         let ctx = CudaContext::new(0)
             .map_err(|e| TrtError::Cuda { code: e.0 as i32, msg: "CudaContext::new" })?;
+        // Single stream per pipeline, one sync per frame — no cross-stream buffer
+        // hazards, so cudarc's per-op event tracking is pure overhead.  Disabling
+        // it drops the per-alloc event creation + thousands of cuStreamWaitEvent /
+        // cuEventRecord calls per second (confirmed by nsys).
+        // SAFETY: every buffer in a pipeline is allocated, used, and freed on this
+        // one stream (stream-ordered) — none crosses streams, so the manual-sync
+        // contract of disable_event_tracking holds.
+        unsafe { ctx.disable_event_tracking(); }
         Self::new(&ctx)
     }
 

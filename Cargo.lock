@@ -3463,6 +3463,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1ffae5123b2d3fc086436f8834ae3ab053a283cfac8fe0a0b8eaae044768a4c4"
 
 [[package]]
+name = "xfeat_bench"
+version = "0.1.0"
+dependencies = [
+ "image",
+ "vision-rt",
+ "vrt-hub",
+ "vrt-preproc",
+ "vrt-xfeat",
+]
+
+[[package]]
 name = "xfeat_match"
 version = "0.1.0"
 dependencies = [

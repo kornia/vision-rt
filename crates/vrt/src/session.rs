@@ -113,6 +113,9 @@ impl Session {
         // Retain the primary CUDA context (same context TRT uses internally).
         let cuda_ctx = CudaContext::new(0)
             .map_err(|e| TrtError::Cuda { code: e.0 as i32, msg: "CudaContext" })?;
+        // Single-stream usage — drop cudarc's cross-stream event tracking overhead.
+        // SAFETY: all session buffers live on this one stream; none crosses streams.
+        unsafe { cuda_ctx.disable_event_tracking(); }
         let stream = Stream::new(&cuda_ctx)?;
         Self::init(engine, stream)
     }

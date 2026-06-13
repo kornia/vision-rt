@@ -12,6 +12,7 @@ members = [
     "examples/rtsp_yolo",
     "examples/rtsp_xfeat",
     "examples/xfeat_match",
+    "examples/xfeat_bench",
 ]
 
 [workspace.package]
