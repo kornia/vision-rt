@@ -4,7 +4,8 @@ use std::time::Instant;
 use cudarc::driver::CudaStream;
 use crate::buffer::Stream;
 use crate::tensor::VrtTensor;
-use crate::{Engine, Session};
+use crate::Engine;
+use crate::model::ModelSession;
 
 pub type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>;
 
@@ -205,7 +206,7 @@ impl TRTensorMap {
 /// Outputs stay on the GPU — a downstream postprocessing stage reads them
 /// either via device kernels (no copy) or async D2H in its own `enqueue`.
 pub struct TrtInferStage {
-    session:    Session,
+    model:      ModelSession,
     input_name: String,
 }
 
@@ -216,12 +217,12 @@ impl TrtInferStage {
         input_name:  impl Into<String>,
         cuda_stream: Arc<CudaStream>,
     ) -> crate::error::Result<Self> {
-        let session = Session::with_stream(engine, cuda_stream)?;
-        Ok(Self { session, input_name: input_name.into() })
+        let model = ModelSession::new(engine, cuda_stream)?;
+        Ok(Self { model, input_name: input_name.into() })
     }
 
     pub fn cuda_stream(&self) -> Arc<CudaStream> {
-        self.session.stream().cuda_stream().clone()
+        self.model.cuda_stream()
     }
 }
 
@@ -231,14 +232,7 @@ impl Operator for TrtInferStage {
     type Output  = ();
 
     fn enqueue(&mut self, input: &VrtTensor, _ctx: &ExecCtx) -> Result<TRTensorMap, BoxError> {
-        let shape = input.shape_i64();
-        let dev_ptr = input.as_mut_ptr();
-        let views = unsafe {
-            self.session.run_device_inputs_on_device(
-                &[(self.input_name.as_str(), dev_ptr, &shape)]
-            )?
-        };
-        Ok(TRTensorMap::new(views))
+        self.model.run_inputs(&[(self.input_name.as_str(), input)]).map_err(Into::into)
     }
 
     fn finalize(&mut self, _pending: TRTensorMap, _ctx: &ExecCtx) -> Result<(), BoxError> {

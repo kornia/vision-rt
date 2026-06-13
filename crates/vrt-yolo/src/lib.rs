@@ -9,7 +9,7 @@ use kornia_imgproc::{
     padding::{spatial_padding, Padding2D, PaddingMode},
     resize::resize_fast_rgb,
 };
-use vrt::{Engine, Session, DeviceBuffer, CudaStream, Operator, ExecCtx, BoxError, VrtTensor};
+use vrt::{Engine, Session, ModelSession, DeviceBuffer, CudaStream, Operator, ExecCtx, BoxError, VrtTensor};
 
 /// Errors from YOLO pre/post-processing and inference.
 #[derive(Debug, thiserror::Error)]
@@ -317,7 +317,7 @@ impl Yolo {
 /// Owns its `Session` — share the CUDA stream with other stages via
 /// [`Session::with_stream`](vrt::Session::with_stream).
 pub struct YoloInferStage {
-    session:      Session,
+    model:        ModelSession,
     lb_info:      LetterboxInfo,
     conf_thresh:  f32,
     iou_thresh:   f32,
@@ -338,13 +338,12 @@ impl YoloInferStage {
         conf_thresh: f32,
         iou_thresh:  f32,
     ) -> Result<Self, BoxError> {
-        let session = Session::with_stream(engine, cuda_stream)?;
+        let model = ModelSession::new(engine, cuda_stream)?;
         // Pick the first output tensor name from the engine (YOLO has one output).
-        let output_name = session.output_shape_names()
-            .into_iter().next()
+        let output_name = model.output_names().first().cloned()
             .ok_or("engine has no output tensors")?;
         Ok(Self {
-            session, lb_info, conf_thresh, iou_thresh,
+            model, lb_info, conf_thresh, iou_thresh,
             output_name,
             output_cpu:   Vec::new(),
             output_shape: Vec::new(),
@@ -352,7 +351,7 @@ impl YoloInferStage {
     }
 
     pub fn cuda_stream(&self) -> Arc<CudaStream> {
-        self.session.stream().cuda_stream().clone()
+        self.model.cuda_stream()
     }
 }
 
@@ -362,16 +361,10 @@ impl Operator for YoloInferStage {
     type Output  = Vec<Detection>;
 
     fn enqueue(&mut self, input: &VrtTensor, _ctx: &ExecCtx) -> Result<(), BoxError> {
-        let shape   = input.shape_i64();
-        let dev_ptr = input.as_mut_ptr();
-        let views = unsafe {
-            self.session.run_device_inputs_on_device(
-                &[("images", dev_ptr, &shape)]
-            )?
-        };
+        let out = self.model.run(input)?;
 
         // The view carries pointer + resolved shape + byte length together.
-        let view = views.get(&self.output_name)
+        let view = out.get(&self.output_name)
             .ok_or_else(|| format!("no output tensor '{}'", self.output_name))?;
         let out_bytes = view.byte_len();
 
@@ -384,7 +377,7 @@ impl Operator for YoloInferStage {
 
         // Async D2H — data will be ready after the pipeline syncs the stream.
         unsafe {
-            self.session.stream().memcpy_d2h_raw(
+            self.model.stream().memcpy_d2h_raw(
                 self.output_cpu.as_mut_ptr() as *mut u8,
                 view.as_ptr() as *const _,
                 out_bytes,

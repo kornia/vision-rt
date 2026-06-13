@@ -68,6 +68,14 @@ impl Engine {
     pub fn outputs(&self) -> impl Iterator<Item = &TensorSpec> {
         self.specs.iter().filter(|s| s.mode == TensorMode::Output)
     }
+    /// Names of the input tensors, in engine order.
+    pub fn input_names(&self) -> Vec<String> {
+        self.inputs().map(|s| s.name.clone()).collect()
+    }
+    /// Names of the output tensors, in engine order.
+    pub fn output_names(&self) -> Vec<String> {
+        self.outputs().map(|s| s.name.clone()).collect()
+    }
 
     pub(crate) fn as_ptr(&self) -> *mut btrt_engine_t { self.ptr }
 }

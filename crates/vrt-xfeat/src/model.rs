@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 use cudarc::driver::CudaSlice;
-use vrt::{Engine, Runtime, Session, CudaStream, Operator, ExecCtx, BoxError, VrtTensor, TRTensorMap};
+use vrt::{Engine, Runtime, ModelSession, CudaStream, Operator, ExecCtx, BoxError, VrtTensor, TRTensorMap};
 use crate::postprocess::{XFeatPostproc, XFeatResult, XFeatError, TopkBufs};
 
 // ── Params ────────────────────────────────────────────────────────────────────
@@ -56,17 +56,18 @@ impl XFeatBuilder {
         Self { runtime, engine_path: engine_path.into(), params }
     }
 
-    /// Load the engine and create a session with all pipeline stages wired to its stream.
+    /// Load the engine and create a model session with all pipeline stages
+    /// wired to one shared CUDA stream.
     pub fn build(self) -> Result<XFeat, XFeatError> {
-        let engine  = Engine::from_file(Arc::clone(&self.runtime), &self.engine_path)?;
-        let session = Session::new(Arc::clone(&engine))?;
-        let stream  = session.stream().cuda_stream().clone();
-        let (h, w)  = (self.params.h, self.params.w);
+        let engine = Engine::from_file(Arc::clone(&self.runtime), &self.engine_path)?;
+        let stream = vrt::Stream::new_standalone()?.cuda_stream().clone();
+        let model  = ModelSession::new(engine, stream.clone())?;
+        let (h, w) = (self.params.h, self.params.w);
 
         let postproc  = XFeatPostproc::new(stream.clone(), self.params.top_k, self.params.threshold)?;
         let score_dev: CudaSlice<f32> = unsafe { stream.alloc(h * w)? };
 
-        Ok(XFeat { session, postproc, score_dev, h, w })
+        Ok(XFeat { model, postproc, score_dev, h, w })
     }
 }
 
@@ -79,7 +80,7 @@ impl XFeatBuilder {
 /// result is assembled in `finalize` after the pipeline's single sync.  No
 /// internal `stream.sync()` — the top-K runs entirely on the GPU.
 pub struct XFeatInferStage {
-    session:  Session,
+    model:    ModelSession,
     postproc: XFeatPostproc,
 }
 
@@ -93,13 +94,13 @@ impl XFeatInferStage {
         top_k:       usize,
         threshold:   f32,
     ) -> Result<Self, BoxError> {
-        let session  = Session::with_stream(Arc::clone(&engine), Arc::clone(&cuda_stream))?;
+        let model    = ModelSession::new(Arc::clone(&engine), Arc::clone(&cuda_stream))?;
         let postproc = XFeatPostproc::new(cuda_stream, top_k, threshold)?;
-        Ok(Self { session, postproc })
+        Ok(Self { model, postproc })
     }
 
     pub fn cuda_stream(&self) -> Arc<CudaStream> {
-        self.session.stream().cuda_stream().clone()
+        self.model.cuda_stream()
     }
 }
 
@@ -109,18 +110,10 @@ impl Operator for XFeatInferStage {
     type Output  = XFeatResult;
 
     fn enqueue(&mut self, input: &VrtTensor, _ctx: &ExecCtx) -> Result<TopkBufs, BoxError> {
-        let shape   = input.shape_i64();
-        let dev_ptr = input.as_mut_ptr();
-
-        let views = unsafe {
-            self.session.run_device_inputs_on_device(
-                &[("image", dev_ptr, &shape)]
-            )?
-        };
-
-        let desc_ptr = views.get("descriptors").ok_or("no 'descriptors' output")?.f32_ptr()?;
-        let heat_ptr = views.get("heatmap").ok_or("no 'heatmap' output")?.f32_ptr()?;
-        let rel_ptr  = views.get("reliability").ok_or("no 'reliability' output")?.f32_ptr()?;
+        let out = self.model.run(input)?;
+        let desc_ptr = out.f32("descriptors")?;
+        let heat_ptr = out.f32("heatmap")?;
+        let rel_ptr  = out.f32("reliability")?;
 
         let (h, w) = (input.dim(2), input.dim(3));
         // Per-frame NMS score buffer (this stage has no fixed h/w). Dropped at
@@ -207,7 +200,7 @@ impl Operator for XFeatPostprocStage {
 ///
 /// [`Pipeline`]: vrt::Pipeline
 pub struct XFeat {
-    session:   Session,
+    model:     ModelSession,
     postproc:  XFeatPostproc,
     score_dev: CudaSlice<f32>,  // pre-allocated h×w NMS score buffer
     h:         usize,
@@ -237,16 +230,16 @@ impl XFeat {
         stream: Arc<CudaStream>,
         params: XFeatParams,
     ) -> Result<Self, BoxError> {
-        let session   = Session::with_stream(Arc::clone(&engine), Arc::clone(&stream))?;
+        let model     = ModelSession::new(Arc::clone(&engine), Arc::clone(&stream))?;
         let (h, w)    = (params.h, params.w);
         let postproc  = XFeatPostproc::new(stream.clone(), params.top_k, params.threshold)?;
         let score_dev: CudaSlice<f32> = unsafe { stream.alloc(h * w)? };
 
-        Ok(XFeat { session, postproc, score_dev, h, w })
+        Ok(XFeat { model, postproc, score_dev, h, w })
     }
 
     /// The CUDA stream used by this model.
-    pub fn stream(&self) -> &vrt::Stream { self.session.stream() }
+    pub fn stream(&self) -> &vrt::Stream { self.model.stream() }
 
     /// Access the postproc (e.g. to call `match_mutual_nn_gpu` between two results).
     pub fn postproc(&self) -> &XFeatPostproc { &self.postproc }
@@ -256,18 +249,12 @@ impl XFeat {
     /// Runs backbone + sync + postproc in one call.  The tensor must already be on
     /// device (shape `[1, 3, H, W]`, values in `[0, 1]`).
     pub fn extract(&mut self, input: &VrtTensor) -> Result<XFeatResult, XFeatError> {
-        let shape   = input.shape_i64();
-        let dev_ptr = input.as_mut_ptr();
-
-        let views = unsafe {
-            self.session.run_device_inputs_on_device(&[("image", dev_ptr, &shape)])?
-        };
-        self.session.stream().sync()?;
-
-        let desc_ptr = views.get("descriptors").ok_or(XFeatError::MissingOutput("descriptors"))?.f32_ptr()?;
-        let heat_ptr = views.get("heatmap").ok_or(XFeatError::MissingOutput("heatmap"))?.f32_ptr()?;
-        let rel_ptr  = views.get("reliability").ok_or(XFeatError::MissingOutput("reliability"))?.f32_ptr()?;
-
+        let out = self.model.run(input)?;
+        let desc_ptr = out.get("descriptors").ok_or(XFeatError::MissingOutput("descriptors"))?.f32_ptr()?;
+        let heat_ptr = out.get("heatmap").ok_or(XFeatError::MissingOutput("heatmap"))?.f32_ptr()?;
+        let rel_ptr  = out.get("reliability").ok_or(XFeatError::MissingOutput("reliability"))?.f32_ptr()?;
+        // process() launches NMS→top-K→sample on the same stream after the
+        // backbone (stream-ordered) and syncs internally — no separate sync.
         self.postproc.process(desc_ptr, heat_ptr, rel_ptr, self.h, self.w)
     }
 }
@@ -286,16 +273,10 @@ impl Operator for XFeat {
     type Output  = XFeatResult;
 
     fn enqueue(&mut self, input: &VrtTensor, _ctx: &ExecCtx) -> Result<TopkBufs, BoxError> {
-        let shape   = input.shape_i64();
-        let dev_ptr = input.as_mut_ptr();
-
-        let views = unsafe {
-            self.session.run_device_inputs_on_device(&[("image", dev_ptr, &shape)])?
-        };
-
-        let desc_ptr = views.get("descriptors").ok_or("no 'descriptors' output")?.f32_ptr()?;
-        let heat_ptr = views.get("heatmap").ok_or("no 'heatmap' output")?.f32_ptr()?;
-        let rel_ptr  = views.get("reliability").ok_or("no 'reliability' output")?.f32_ptr()?;
+        let out = self.model.run(input)?;
+        let desc_ptr = out.f32("descriptors")?;
+        let heat_ptr = out.f32("heatmap")?;
+        let rel_ptr  = out.f32("reliability")?;
 
         self.postproc.launch_score_nms(heat_ptr, rel_ptr, &self.score_dev, self.h, self.w)?;
         Ok(self.postproc.launch_topk(desc_ptr, &self.score_dev, self.h, self.w)?)
