@@ -8,12 +8,12 @@ the library crates.
 
 Package names: `vision-rt` (core) + `vrt-*` satellites (crates.io: `trt`/`vrt` taken), but
 `[lib] name` keeps the short names — code uses `use vrt::`, `use vrt_xfeat::`.
-Errors: per-crate thiserror enums; `BoxError` only in the `Stage` trait.
+Errors: per-crate thiserror enums; `BoxError` only in the `Operator` trait.
 
 | Crate | Role |
 |-------|------|
 | `crates/vrt-sys` | Raw FFI: pure-C shim over TensorRT C++ (bindgen never sees C++ headers) |
-| `crates/vrt` | Safe wrapper: Logger→Runtime→Engine→Session Arc chain, `Pipeline`/`Stage` |
+| `crates/vrt` | Safe wrapper: Logger→Runtime→Engine→Session Arc chain, `Pipeline`/`Operator` |
 | `crates/vrt-preproc` | GPU letterbox RGBA→CHW (nvrtc JIT kernel) |
 | `crates/vrt-xfeat` | XFeat keypoints: backbone + GPU NMS/top-K/descriptor sampling |
 | `crates/vrt-yolo` | YOLO11/v8: CPU letterbox + decode + NMS |
@@ -23,7 +23,7 @@ Errors: per-crate thiserror enums; `BoxError` only in the `Stage` trait.
 
 ## Architecture in one paragraph
 
-A `Pipeline` chains typed `Stage`s (`.pipe()`, compile-time type-checked) on
+A `Pipeline` chains typed `Operator`s (`.pipe()`, compile-time type-checked) on
 ONE shared CUDA stream. Each frame: `source → enqueue (all GPU work, async) →
 one cudaStreamSynchronize → finalize (CPU postproc)`. GPU time is measured
 with CUDA events (`PipelineTiming.gpu_ms` — the authoritative metric).

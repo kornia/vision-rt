@@ -13,7 +13,7 @@ CUDA 12.6.
 | Crate (crates.io name) | Path | Role |
 |---|---|---|
 | `vrt-sys` | `crates/vrt-sys` | Raw FFI: pure-C shim over TensorRT C++, bindgen, optional in-process engine builder (`builder` feature, links nvonnxparser) |
-| `vision-rt` | `crates/vrt` | Safe wrapper: Logger→Runtime→Engine→Session, typed `Pipeline`/`Stage`, `VrtTensor`/`Image`, CUDA-event timing, `cuda::Kernels` nvrtc helper |
+| `vision-rt` | `crates/vrt` | Safe wrapper: Logger→Runtime→Engine→Session, typed `Pipeline`/`Operator`, `VrtTensor`/`VrtImage`, CUDA-event timing, `cuda::Kernels` nvrtc helper |
 | `vrt-preproc` | `crates/vrt-preproc` | GPU letterbox RGBA→CHW (hardware bilinear via texture objects) |
 | `vrt-xfeat` | `crates/vrt-xfeat` | XFeat keypoints: TRT backbone + GPU NMS / top-K compaction / descriptor sampling / mutual-NN matching |
 | `vrt-yolo` | `crates/vrt-yolo` | YOLO11/v8: CPU letterbox, decode, NMS |
@@ -25,7 +25,7 @@ In Rust code the crates keep short names: `use vrt::…`, `use vrt_xfeat::…`.
 
 ## Execution model
 
-A `Pipeline` chains typed `Stage`s on **one shared CUDA stream**. Per frame:
+A `Pipeline` chains typed `Operator`s on **one shared CUDA stream**. Per frame:
 
 ```
 source → enqueue (all GPU work, async) → one cudaStreamSynchronize → finalize (CPU postproc)

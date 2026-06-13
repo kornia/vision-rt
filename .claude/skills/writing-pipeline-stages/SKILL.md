@@ -1,40 +1,63 @@
 ---
 name: writing-pipeline-stages
-description: Use when adding, modifying, or debugging a Stage in the vision-rt pipeline (preprocess, inference, postprocess stages) — covers the two-phase enqueue/finalize contract, stream sharing, and Send safety for device pointers.
+description: Use when adding, modifying, or debugging an Operator (formerly Stage) in the vision-rt pipeline (preprocess, inference, postprocess) — covers the two-phase enqueue/finalize contract, ExecCtx, typed Pending, stream sharing, and Send safety for device pointers.
 ---
 
-# Writing Pipeline Stages
+# Writing Pipeline Operators
 
-## The two-phase contract (crates/vrt/src/pipeline.rs)
+## The Operator trait (crates/vrt/src/pipeline.rs)
 
-Every `Stage` runs in two phases, separated by ONE `cudaStreamSynchronize` issued by the `Pipeline` — never by the stage itself:
+```rust
+pub trait Operator {
+    type Input;
+    type Pending: Send;   // handed to the NEXT operator's enqueue (pre-sync)
+    type Output;          // produced by finalize (post-sync), returned by value
+    fn enqueue(&mut self, input: &Self::Input, ctx: &ExecCtx) -> Result<Self::Pending, BoxError>;
+    fn finalize(&mut self, pending: Self::Pending, ctx: &ExecCtx) -> Result<Self::Output, BoxError>;
+}
+```
 
-1. `enqueue(&input)` — submit ALL GPU work to the **shared stream**, non-blocking.
-   Store any device pointers needed later in `self` (as `Option<*const f32>` etc.).
-2. `finalize()` — runs after the pipeline sync. Do CPU work here: D2H reads,
-   top-K selection, NMS. Store the result in `self.result: Option<Output>`.
-3. `output()` — `self.result.as_ref().expect(...)`.
+Two phases, separated by ONE `cudaStreamSynchronize` the `Pipeline` issues —
+never the operator itself:
 
-**Never call `stream.sync()` inside `enqueue`** unless the algorithm truly
-requires CPU data mid-stage (document why if so — see `XFeatInferStage` legacy note).
+1. `enqueue(&input, ctx)` — submit ALL GPU work to `ctx.stream()`, non-blocking.
+   Return a **`Pending`** carrying whatever `finalize` needs (a device pointer,
+   a borrowed `VrtTensor` view, …). This is the inter-operator currency: the
+   next operator's `Input` **is** this `Pending`.
+2. `finalize(pending, ctx)` — runs after the sync. Do CPU work (D2H, top-K, NMS)
+   and **return** the `Output` by value. No `output()` method, no stored
+   `Option<Output>`, no `expect()`.
+
+Key shift from the old `Stage`: results flow through return values and the
+typed `Pending`, not stashed mutable `self` state. `Chain` wires
+`B::Input = A::Pending` and the compiler checks it.
+
+**Never call `ctx.stream().synchronize()` inside `enqueue`** unless the
+algorithm truly needs CPU data mid-frame (document why — see `XFeatInferStage`).
+`ExecCtx` exposes the stream for launching but no `sync()` for this reason.
 
 ## Rules
 
-- **One stream for everything.** Construct stages with the pipeline's
-  `Arc<CudaStream>` (`Session::with_stream`, `XFeatPostproc::new(stream, ...)`).
-  A stage with its own stream breaks the one-sync-per-frame model.
+- **One stream for everything.** Launch on `ctx.stream()`; construct sessions
+  with the pipeline's `Arc<CudaStream>` (`Session::with_stream`). An operator
+  with its own stream breaks the one-sync-per-frame model.
 - **Pre-allocate device buffers in the constructor** (e.g. `score_dev`),
-  reuse every frame. Never allocate in `enqueue`.
-- **Raw device pointers in struct fields need `unsafe impl Send`** with a
-  safety comment: stream ordering enforces exclusive access. See `XFeat` and
-  `XFeatPostprocStage` for the pattern.
+  reuse every frame. Never allocate in `enqueue`. To hand a reused output
+  buffer downstream, return `self.output.view()` (a borrowed `VrtTensor`).
+- **Raw device pointers belong in the `Pending` value, not `self`.** Wrap them
+  in a small `Send` newtype (see `DescPending` in vrt-xfeat) with a SAFETY note
+  — one honest `unsafe impl Send` on a data-only handle beats one on the whole
+  operator. Resources that must outlive the sync (TextureGuard, CudaMemory
+  import) still live in `self`, dropped in `finalize`.
 - **Errors**: library APIs return per-crate thiserror enums (`TrtError`,
   `PreprocError`, `XFeatError`, `GstSourceError`, `HubError`); only the
-  `Stage` trait uses `BoxError` (`Box<dyn Error + Send + Sync>`) so operator
+  `Operator` trait uses `BoxError` (`Box<dyn Error + Send + Sync>`) so operator
   authors can use any error type — typed errors convert via plain `?`.
   Never introduce non-Send `Box<dyn Error>` returns (audit 2026-06-12).
-- **Chaining is type-checked**: `pipeline.pipe(stage)` requires
-  `stage::Input == previous::Output`. If types don't line up, fix the stage
+- **FrameMeta**: `ctx.frame()` gives `{seq, pts_ns, source_id}` — use it for
+  tracking / multi-camera correlation instead of threading your own counter.
+- **Chaining is type-checked**: `pipeline.pipe(op)` requires
+  `op::Input == previous::Pending`. If types don't line up, fix the operator
   types, don't add adapter copies.
 
 ## Separation of concerns
