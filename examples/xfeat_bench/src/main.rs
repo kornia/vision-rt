@@ -116,10 +116,9 @@ fn main() -> Result<(), vrt::BoxError> {
     println!("  sync     {:.3}   (wall cudaStreamSynchronize)", mean(acc.sync_ms));
     println!("  finalize {:.3}   (host read: count/scores/xy)", mean(acc.finalize_ms));
 
-    println!("\n  note: the async D2H of results targets pageable host Vecs, which");
-    println!("  CUDA makes synchronous — so `enqueue` blocks on the GPU here and");
-    println!("  absorbs the wait that `sync` would otherwise show. `gpu` (CUDA");
-    println!("  events) is the true GPU time; the end-to-end total is unaffected.");
+    println!("\n  note: results D2H into PINNED host memory → truly async, so");
+    println!("  `enqueue` returns immediately and the GPU wait shows in `sync`");
+    println!("  (where it belongs). The CPU is free during GPU compute.");
 
     let pct = |v: &mut Vec<f64>, p: f64| { v.sort_by(|a, b| a.partial_cmp(b).unwrap()); v[((v.len() as f64 * p) as usize).min(v.len()-1)] };
     let total_mean: f64 = totals.iter().sum::<f64>() / m;

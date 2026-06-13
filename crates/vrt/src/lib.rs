@@ -39,7 +39,7 @@ pub use error::{TrtError, Result};
 pub use logger::Logger;
 pub use runtime::Runtime;
 pub use engine::{Engine, TensorSpec, TensorMode, DataType};
-pub use buffer::{DeviceBuffer, Stream};
+pub use buffer::{DeviceBuffer, Stream, PinnedBuffer};
 pub use cudarc;
 pub use cudarc::driver::CudaStream;
 pub use vrt_sys::TENSORRT_VERSION;

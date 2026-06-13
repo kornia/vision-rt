@@ -287,19 +287,16 @@ pub struct XFeatResult {
 
 // ── XFeatPostproc ─────────────────────────────────────────────────────────────
 
-/// Device + host buffers carrying one frame's GPU-selected keypoints between
-/// the async launch (`launch_topk`) and the post-sync read (`finish_topk`).
+/// Device buffers carrying one frame's GPU-selected keypoints from the async
+/// launch (`launch_topk`) to the post-sync read (`finish_topk`).
 ///
-/// Device buffers have **capacity `top_k`**; the valid keypoint count is read
-/// from `count_host` after the stream sync.  All async D2H copies target the
-/// host `Vec`s, whose heap allocations stay put when this struct is moved.
+/// Device buffers have **capacity `top_k`**; the valid keypoint count and the
+/// host-side scores/xy are read from the post-processor's reused pinned buffers
+/// (async-D2H target) in `finish_topk`.
 pub struct TopkBufs {
-    kpts_dev:    CudaSlice<f32>,   // [top_k * 2]
-    descs_dev:   CudaSlice<f32>,   // [top_k * 64]
-    count_host:  Vec<i32>,        // [1]
-    scores_host: Vec<f32>,        // [top_k]
-    kpts_host:   Vec<f32>,        // [top_k * 2]
-    top_k:       usize,
+    kpts_dev:  CudaSlice<f32>,   // [top_k * 2]
+    descs_dev: CudaSlice<f32>,   // [top_k * 64]
+    top_k:     usize,
 }
 
 pub struct XFeatPostproc {
@@ -313,6 +310,10 @@ pub struct XFeatPostproc {
     stream:           Arc<CudaStream>,
     top_k:            usize,
     threshold:        f32,
+    // Pinned host buffers (async-D2H targets), allocated once and reused.
+    count_pin:        vrt::PinnedBuffer<i32>,   // [1]
+    scores_pin:       vrt::PinnedBuffer<f32>,   // [top_k]
+    kpts_pin:         vrt::PinnedBuffer<f32>,   // [top_k * 2]
 }
 
 const TOPK_NBINS: usize = 1024;
@@ -337,8 +338,13 @@ impl XFeatPostproc {
         let fn_cutoff        = kernels.function("xfeat_topk_cutoff")?;
         let fn_select        = kernels.function("xfeat_topk_select")?;
 
+        let count_pin  = vrt::PinnedBuffer::<i32>::alloc(1)?;
+        let scores_pin = vrt::PinnedBuffer::<f32>::alloc(top_k)?;
+        let kpts_pin   = vrt::PinnedBuffer::<f32>::alloc(top_k * 2)?;
+
         Ok(Self { fn_score_nms, fn_sample_descs, fn_l2_norm, fn_match_argmax,
-                  fn_histogram, fn_cutoff, fn_select, stream, top_k, threshold })
+                  fn_histogram, fn_cutoff, fn_select, stream, top_k, threshold,
+                  count_pin, scores_pin, kpts_pin })
     }
 
     /// Enqueue the NMS score kernel into `score_dev` (async — caller must sync before reading).
@@ -382,7 +388,7 @@ impl XFeatPostproc {
     /// [`launch_score_nms`]: XFeatPostproc::launch_score_nms
     /// [`finish_topk`]: XFeatPostproc::finish_topk
     pub fn launch_topk(
-        &self,
+        &mut self,
         desc_ptr:  *const f32,
         score_dev: &CudaSlice<f32>,
         h:         usize,
@@ -453,41 +459,35 @@ impl XFeatPostproc {
                 .launch(cfg64)?;
         }
 
-        // 6. async D2H of the host-side results (count + scores + xy).
-        //    vrt::Stream wraps the same stream and exposes the async copy;
-        //    the host Vecs stay alive (moved into TopkBufs) until the sync.
+        // 6. async D2H of the host-side results (count + scores + xy) into the
+        //    REUSED PINNED buffers — pinned host memory makes cudaMemcpyAsync
+        //    truly asynchronous (pageable would block here), so the host thread
+        //    is free until the pipeline's single per-frame sync.
         let vstream = vrt::Stream::from_cuda_stream(self.stream.clone());
-        let mut count_host  = vec![0i32; 1];
-        let mut scores_host = vec![0.0f32; k];
-        let mut kpts_host   = vec![0.0f32; k * 2];
         unsafe {
-            vstream.memcpy_d2h_raw(count_host.as_mut_ptr() as *mut u8,
+            vstream.memcpy_d2h_raw(self.count_pin.as_mut_ptr() as *mut u8,
                 cnt_raw as usize as *const _, std::mem::size_of::<i32>())?;
-            vstream.memcpy_d2h_raw(scores_host.as_mut_ptr() as *mut u8,
+            vstream.memcpy_d2h_raw(self.scores_pin.as_mut_ptr() as *mut u8,
                 sco_raw as usize as *const _, k * std::mem::size_of::<f32>())?;
-            vstream.memcpy_d2h_raw(kpts_host.as_mut_ptr() as *mut u8,
+            vstream.memcpy_d2h_raw(self.kpts_pin.as_mut_ptr() as *mut u8,
                 kxy_raw as usize as *const _, k * 2 * std::mem::size_of::<f32>())?;
         }
 
-        Ok(TopkBufs { kpts_dev, descs_dev, count_host, scores_host, kpts_host, top_k: k })
+        Ok(TopkBufs { kpts_dev, descs_dev, top_k: k })
     }
 
     /// Assemble the final [`XFeatResult`] from [`TopkBufs`] **after the stream
-    /// has been synced** (the async D2H copies are then complete).
+    /// has been synced** (the async D2H into the pinned buffers is then done).
     ///
     /// The device buffers have capacity `top_k`; the valid keypoint count is
-    /// read here from the host count and the host `Vec`s are truncated to it.
-    /// Consumers must therefore use `result.scores.len()` as the keypoint count.
-    pub fn finish_topk(&self, mut bufs: TopkBufs) -> XFeatResult {
-        let count = (bufs.count_host[0].max(0) as usize).min(bufs.top_k);
-        bufs.scores_host.truncate(count);
-        bufs.kpts_host.truncate(count * 2);
-        XFeatResult {
-            kpts:     bufs.kpts_dev,
-            descs:    bufs.descs_dev,
-            scores:   bufs.scores_host,
-            kpts_cpu: bufs.kpts_host,
-        }
+    /// read here from the pinned count and the pinned scores/xy are copied out
+    /// (the pinned buffers are reused next frame).  Consumers must use
+    /// `result.scores.len()` as the keypoint count.
+    pub fn finish_topk(&self, bufs: TopkBufs) -> XFeatResult {
+        let count = (self.count_pin.as_slice()[0].max(0) as usize).min(bufs.top_k);
+        let scores   = self.scores_pin.as_slice()[..count].to_vec();
+        let kpts_cpu = self.kpts_pin.as_slice()[..count * 2].to_vec();
+        XFeatResult { kpts: bufs.kpts_dev, descs: bufs.descs_dev, scores, kpts_cpu }
     }
 
     /// Synchronous one-shot: [`launch_topk`] + a single sync + [`finish_topk`].
@@ -498,7 +498,7 @@ impl XFeatPostproc {
     /// [`launch_topk`]: XFeatPostproc::launch_topk
     /// [`finish_topk`]: XFeatPostproc::finish_topk
     pub fn process_topk_sample(
-        &self,
+        &mut self,
         desc_ptr:  *const f32,
         score_dev: &CudaSlice<f32>,
         h:         usize,
@@ -516,7 +516,7 @@ impl XFeatPostproc {
     /// * `rel_ptr`  — device pointer, shape `(1, 1, H, W)` FP32
     /// * `h`, `w`   — backbone input dimensions (multiples of 32)
     pub fn process(
-        &self,
+        &mut self,
         desc_ptr: *const f32,
         heat_ptr: *const f32,
         rel_ptr:  *const f32,
@@ -753,7 +753,7 @@ mod gpu_compact_tests {
     fn gpu_topk_selects_correct_keypoints() {
         let ctx    = cudarc::driver::CudaContext::new(0).unwrap();
         let stream = ctx.new_stream().unwrap();
-        let pp     = XFeatPostproc::new(stream.clone(), 2, 0.05).unwrap();  // top_k = 2
+        let mut pp = XFeatPostproc::new(stream.clone(), 2, 0.05).unwrap();  // top_k = 2
 
         let (h, w) = (32usize, 32usize);
         let (hd, wd) = (h / 8, w / 8);

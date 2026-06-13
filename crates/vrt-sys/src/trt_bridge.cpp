@@ -287,6 +287,20 @@ void btrt_cuda_free(void* ptr) {
     cudaFree(ptr);
 }
 
+/* Page-locked (pinned) host memory, cacheable (flags=0 — NOT write-combined),
+   so D2H copies into it are truly async AND host reads of the result are fast.
+   cudarc's alloc_pinned uses WRITECOMBINED, which is the wrong trade for the
+   download-then-read case. */
+int32_t btrt_cuda_host_alloc(void** out_ptr, size_t bytes) {
+    if (!out_ptr) return -1;
+    cudaError_t err = cudaHostAlloc(out_ptr, bytes, cudaHostAllocDefault);
+    return static_cast<int32_t>(err);
+}
+
+void btrt_cuda_host_free(void* ptr) {
+    cudaFreeHost(ptr);
+}
+
 int32_t btrt_cuda_memcpy_h2d(void* dst, const void* src, size_t bytes, void* stream) {
     cudaError_t err = cudaMemcpyAsync(dst, src, bytes, cudaMemcpyHostToDevice,
                                       static_cast<cudaStream_t>(stream));

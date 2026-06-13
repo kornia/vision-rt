@@ -44,12 +44,22 @@ single-stream with one sync/frame, so this was pure overhead. Disabled it
 GPU-bound, so the CPU overhead was hidden under GPU work) — but correct hygiene,
 and it matters for CPU-bound models or multi-pipeline use.
 
-**Known/cosmetic — pageable result D2H.** The async D2H of results lands in
-pageable host `Vec`s, which CUDA makes synchronous, so `enqueue` blocks for the
-full GPU duration (which is why `sync` ≈ 0). For a single GPU-bound detector
-this does not reduce fps (the one per-frame sync would block anyway). Pinned
-host buffers would make the tail truly async (freeing the CPU during GPU work) —
-worth doing only if CPU overlap / multi-pipeline throughput becomes a goal.
+**Fixed — pinned result D2H.** The async D2H of results now lands in reused
+**pinned, cacheable** host buffers (`PinnedBuffer`, `cudaHostAlloc` flags=0 —
+not cudarc's write-combined `alloc_pinned`, which is slow to read back). This
+makes `cudaMemcpyAsync` genuinely asynchronous, so the per-frame profile is now:
+
+| phase | pageable (before) | pinned (after) |
+|-------|-------------------|----------------|
+| enqueue  | 8.64 (blocked on GPU) | **0.79** (CPU launch only) |
+| sync     | ~0 | **7.81** (the GPU wait, correctly attributed) |
+| gpu      | 8.64 | 8.55 |
+| finalize | 0.01 | 0.03 |
+
+End-to-end total unchanged (~116 fps — GPU-bound), but the host thread is now
+**free for ~7.8 ms during GPU compute** instead of blocked — the pipeline's
+"async tail" is genuinely async. This enables CPU/GPU overlap and lets one CPU
+thread drive multiple GPU streams; the cudaHostAlloc helpers live in trt-sys.
 
 ## Verified
 

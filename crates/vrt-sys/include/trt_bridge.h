@@ -117,6 +117,13 @@ int32_t btrt_cuda_malloc(void** out_ptr, size_t bytes);
 /* cudaFree. */
 void btrt_cuda_free(void* ptr);
 
+/* cudaHostAlloc (page-locked, cacheable) — for async-D2H result buffers that
+   the host then reads. Returns 0 on success. */
+int32_t btrt_cuda_host_alloc(void** out_ptr, size_t bytes);
+
+/* cudaFreeHost. */
+void btrt_cuda_host_free(void* ptr);
+
 /* cudaMemcpyAsync host->device. Returns 0 on success. */
 int32_t btrt_cuda_memcpy_h2d(void* dst, const void* src, size_t bytes, void* stream);
 

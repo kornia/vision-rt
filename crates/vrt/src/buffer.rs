@@ -1,10 +1,60 @@
 use std::sync::Arc;
 use cudarc::driver::{CudaContext, CudaSlice, CudaStream, DevicePtr, DriverError};
 use crate::error::{Result, TrtError};
-use vrt_sys::btrt_cuda_memcpy_d2h;
+use vrt_sys::{btrt_cuda_memcpy_d2h, btrt_cuda_host_alloc, btrt_cuda_host_free};
 
 fn driver_err(e: DriverError, msg: &'static str) -> TrtError {
     TrtError::Cuda { code: e.0 as i32, msg }
+}
+
+/// Page-locked (pinned), **cacheable** host memory for async D2H result reads.
+///
+/// `cudaMemcpyAsync` into pageable host memory is silently synchronous (it
+/// blocks the host); into pinned memory it is truly asynchronous.  Allocated
+/// once and reused — pinned allocation is expensive, so never per-frame.
+///
+/// Cacheable (not write-combined) so the host read after the copy is fast;
+/// that's the opposite trade from upload buffers, and why this doesn't use
+/// cudarc's write-combined `alloc_pinned`.
+pub struct PinnedBuffer<T> {
+    ptr: *mut T,
+    len: usize,
+}
+
+// SAFETY: a pinned host allocation is a stable address valid across threads;
+// the holder serializes access (D2H completes at the pipeline sync before read).
+unsafe impl<T: Send> Send for PinnedBuffer<T> {}
+
+impl<T: Copy + Default> PinnedBuffer<T> {
+    /// Allocate `len` page-locked, zero-initialized elements.
+    pub fn alloc(len: usize) -> Result<Self> {
+        let mut ptr: *mut std::ffi::c_void = std::ptr::null_mut();
+        let bytes = len * std::mem::size_of::<T>();
+        let rc = unsafe { btrt_cuda_host_alloc(&mut ptr, bytes) };
+        if rc != 0 || ptr.is_null() {
+            return Err(TrtError::Cuda { code: rc, msg: "cudaHostAlloc" });
+        }
+        let ptr = ptr as *mut T;
+        // Zero so an unfilled tail (count < capacity) reads as default, not garbage.
+        unsafe { std::ptr::write_bytes(ptr, 0, len); }
+        Ok(Self { ptr, len })
+    }
+
+    /// Raw host pointer (D2H destination).
+    pub fn as_mut_ptr(&mut self) -> *mut T { self.ptr }
+    pub fn len(&self) -> usize { self.len }
+    pub fn is_empty(&self) -> bool { self.len == 0 }
+
+    /// Host slice — valid only after the stream that copied into it has synced.
+    pub fn as_slice(&self) -> &[T] {
+        unsafe { std::slice::from_raw_parts(self.ptr, self.len) }
+    }
+}
+
+impl<T> Drop for PinnedBuffer<T> {
+    fn drop(&mut self) {
+        unsafe { btrt_cuda_host_free(self.ptr as *mut std::ffi::c_void); }
+    }
 }
 
 /// Owned CUDA device memory buffer backed by cudarc.
