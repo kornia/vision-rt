@@ -96,6 +96,23 @@ impl VrtTensor {
         Self { ptr, shape, strides, dtype, kind, byte_len, stream, owner: None }
     }
 
+    /// A borrowed view aliasing this tensor's memory (same ptr/shape/strides/
+    /// dtype), which does **not** free on drop.  Lets a stage hand a reused
+    /// output buffer downstream without giving up ownership.  The original must
+    /// outlive the view.
+    pub fn view(&self) -> VrtTensor {
+        VrtTensor {
+            ptr:      self.ptr,
+            shape:    self.shape.clone(),
+            strides:  self.strides.clone(),
+            dtype:    self.dtype,
+            kind:     self.kind,
+            byte_len: self.byte_len,
+            stream:   self.stream.clone(),
+            owner:    None,
+        }
+    }
+
     pub fn numel(&self) -> usize { self.shape.iter().product() }
     pub fn shape(&self) -> &[usize] { &self.shape }
     pub fn strides(&self) -> &[usize] { &self.strides }

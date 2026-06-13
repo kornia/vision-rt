@@ -25,7 +25,7 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use gstreamer::prelude::*;
-use vrt::{Source, Stage, BoxError, VrtTensor, VrtImage, Format, MemKind};
+use vrt::{Source, Operator, ExecCtx, BoxError, VrtTensor, VrtImage, Format, MemKind};
 use vrt_preproc::PreprocError;
 
 /// Errors from the GStreamer NVMM source and preprocessing stage.
@@ -327,18 +327,19 @@ impl NvmmPreprocessStage {
     }
 }
 
-impl Stage for NvmmPreprocessStage {
-    type Input  = NvmmFrame;
-    type Output = VrtTensor;
+impl Operator for NvmmPreprocessStage {
+    type Input   = NvmmFrame;
+    type Pending = VrtTensor;   // borrowed view of the preprocessor's output
+    type Output  = ();
 
-    fn enqueue(&mut self, frame: &NvmmFrame) -> Result<(), BoxError> {
+    fn enqueue(&mut self, frame: &NvmmFrame, ctx: &ExecCtx) -> Result<VrtTensor, BoxError> {
         // A still-pending import means the previous frame never reached
         // finalize (error path).  Recover in the mandatory release order:
         // drain the GPU, drop the texture object, then the NVMM import.
         if self._pending.is_some() {
             self.preproc.stream().synchronize()?;
-            self.preproc.finalize()?;  // drops TextureGuard first ✓
-            self._pending = None;       // then CudaMemory ✓
+            self.preproc.release_pending();  // drops TextureGuard first ✓
+            self._pending = None;             // then CudaMemory ✓
         }
         let mem = unsafe { frame.cuda_import()? };
         // SAFETY: the import's dev_ptr stays mapped while `mem` is held in
@@ -350,14 +351,12 @@ impl Stage for NvmmPreprocessStage {
             )
         };
         self._pending = Some(mem);
-        self.preproc.enqueue(&image)
+        self.preproc.enqueue(&image, ctx)
     }
 
-    fn finalize(&mut self) -> Result<(), BoxError> {
-        self.preproc.finalize()?;  // drops TextureGuard first ✓
-        self._pending = None;       // then drops CudaMemory ✓
+    fn finalize(&mut self, pending: VrtTensor, ctx: &ExecCtx) -> Result<(), BoxError> {
+        self.preproc.finalize(pending, ctx)?;  // drops TextureGuard first ✓
+        self._pending = None;                    // then drops CudaMemory ✓
         Ok(())
     }
-
-    fn output(&self) -> &VrtTensor { self.preproc.output() }
 }

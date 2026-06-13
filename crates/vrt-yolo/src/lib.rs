@@ -9,7 +9,7 @@ use kornia_imgproc::{
     padding::{spatial_padding, Padding2D, PaddingMode},
     resize::resize_fast_rgb,
 };
-use vrt::{Engine, Session, DeviceBuffer, CudaStream, Stage, BoxError, VrtTensor};
+use vrt::{Engine, Session, DeviceBuffer, CudaStream, Operator, ExecCtx, BoxError, VrtTensor};
 
 /// Errors from YOLO pre/post-processing and inference.
 #[derive(Debug, thiserror::Error)]
@@ -322,9 +322,8 @@ pub struct YoloInferStage {
     conf_thresh:  f32,
     iou_thresh:   f32,
     output_name:  String,
-    output_cpu:   Vec<f32>,
+    output_cpu:   Vec<f32>,   // async-D2H target, reused every frame
     output_shape: Vec<i64>,
-    output:       Vec<Detection>,
 }
 
 impl YoloInferStage {
@@ -349,7 +348,6 @@ impl YoloInferStage {
             output_name,
             output_cpu:   Vec::new(),
             output_shape: Vec::new(),
-            output:       Vec::new(),
         })
     }
 
@@ -358,11 +356,12 @@ impl YoloInferStage {
     }
 }
 
-impl Stage for YoloInferStage {
-    type Input  = VrtTensor;
-    type Output = Vec<Detection>;
+impl Operator for YoloInferStage {
+    type Input   = VrtTensor;
+    type Pending = ();   // async-D2H target lives in self; nothing to hand forward
+    type Output  = Vec<Detection>;
 
-    fn enqueue(&mut self, input: &VrtTensor) -> Result<(), BoxError> {
+    fn enqueue(&mut self, input: &VrtTensor, _ctx: &ExecCtx) -> Result<(), BoxError> {
         let shape   = input.shape_i64();
         let dev_ptr = input.as_mut_ptr();
         let views = unsafe {
@@ -394,15 +393,12 @@ impl Stage for YoloInferStage {
         Ok(())
     }
 
-    fn finalize(&mut self) -> Result<(), BoxError> {
-        self.output = postprocess(
+    fn finalize(&mut self, _pending: (), _ctx: &ExecCtx) -> Result<Vec<Detection>, BoxError> {
+        Ok(postprocess(
             &self.output_cpu, &self.output_shape,
             &self.lb_info, self.conf_thresh, self.iou_thresh, None,
-        );
-        Ok(())
+        ))
     }
-
-    fn output(&self) -> &Vec<Detection> { &self.output }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

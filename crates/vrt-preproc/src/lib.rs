@@ -15,7 +15,7 @@ use std::ffi::c_void;
 use cudarc::driver::{CudaSlice, CudaStream, DevicePtr, PushKernelArg};
 use cudarc::driver::sys::CUdeviceptr;
 
-use vrt::{Stage, BoxError, VrtTensor, DType, VrtImage};
+use vrt::{Operator, ExecCtx, BoxError, VrtTensor, DType, VrtImage};
 use vrt::cuda::{Kernels, cfg_2d};
 
 /// Errors from GPU preprocessing.
@@ -147,6 +147,12 @@ impl Preprocessor {
     /// The CUDA stream this preprocessor launches on.
     pub fn stream(&self) -> &Arc<CudaStream> { &self.stream }
 
+    /// Drop a still-pending [`TextureGuard`] (error-recovery path).
+    ///
+    /// Call only after the stream has been synced — the texture must not be
+    /// destroyed while a kernel may still read through it.
+    pub fn release_pending(&mut self) { self._pending = None; }
+
     /// H2D + kernel: RGBA host bytes → device, then letterbox into `dst_dev_ptr`.
     ///
     /// Returns a [`TextureGuard`] that must be kept alive until the stream is synced.
@@ -239,11 +245,12 @@ impl Preprocessor {
 
 // ── Stage impl ────────────────────────────────────────────────────────────────
 
-impl Stage for Preprocessor {
-    type Input  = VrtImage;
-    type Output = VrtTensor;
+impl Operator for Preprocessor {
+    type Input   = VrtImage;
+    type Pending = VrtTensor;   // borrowed view of the reused output buffer
+    type Output  = ();
 
-    fn enqueue(&mut self, frame: &VrtImage) -> Result<(), BoxError> {
+    fn enqueue(&mut self, frame: &VrtImage, _ctx: &ExecCtx) -> Result<VrtTensor, BoxError> {
         debug_assert_eq!(
             (frame.width(), frame.height()), (self.src_w, self.src_h),
             "VrtImage dims must match the dimensions this Preprocessor was built for"
@@ -258,13 +265,11 @@ impl Stage for Preprocessor {
         let dst = self.output.as_mut_ptr() as *mut f32;
         let tex = unsafe { self.process_device_ptr_tex(frame.as_ptr(), frame.pitch(), dst) }?;
         self._pending = Some(tex);
-        Ok(())
+        Ok(self.output.view())
     }
 
-    fn finalize(&mut self) -> Result<(), BoxError> {
-        self._pending = None;
+    fn finalize(&mut self, _pending: VrtTensor, _ctx: &ExecCtx) -> Result<(), BoxError> {
+        self._pending = None;   // drop the TextureGuard after the pipeline sync
         Ok(())
     }
-
-    fn output(&self) -> &VrtTensor { &self.output }
 }

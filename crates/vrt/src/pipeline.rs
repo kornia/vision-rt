@@ -16,52 +16,102 @@ pub trait Source {
     fn next_frame(&mut self) -> Option<Self::Frame>;
 }
 
-// ── Stage ─────────────────────────────────────────────────────────────────────
+// ── ExecCtx ───────────────────────────────────────────────────────────────────
 
-/// A typed, stream-bound pipeline stage.
+/// Per-frame metadata flowing alongside the data through every operator.
+///
+/// Carries the information tracking, multi-camera, and synchronized pipelines
+/// need but that the tensor itself doesn't hold.  Sources fill what they know;
+/// unknown fields stay `None`.
+#[derive(Debug, Clone, Default)]
+pub struct FrameMeta {
+    /// Monotonic frame counter assigned by the pipeline.
+    pub seq:       u64,
+    /// Presentation timestamp in nanoseconds, if the source provides one.
+    pub pts_ns:    Option<u64>,
+    /// Camera / stream identifier for multi-source pipelines.
+    pub source_id: Option<u32>,
+}
+
+/// Execution context threaded through [`Operator::enqueue`] / [`Operator::finalize`].
+///
+/// Gives operators the shared CUDA stream to launch work on and the current
+/// frame's [`FrameMeta`].  It deliberately does **not** expose a `sync()` —
+/// the pipeline owns the single per-frame `cudaStreamSynchronize`, and an
+/// operator syncing inside `enqueue` would break the one-sync-per-frame model.
+pub struct ExecCtx {
+    stream: Arc<CudaStream>,
+    frame:  FrameMeta,
+}
+
+impl ExecCtx {
+    pub fn new(stream: Arc<CudaStream>, frame: FrameMeta) -> Self {
+        Self { stream, frame }
+    }
+    /// The shared stream to launch kernels / TRT enqueues on (do not sync it).
+    pub fn stream(&self) -> &Arc<CudaStream> { &self.stream }
+    /// This frame's metadata.
+    pub fn frame(&self) -> &FrameMeta { &self.frame }
+}
+
+// ── Operator ──────────────────────────────────────────────────────────────────
+
+/// A typed, stream-bound pipeline operator (formerly `Stage`).
 ///
 /// ## Two-phase execution
-/// 1. `enqueue` — queue all GPU work on the shared stream (non-blocking).
-/// 2. `finalize` — called by the pipeline *after* stream sync; run CPU-side
-///    work (D2H reads, NMS, etc.). Default: no-op.
+/// 1. `enqueue` — queue all GPU work on `ctx`'s stream (non-blocking) and
+///    return a [`Pending`](Operator::Pending) handle.  The handle is what the
+///    *next* operator consumes during its own `enqueue` (so it must be valid
+///    immediately, before any sync — typically device pointers / buffer views).
+/// 2. `finalize` — called by the pipeline *after* the stream sync; consumes the
+///    `Pending` and returns the final [`Output`](Operator::Output) (D2H reads,
+///    top-K, NMS, …).
 ///
-/// The pipeline calls `output()` only after `finalize()` completes.
-pub trait Stage {
+/// Returning the result from `finalize` (instead of stashing it in `self` and
+/// exposing a panic-prone `output()`) removes the two-phase footgun: the
+/// data's enqueue→finalize lifetime is visible in the type flow.
+pub trait Operator {
     type Input;
+    /// Inter-operator handle produced by `enqueue`, consumed by `finalize`.
+    /// Must be `Send` and valid before the stream sync.
+    type Pending: Send;
+    /// Final result produced by `finalize`.
     type Output;
 
-    fn enqueue(&mut self, input: &Self::Input) -> Result<(), BoxError>;
-    fn finalize(&mut self) -> Result<(), BoxError> { Ok(()) }
-    fn output(&self) -> &Self::Output;
+    fn enqueue(&mut self, input: &Self::Input, ctx: &ExecCtx) -> Result<Self::Pending, BoxError>;
+    fn finalize(&mut self, pending: Self::Pending, ctx: &ExecCtx) -> Result<Self::Output, BoxError>;
 }
 
 // ── Chain ─────────────────────────────────────────────────────────────────────
 
-/// Two stages composed in sequence.  Created by [`Pipeline::chain`].
+/// Two operators composed in sequence.  Created by [`Pipeline::pipe`].
+///
+/// The downstream operator's `Input` is the upstream's `Pending` — i.e. stages
+/// are wired by what `enqueue` hands forward, type-checked at compile time.
 pub struct Chain<A, B> {
     pub(crate) a: A,
     pub(crate) b: B,
 }
 
-impl<A, B> Stage for Chain<A, B>
+impl<A, B> Operator for Chain<A, B>
 where
-    A: Stage,
-    B: Stage<Input = A::Output>,
+    A: Operator,
+    B: Operator<Input = A::Pending>,
 {
-    type Input  = A::Input;
-    type Output = B::Output;
+    type Input   = A::Input;
+    type Pending = (A::Pending, B::Pending);
+    type Output  = B::Output;
 
-    fn enqueue(&mut self, input: &A::Input) -> Result<(), BoxError> {
-        self.a.enqueue(input)?;
-        self.b.enqueue(self.a.output())
+    fn enqueue(&mut self, input: &A::Input, ctx: &ExecCtx) -> Result<Self::Pending, BoxError> {
+        let pa = self.a.enqueue(input, ctx)?;
+        let pb = self.b.enqueue(&pa, ctx)?;
+        Ok((pa, pb))
     }
 
-    fn finalize(&mut self) -> Result<(), BoxError> {
-        self.a.finalize()?;
-        self.b.finalize()
+    fn finalize(&mut self, (pa, pb): Self::Pending, ctx: &ExecCtx) -> Result<B::Output, BoxError> {
+        self.a.finalize(pa, ctx)?;   // upstream output discarded (non-terminal)
+        self.b.finalize(pb, ctx)
     }
-
-    fn output(&self) -> &B::Output { self.b.output() }
 }
 
 // ── TRTensorMap ───────────────────────────────────────────────────────────────
@@ -106,7 +156,6 @@ impl TRTensorMap {
 pub struct TrtInferStage {
     session:    Session,
     input_name: String,
-    outputs:    TRTensorMap,
 }
 
 impl TrtInferStage {
@@ -117,11 +166,7 @@ impl TrtInferStage {
         cuda_stream: Arc<CudaStream>,
     ) -> crate::error::Result<Self> {
         let session = Session::with_stream(engine, cuda_stream)?;
-        Ok(Self {
-            session,
-            input_name: input_name.into(),
-            outputs: TRTensorMap::new(HashMap::new()),
-        })
+        Ok(Self { session, input_name: input_name.into() })
     }
 
     pub fn cuda_stream(&self) -> Arc<CudaStream> {
@@ -129,11 +174,12 @@ impl TrtInferStage {
     }
 }
 
-impl Stage for TrtInferStage {
-    type Input  = VrtTensor;
-    type Output = TRTensorMap;
+impl Operator for TrtInferStage {
+    type Input   = VrtTensor;
+    type Pending = TRTensorMap;
+    type Output  = ();
 
-    fn enqueue(&mut self, input: &VrtTensor) -> Result<(), BoxError> {
+    fn enqueue(&mut self, input: &VrtTensor, _ctx: &ExecCtx) -> Result<TRTensorMap, BoxError> {
         let shape = input.shape_i64();
         let dev_ptr = input.as_mut_ptr();
         let views = unsafe {
@@ -141,11 +187,12 @@ impl Stage for TrtInferStage {
                 &[(self.input_name.as_str(), dev_ptr, &shape)]
             )?
         };
-        self.outputs = TRTensorMap::new(views);
-        Ok(())
+        Ok(TRTensorMap::new(views))
     }
 
-    fn output(&self) -> &TRTensorMap { &self.outputs }
+    fn finalize(&mut self, _pending: TRTensorMap, _ctx: &ExecCtx) -> Result<(), BoxError> {
+        Ok(())
+    }
 }
 
 // ── PipelineTiming ────────────────────────────────────────────────────────────
@@ -214,22 +261,23 @@ pub struct Pipeline<Src, Stg> {
     source: Src,
     stage:  Stg,
     stream: Arc<CudaStream>,
+    seq:    u64,
 }
 
 // ── Builder state (no stage attached yet) ────────────────────────────────────
 
 impl<Src: Source> Pipeline<Src, ()> {
-    /// Create a pipeline from a source.  Attach stages with [`.pipe()`](Pipeline::pipe).
+    /// Create a pipeline from a source.  Attach operators with [`.pipe()`](Pipeline::pipe).
     pub fn new(stream: Arc<CudaStream>, source: Src) -> Self {
-        Pipeline { source, stage: (), stream }
+        Pipeline { source, stage: (), stream, seq: 0 }
     }
 
-    /// Attach the first stage.  Its `Input` must match the source's `Frame` type.
+    /// Attach the first operator.  Its `Input` must match the source's `Frame` type.
     pub fn pipe<Stg>(self, stage: Stg) -> Pipeline<Src, Stg>
     where
-        Stg: Stage<Input = Src::Frame>,
+        Stg: Operator<Input = Src::Frame>,
     {
-        Pipeline { source: self.source, stage, stream: self.stream }
+        Pipeline { source: self.source, stage, stream: self.stream, seq: 0 }
     }
 }
 
@@ -238,26 +286,29 @@ impl<Src: Source> Pipeline<Src, ()> {
 impl<Src, Stg> Pipeline<Src, Stg>
 where
     Src: Source,
-    Stg: Stage<Input = Src::Frame>,
+    Stg: Operator<Input = Src::Frame>,
 {
-    /// Append a stage after all existing stages.
+    /// Append an operator after all existing ones.
     ///
-    /// The new stage's `Input` must match the current tail stage's `Output`.
+    /// The new operator's `Input` must match the current tail's `Pending` —
+    /// i.e. what the tail's `enqueue` hands forward.
     pub fn pipe<T>(self, next: T) -> Pipeline<Src, Chain<Stg, T>>
     where
-        T: Stage<Input = Stg::Output>,
+        T: Operator<Input = Stg::Pending>,
     {
         Pipeline {
             source: self.source,
             stage:  Chain { a: self.stage, b: next },
             stream: self.stream,
+            seq:    0,
         }
     }
 
     /// Advance by one frame: source → enqueue → sync → finalize → output.
     ///
     /// Returns `None` when the source is exhausted.  On success returns the
-    /// stage output and a per-phase [`PipelineTiming`] breakdown.
+    /// operator's [`Output`](Operator::Output) **by value** and a per-phase
+    /// [`PipelineTiming`] breakdown.
     ///
     /// GPU time is measured with CUDA events bracketing the `enqueue` call:
     /// both events are recorded on the shared stream so `gpu_ms` reflects
@@ -269,11 +320,17 @@ where
     /// stage-held resources (NVMM imports, texture objects, the source frame),
     /// and those are dropped/replaced as soon as this call returns.  Returning
     /// with work in flight would be a use-after-free on the GPU timeline.
-    #[allow(clippy::should_implement_trait)] // returns borrowed output; Iterator can't
-    pub fn next(&mut self) -> Option<Result<(&Stg::Output, PipelineTiming), BoxError>> {
+    #[allow(clippy::should_implement_trait)] // pairs Output with timing; Iterator's next() can't
+    pub fn next(&mut self) -> Option<Result<(Stg::Output, PipelineTiming), BoxError>> {
         let t0 = Instant::now();
         let frame = self.source.next_frame()?;
         let t1 = Instant::now();
+
+        self.seq += 1;
+        let ctx = ExecCtx::new(
+            self.stream.clone(),
+            FrameMeta { seq: self.seq, ..FrameMeta::default() },
+        );
 
         // Drain the stream before surfacing an error — see "Error safety" above.
         let fail = |stream: &Arc<CudaStream>, e: BoxError| {
@@ -290,9 +347,10 @@ where
             Err(e) => return fail(&self.stream, e.into()),
         };
 
-        if let Err(e) = self.stage.enqueue(&frame) {
-            return fail(&self.stream, e);
-        }
+        let pending = match self.stage.enqueue(&frame, &ctx) {
+            Ok(p)  => p,
+            Err(e) => return fail(&self.stream, e),
+        };
 
         // Place a stop-marker after all GPU work has been submitted.
         let gpu_stop = match self.stream.record_event(timing_flags) {
@@ -311,7 +369,10 @@ where
         // Both events are complete after the stream sync; elapsed_ms reads the hardware delta.
         let gpu_ms = gpu_start.elapsed_ms(&gpu_stop).unwrap_or(0.0) as f64;
 
-        if let Err(e) = self.stage.finalize() { return Some(Err(e)); }
+        let output = match self.stage.finalize(pending, &ctx) {
+            Ok(o)  => o,
+            Err(e) => return Some(Err(e)),
+        };
         let t4 = Instant::now();
 
         let timing = PipelineTiming {
@@ -321,7 +382,7 @@ where
             sync_ms:     ms(t2, t3),
             finalize_ms: ms(t3, t4),
         };
-        Some(Ok((self.stage.output(), timing)))
+        Some(Ok((output, timing)))
     }
 }
 

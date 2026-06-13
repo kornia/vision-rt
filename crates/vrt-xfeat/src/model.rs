@@ -3,8 +3,19 @@
 
 use std::sync::Arc;
 use cudarc::driver::CudaSlice;
-use vrt::{Engine, Runtime, Session, CudaStream, Stage, BoxError, VrtTensor, TRTensorMap};
+use vrt::{Engine, Runtime, Session, CudaStream, Operator, ExecCtx, BoxError, VrtTensor, TRTensorMap};
 use crate::postprocess::{XFeatPostproc, XFeatResult, XFeatError};
+
+/// Pending handle between `enqueue` and `finalize`: the `descriptors` device
+/// pointer captured at enqueue time (the NMS score map is already in the
+/// stage's `score_dev`).  Carrying it in the `Pending` value — rather than a
+/// stored `Option<*const f32>` — makes its enqueue→finalize lifetime explicit.
+///
+/// SAFETY (Send): a device address into the upstream session's output buffer,
+/// valid from enqueue to the same frame's finalize.  Stream ordering serializes
+/// GPU access; the value is consumed exactly once per frame in finalize.
+pub struct DescPending(*const f32);
+unsafe impl Send for DescPending {}
 
 // ── Params ────────────────────────────────────────────────────────────────────
 
@@ -66,7 +77,7 @@ impl XFeatBuilder {
         let postproc  = XFeatPostproc::new(stream.clone(), self.params.top_k, self.params.threshold)?;
         let score_dev: CudaSlice<f32> = unsafe { stream.alloc(h * w)? };
 
-        Ok(XFeat { session, postproc, score_dev, h, w, desc_ptr: None, result: None })
+        Ok(XFeat { session, postproc, score_dev, h, w })
     }
 }
 
@@ -85,7 +96,6 @@ impl XFeatBuilder {
 pub struct XFeatInferStage {
     session:  Session,
     postproc: XFeatPostproc,
-    result:   Option<XFeatResult>,
 }
 
 impl XFeatInferStage {
@@ -100,7 +110,7 @@ impl XFeatInferStage {
     ) -> Result<Self, BoxError> {
         let session  = Session::with_stream(Arc::clone(&engine), Arc::clone(&cuda_stream))?;
         let postproc = XFeatPostproc::new(cuda_stream, top_k, threshold)?;
-        Ok(Self { session, postproc, result: None })
+        Ok(Self { session, postproc })
     }
 
     pub fn cuda_stream(&self) -> Arc<CudaStream> {
@@ -108,11 +118,12 @@ impl XFeatInferStage {
     }
 }
 
-impl Stage for XFeatInferStage {
-    type Input  = VrtTensor;
-    type Output = XFeatResult;
+impl Operator for XFeatInferStage {
+    type Input   = VrtTensor;
+    type Pending = XFeatResult;   // this stage syncs internally and finishes in enqueue
+    type Output  = XFeatResult;
 
-    fn enqueue(&mut self, input: &VrtTensor) -> Result<(), BoxError> {
+    fn enqueue(&mut self, input: &VrtTensor, _ctx: &ExecCtx) -> Result<XFeatResult, BoxError> {
         let shape   = input.shape_i64();
         let dev_ptr = input.as_mut_ptr();
 
@@ -131,12 +142,11 @@ impl Stage for XFeatInferStage {
 
         let h = input.dim(2);
         let w = input.dim(3);
-        self.result = Some(self.postproc.process(desc_ptr, heat_ptr, rel_ptr, h, w)?);
-        Ok(())
+        Ok(self.postproc.process(desc_ptr, heat_ptr, rel_ptr, h, w)?)
     }
 
-    fn output(&self) -> &XFeatResult {
-        self.result.as_ref().expect("XFeatInferStage: output() called before enqueue")
+    fn finalize(&mut self, pending: XFeatResult, _ctx: &ExecCtx) -> Result<XFeatResult, BoxError> {
+        Ok(pending)
     }
 }
 
@@ -159,15 +169,7 @@ pub struct XFeatPostprocStage {
     score_dev: CudaSlice<f32>,  // pre-allocated; reused every frame
     h:         usize,
     w:         usize,
-    desc_ptr:  Option<*const f32>,
-    result:    Option<XFeatResult>,
 }
-
-// SAFETY: desc_ptr is a device address owned by the upstream session's output
-// buffer.  It is valid only from enqueue to the same frame's finalize — the
-// session's next enqueue may reallocate it.  finalize() take()s it every frame,
-// so it never dangles across frames.  Stream ordering serializes GPU access.
-unsafe impl Send for XFeatPostprocStage {}
 
 impl XFeatPostprocStage {
     /// Create the stage.
@@ -183,36 +185,26 @@ impl XFeatPostprocStage {
     ) -> Result<Self, BoxError> {
         let postproc = XFeatPostproc::new(stream.clone(), top_k, threshold)?;
         let score_dev: CudaSlice<f32> = unsafe { stream.alloc(h * w)? };
-        Ok(Self { postproc, score_dev, h, w, desc_ptr: None, result: None })
+        Ok(Self { postproc, score_dev, h, w })
     }
 }
 
-impl Stage for XFeatPostprocStage {
-    type Input  = TRTensorMap;
-    type Output = XFeatResult;
+impl Operator for XFeatPostprocStage {
+    type Input   = TRTensorMap;
+    type Pending = DescPending;
+    type Output  = XFeatResult;
 
-    fn enqueue(&mut self, input: &TRTensorMap) -> Result<(), BoxError> {
+    fn enqueue(&mut self, input: &TRTensorMap, _ctx: &ExecCtx) -> Result<DescPending, BoxError> {
         let desc_ptr = input.f32("descriptors")?;
         let heat_ptr = input.f32("heatmap")?;
         let rel_ptr  = input.f32("reliability")?;
 
         self.postproc.launch_score_nms(heat_ptr, rel_ptr, &self.score_dev, self.h, self.w)?;
-
-        self.desc_ptr = Some(desc_ptr);
-        Ok(())
+        Ok(DescPending(desc_ptr))
     }
 
-    fn finalize(&mut self) -> Result<(), BoxError> {
-        let desc_ptr = self.desc_ptr.take().ok_or("finalize called before enqueue")?;
-        self.result = Some(
-            self.postproc.process_topk_sample(desc_ptr, &self.score_dev, self.h, self.w)
-                ?
-        );
-        Ok(())
-    }
-
-    fn output(&self) -> &XFeatResult {
-        self.result.as_ref().expect("XFeatPostprocStage: output() called before finalize")
+    fn finalize(&mut self, pending: DescPending, _ctx: &ExecCtx) -> Result<XFeatResult, BoxError> {
+        Ok(self.postproc.process_topk_sample(pending.0, &self.score_dev, self.h, self.w)?)
     }
 }
 
@@ -225,7 +217,7 @@ impl Stage for XFeatPostprocStage {
 ///
 /// ## APIs
 /// - `extract(tensor)` — synchronous one-shot use (image pairs, batch jobs)
-/// - `Stage` impl — two-phase async use in a [`Pipeline`] (e.g. `rtsp_xfeat`)
+/// - `Operator` impl — two-phase async use in a [`Pipeline`] (e.g. `rtsp_xfeat`)
 ///
 /// [`Pipeline`]: vrt::Pipeline
 pub struct XFeat {
@@ -234,16 +226,7 @@ pub struct XFeat {
     score_dev: CudaSlice<f32>,  // pre-allocated h×w NMS score buffer
     h:         usize,
     w:         usize,
-    // Two-phase state: set in enqueue, consumed in finalize
-    desc_ptr:  Option<*const f32>,
-    result:    Option<XFeatResult>,
 }
-
-// SAFETY: desc_ptr is a device address owned by this struct's own Session
-// output buffer.  Valid from enqueue to the same frame's finalize (the next
-// run may reallocate it); finalize() take()s it every frame so it never
-// dangles across frames.  Stream ordering serializes GPU access.
-unsafe impl Send for XFeat {}
 
 impl XFeat {
     /// Convenience constructor: loads the engine from `engine_path` using `runtime`.
@@ -273,7 +256,7 @@ impl XFeat {
         let postproc  = XFeatPostproc::new(stream.clone(), params.top_k, params.threshold)?;
         let score_dev: CudaSlice<f32> = unsafe { stream.alloc(h * w)? };
 
-        Ok(XFeat { session, postproc, score_dev, h, w, desc_ptr: None, result: None })
+        Ok(XFeat { session, postproc, score_dev, h, w })
     }
 
     /// The CUDA stream used by this model.
@@ -311,11 +294,12 @@ impl XFeat {
 /// pipeline contract:
 /// - `enqueue`: backbone async + NMS score kernel async
 /// - `finalize` (after stream sync): D2H scores → top-K → descriptor sampling + L2-norm
-impl vrt::Stage for XFeat {
-    type Input  = VrtTensor;
-    type Output = XFeatResult;
+impl Operator for XFeat {
+    type Input   = VrtTensor;
+    type Pending = DescPending;
+    type Output  = XFeatResult;
 
-    fn enqueue(&mut self, input: &VrtTensor) -> Result<(), BoxError> {
+    fn enqueue(&mut self, input: &VrtTensor, _ctx: &ExecCtx) -> Result<DescPending, BoxError> {
         let shape   = input.shape_i64();
         let dev_ptr = input.as_mut_ptr();
 
@@ -328,21 +312,10 @@ impl vrt::Stage for XFeat {
         let rel_ptr  = views.get("reliability").ok_or("no 'reliability' output")?.f32_ptr()?;
 
         self.postproc.launch_score_nms(heat_ptr, rel_ptr, &self.score_dev, self.h, self.w)?;
-
-        self.desc_ptr = Some(desc_ptr);
-        Ok(())
+        Ok(DescPending(desc_ptr))
     }
 
-    fn finalize(&mut self) -> Result<(), BoxError> {
-        let desc_ptr = self.desc_ptr.take().ok_or("XFeat: finalize called before enqueue")?;
-        self.result  = Some(
-            self.postproc.process_topk_sample(desc_ptr, &self.score_dev, self.h, self.w)
-                ?
-        );
-        Ok(())
-    }
-
-    fn output(&self) -> &XFeatResult {
-        self.result.as_ref().expect("XFeat: output() called before finalize")
+    fn finalize(&mut self, pending: DescPending, _ctx: &ExecCtx) -> Result<XFeatResult, BoxError> {
+        Ok(self.postproc.process_topk_sample(pending.0, &self.score_dev, self.h, self.w)?)
     }
 }
