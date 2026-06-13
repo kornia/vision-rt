@@ -3,8 +3,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use cudarc::driver::CudaStream;
 use crate::buffer::Stream;
-use crate::session::TensorView;
-use crate::tensor::TRTensor;
+use crate::tensor::VrtTensor;
 use crate::{Engine, Session};
 
 pub type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>;
@@ -69,19 +68,19 @@ where
 
 /// Device-side output map from a TRT inference stage.
 ///
-/// Keys are output tensor names; values are typed [`TensorView`]s carrying
+/// Keys are output tensor names; values are borrowed [`VrtTensor`]s carrying
 /// the device pointer plus resolved shape/dtype/byte-length, so downstream
 /// stages never re-derive dimensions out of band.
 ///
-/// Views are valid until the owning session's next `enqueue` (or drop) —
+/// The tensors are valid until the owning session's next `enqueue` (or drop) —
 /// consume them within the same frame, never store them across frames.
-pub struct TRTensorMap(HashMap<String, TensorView>);
+pub struct TRTensorMap(HashMap<String, VrtTensor>);
 
 impl TRTensorMap {
-    pub fn new(views: HashMap<String, TensorView>) -> Self { Self(views) }
+    pub fn new(views: HashMap<String, VrtTensor>) -> Self { Self(views) }
 
-    /// Typed view of a named output tensor.
-    pub fn get(&self, name: &str) -> Option<&TensorView> {
+    /// Borrowed tensor for a named output.
+    pub fn get(&self, name: &str) -> Option<&VrtTensor> {
         self.0.get(name)
     }
 
@@ -100,7 +99,7 @@ impl TRTensorMap {
 
 // ── TrtInferStage ─────────────────────────────────────────────────────────────
 
-/// Generic TRT backbone stage: [`TRTensor`] → [`TRTensorMap`].
+/// Generic TRT backbone stage: [`VrtTensor`] → [`TRTensorMap`].
 ///
 /// Outputs stay on the GPU — a downstream postprocessing stage reads them
 /// either via device kernels (no copy) or async D2H in its own `enqueue`.
@@ -131,10 +130,10 @@ impl TrtInferStage {
 }
 
 impl Stage for TrtInferStage {
-    type Input  = TRTensor;
+    type Input  = VrtTensor;
     type Output = TRTensorMap;
 
-    fn enqueue(&mut self, input: &TRTensor) -> Result<(), BoxError> {
+    fn enqueue(&mut self, input: &VrtTensor) -> Result<(), BoxError> {
         let shape = input.shape_i64();
         let dev_ptr = input.as_mut_ptr();
         let views = unsafe {

@@ -3,7 +3,7 @@
 //! ## Pipeline
 //! ```text
 //! RtspSource → NvmmPreprocessStage → XFeat
-//! NvmmFrame     TRTensor              XFeatResult
+//! NvmmFrame     VrtTensor              XFeatResult
 //! ```
 //!
 //! Every 30 frames a CPU RGBA snapshot is grabbed from the RtspSource tee branch,

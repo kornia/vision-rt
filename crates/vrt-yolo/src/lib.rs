@@ -9,7 +9,7 @@ use kornia_imgproc::{
     padding::{spatial_padding, Padding2D, PaddingMode},
     resize::resize_fast_rgb,
 };
-use vrt::{Engine, Session, DeviceBuffer, CudaStream, Stage, BoxError, TRTensor};
+use vrt::{Engine, Session, DeviceBuffer, CudaStream, Stage, BoxError, VrtTensor};
 
 /// Errors from YOLO pre/post-processing and inference.
 #[derive(Debug, thiserror::Error)]
@@ -310,7 +310,7 @@ impl Yolo {
 
 // ── YoloInferStage ───────────────────────────────────────────────────────────
 
-/// Pipeline stage: [`TRTensor`] → `Vec<Detection>`.
+/// Pipeline stage: [`VrtTensor`] → `Vec<Detection>`.
 ///
 /// Runs TRT YOLO inference async, schedules an async D2H copy in `enqueue`,
 /// then runs decode + NMS on CPU in `finalize` (after the pipeline sync).
@@ -359,10 +359,10 @@ impl YoloInferStage {
 }
 
 impl Stage for YoloInferStage {
-    type Input  = TRTensor;
+    type Input  = VrtTensor;
     type Output = Vec<Detection>;
 
-    fn enqueue(&mut self, input: &TRTensor) -> Result<(), BoxError> {
+    fn enqueue(&mut self, input: &VrtTensor) -> Result<(), BoxError> {
         let shape   = input.shape_i64();
         let dev_ptr = input.as_mut_ptr();
         let views = unsafe {
@@ -378,16 +378,16 @@ impl Stage for YoloInferStage {
 
         // Resize host buffer and cache shape on first run (or shape change).
         let n_floats = out_bytes / 4;
-        if self.output_cpu.len() != n_floats || self.output_shape != view.shape() {
+        if self.output_cpu.len() != n_floats || self.output_shape != view.shape_i64() {
             self.output_cpu.resize(n_floats, 0.0);
-            self.output_shape = view.shape().to_vec();
+            self.output_shape = view.shape_i64();
         }
 
         // Async D2H — data will be ready after the pipeline syncs the stream.
         unsafe {
             self.session.stream().memcpy_d2h_raw(
                 self.output_cpu.as_mut_ptr() as *mut u8,
-                view.ptr() as *const _,
+                view.as_ptr() as *const _,
                 out_bytes,
             )?;
         }

@@ -25,7 +25,7 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use gstreamer::prelude::*;
-use vrt::{Source, Stage, BoxError, TRTensor};
+use vrt::{Source, Stage, BoxError, VrtTensor};
 use vrt_preproc::PreprocError;
 
 /// Errors from the GStreamer NVMM source and preprocessing stage.
@@ -294,7 +294,7 @@ impl Drop for RtspSource {
 
 // ── NvmmPreprocessStage ───────────────────────────────────────────────────────
 
-/// Pipeline stage: [`NvmmFrame`] → [`TRTensor`] (CHW FP32).
+/// Pipeline stage: [`NvmmFrame`] → [`VrtTensor`] (CHW FP32).
 ///
 /// Bridges the NVMM import lifecycle with the GPU letterbox kernel in
 /// [`Preprocessor`].  The two are kept separate so `Preprocessor` has no
@@ -324,7 +324,7 @@ impl NvmmPreprocessStage {
 
 impl Stage for NvmmPreprocessStage {
     type Input  = NvmmFrame;
-    type Output = TRTensor;
+    type Output = VrtTensor;
 
     fn enqueue(&mut self, frame: &NvmmFrame) -> Result<(), BoxError> {
         // A still-pending import means the previous frame never reached
@@ -347,5 +347,5 @@ impl Stage for NvmmPreprocessStage {
         Ok(())
     }
 
-    fn output(&self) -> &TRTensor { self.preproc.output() }
+    fn output(&self) -> &VrtTensor { self.preproc.output() }
 }

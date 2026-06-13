@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 use cudarc::driver::CudaSlice;
-use vrt::{Engine, Runtime, Session, CudaStream, Stage, BoxError, TRTensor, TRTensorMap};
+use vrt::{Engine, Runtime, Session, CudaStream, Stage, BoxError, VrtTensor, TRTensorMap};
 use crate::postprocess::{XFeatPostproc, XFeatResult, XFeatError};
 
 // ── Params ────────────────────────────────────────────────────────────────────
@@ -72,7 +72,7 @@ impl XFeatBuilder {
 
 // ── XFeatInferStage ───────────────────────────────────────────────────────────
 
-/// Pipeline stage: [`TRTensor`] → [`XFeatResult`].
+/// Pipeline stage: [`VrtTensor`] → [`XFeatResult`].
 ///
 /// Runs TRT inference + GPU NMS/sampling async on the shared stream, then a
 /// D2H sync for the top-K score selection (inherent to the XFeat algorithm).
@@ -109,10 +109,10 @@ impl XFeatInferStage {
 }
 
 impl Stage for XFeatInferStage {
-    type Input  = TRTensor;
+    type Input  = VrtTensor;
     type Output = XFeatResult;
 
-    fn enqueue(&mut self, input: &TRTensor) -> Result<(), BoxError> {
+    fn enqueue(&mut self, input: &VrtTensor) -> Result<(), BoxError> {
         let shape   = input.shape_i64();
         let dev_ptr = input.as_mut_ptr();
 
@@ -129,8 +129,8 @@ impl Stage for XFeatInferStage {
         let heat_ptr = views.get("heatmap").ok_or("no 'heatmap' output")?.f32_ptr()?;
         let rel_ptr  = views.get("reliability").ok_or("no 'reliability' output")?.f32_ptr()?;
 
-        let h = input.shape[2];
-        let w = input.shape[3];
+        let h = input.dim(2);
+        let w = input.dim(3);
         self.result = Some(self.postproc.process(desc_ptr, heat_ptr, rel_ptr, h, w)?);
         Ok(())
     }
@@ -220,7 +220,7 @@ impl Stage for XFeatPostprocStage {
 
 /// XFeat model: TRT backbone + GPU post-processing.
 ///
-/// Takes a pre-processed [`TRTensor`] (CHW FP32, shape `[1,3,H,W]`) and returns
+/// Takes a pre-processed [`VrtTensor`] (CHW FP32, shape `[1,3,H,W]`) and returns
 /// [`XFeatResult`] with keypoints, scores, and descriptors.
 ///
 /// ## APIs
@@ -286,7 +286,7 @@ impl XFeat {
     ///
     /// Runs backbone + sync + postproc in one call.  The tensor must already be on
     /// device (shape `[1, 3, H, W]`, values in `[0, 1]`).
-    pub fn extract(&mut self, input: &TRTensor) -> Result<XFeatResult, XFeatError> {
+    pub fn extract(&mut self, input: &VrtTensor) -> Result<XFeatResult, XFeatError> {
         let shape   = input.shape_i64();
         let dev_ptr = input.as_mut_ptr();
 
@@ -305,17 +305,17 @@ impl XFeat {
 
 // ── Stage impl ────────────────────────────────────────────────────────────────
 
-/// `XFeat` as a pipeline stage: `TRTensor → XFeatResult`.
+/// `XFeat` as a pipeline stage: `VrtTensor → XFeatResult`.
 ///
 /// Internally chains TRT backbone inference + GPU NMS/sampling using the two-phase
 /// pipeline contract:
 /// - `enqueue`: backbone async + NMS score kernel async
 /// - `finalize` (after stream sync): D2H scores → top-K → descriptor sampling + L2-norm
 impl vrt::Stage for XFeat {
-    type Input  = TRTensor;
+    type Input  = VrtTensor;
     type Output = XFeatResult;
 
-    fn enqueue(&mut self, input: &TRTensor) -> Result<(), BoxError> {
+    fn enqueue(&mut self, input: &VrtTensor) -> Result<(), BoxError> {
         let shape   = input.shape_i64();
         let dev_ptr = input.as_mut_ptr();
 

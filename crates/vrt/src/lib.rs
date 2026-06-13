@@ -41,6 +41,6 @@ pub use buffer::{DeviceBuffer, Stream};
 pub use cudarc;
 pub use cudarc::driver::CudaStream;
 pub use vrt_sys::TENSORRT_VERSION;
-pub use session::{Session, OutputTensor, TensorView};
-pub use tensor::{TRTensor, DType};
+pub use session::{Session, OutputTensor};
+pub use tensor::{VrtTensor, DType, MemKind};
 pub use pipeline::{Source, Stage, Chain, TRTensorMap, TrtInferStage, Pipeline, PipelineTiming, BoxError};

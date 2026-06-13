@@ -7,8 +7,22 @@ use vrt_sys::*;
 use crate::{
     engine::{Engine, TensorMode, DataType},
     buffer::{DeviceBuffer, Stream},
+    tensor::{VrtTensor, MemKind, DType},
     error::{Result, TrtError, last_trt_error},
 };
+
+/// Map an engine I/O [`DataType`] to a tensor [`DType`].
+///
+/// Int8/Bool fall back to `U8` (same 1-byte width); our models never emit them,
+/// and `VrtTensor::f32_ptr` rejects any mismatched read regardless.
+fn dtype_of(d: DataType) -> DType {
+    match d {
+        DataType::Float32 => DType::F32,
+        DataType::Float16 => DType::F16,
+        DataType::Int32   => DType::I32,
+        DataType::Int8 | DataType::UInt8 | DataType::Bool => DType::U8,
+    }
+}
 
 /// Raw output tensor: bytes, dtype, shape.
 #[derive(Debug)]
@@ -41,53 +55,6 @@ impl OutputTensor {
             .map(|b| f16::from_le_bytes([b[0], b[1]]).to_f32())
             .collect()
     }
-}
-
-/// Typed view of a device tensor owned by a [`Session`].
-///
-/// Carries the resolved shape, dtype and byte length alongside the raw device
-/// pointer, so downstream stages never re-derive dimensions out of band.
-///
-/// ## Validity window
-/// The pointer aliases Session-owned device memory.  It is valid **until the
-/// owning Session's next `run_*` call** (a shape change reallocates the
-/// buffer) **or Session drop** — not indefinitely.  Pipeline stages must
-/// consume views within the same frame (enqueue → sync → finalize) and never
-/// store them across frames.
-#[derive(Debug, Clone)]
-pub struct TensorView {
-    ptr:      *mut std::ffi::c_void,
-    shape:    Vec<i64>,
-    dtype:    DataType,
-    byte_len: usize,
-}
-
-// SAFETY: the pointer is a CUDA device address only dereferenced by kernels;
-// cross-thread moves are safe as long as the validity window above is honored.
-unsafe impl Send for TensorView {}
-
-impl TensorView {
-    /// Raw device pointer (see "Validity window").
-    pub fn ptr(&self) -> *mut std::ffi::c_void { self.ptr }
-
-    /// Device pointer as `*const f32`, checked against the tensor dtype.
-    pub fn f32_ptr(&self) -> Result<*const f32> {
-        if self.dtype != DataType::Float32 {
-            return Err(TrtError::Shape(format!(
-                "tensor is {:?}, not Float32", self.dtype
-            )));
-        }
-        Ok(self.ptr as *const f32)
-    }
-
-    /// Resolved shape (after dynamic-shape inference).
-    pub fn shape(&self) -> &[i64] { &self.shape }
-
-    /// Dimension `i` of the resolved shape.
-    pub fn dim(&self, i: usize) -> i64 { self.shape[i] }
-
-    pub fn dtype(&self) -> DataType { self.dtype }
-    pub fn byte_len(&self) -> usize { self.byte_len }
 }
 
 /// Per-tensor device buffer state for one inference session.
@@ -247,20 +214,20 @@ impl Session {
 
     /// Like `run_device_inputs` but leaves outputs in GPU memory.
     ///
-    /// Returns a [`TensorView`] per output tensor: device pointer plus the
-    /// resolved shape, dtype, and byte length.  The views remain valid until
-    /// the next `run_*` call or `Session` drop (see [`TensorView`]).
+    /// Returns a borrowed [`VrtTensor`] per output tensor: device pointer plus
+    /// the resolved shape, dtype, and byte length.  The tensors remain valid
+    /// until the next `run_*` call or `Session` drop.
     ///
     /// **Caller must call `session.stream().sync()` before reading the outputs.**
     ///
     /// # Safety
-    /// Same as `run_device_inputs`.  Additionally the returned views alias
+    /// Same as `run_device_inputs`.  Additionally the returned tensors alias
     /// Session-owned device memory — do not outlive the Session or hold them
     /// across a subsequent `run_*` call.
     pub unsafe fn run_device_inputs_on_device(
         &mut self,
         device_inputs: &[(&str, *mut std::ffi::c_void, &[i64])],
-    ) -> Result<HashMap<String, TensorView>> {
+    ) -> Result<HashMap<String, VrtTensor>> {
         for (name, dev_ptr, shape) in device_inputs {
             let c_name = CString::new(*name)
                 .map_err(|_| TrtError::UnknownTensor((*name).into()))?;
@@ -275,7 +242,7 @@ impl Session {
         self.enqueue_outputs_only()
     }
 
-    fn enqueue_outputs_only(&mut self) -> Result<HashMap<String, TensorView>> {
+    fn enqueue_outputs_only(&mut self) -> Result<HashMap<String, VrtTensor>> {
         for (name, state) in &self.outputs {
             let c_name = CString::new(name.as_str()).unwrap();
             let dev_ptr = state.buf.as_device_ptr(&self.stream);
@@ -288,14 +255,22 @@ impl Session {
         let code = unsafe { btrt_context_enqueue_v3(self.ctx, self.stream.as_raw()) };
         if code != 0 { return Err(TrtError::Trt(last_trt_error())); }
 
+        let cuda_stream = self.stream.cuda_stream().clone();
         let mut result = HashMap::new();
         for (name, state) in &self.outputs {
-            result.insert(name.clone(), TensorView {
-                ptr:      state.buf.as_device_ptr(&self.stream),
-                shape:    state.shape.clone(),
-                dtype:    state.dtype,
-                byte_len: state.buf.len_bytes,
-            });
+            // SAFETY: borrows a Session-owned output buffer; the validity window
+            // (until next run_* / Session drop) is the documented caller contract.
+            let view = unsafe {
+                VrtTensor::borrowed(
+                    state.buf.as_device_ptr(&self.stream),
+                    state.shape.iter().map(|&d| d as usize).collect(),
+                    dtype_of(state.dtype),
+                    MemKind::Device,
+                    state.buf.len_bytes,
+                    cuda_stream.clone(),
+                )
+            };
+            result.insert(name.clone(), view);
         }
         Ok(result)
     }

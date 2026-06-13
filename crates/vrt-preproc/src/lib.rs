@@ -15,7 +15,7 @@ use std::ffi::c_void;
 use cudarc::driver::{CudaSlice, CudaStream, DevicePtr, PushKernelArg};
 use cudarc::driver::sys::CUdeviceptr;
 
-use vrt::{Stage, BoxError, TRTensor, DType};
+use vrt::{Stage, BoxError, VrtTensor, DType};
 use vrt::cuda::{Kernels, cfg_2d};
 
 /// Errors from GPU preprocessing.
@@ -117,10 +117,10 @@ extern "C" __global__ void letterbox_rgba_to_chw(
 
 // ── Preprocessor ─────────────────────────────────────────────────────────────
 
-/// GPU letterbox preprocessor: [`DeviceFrame`] → [`TRTensor`] (CHW FP32).
+/// GPU letterbox preprocessor: [`DeviceFrame`] → [`VrtTensor`] (CHW FP32).
 ///
 /// Implements [`Stage`] so it plugs directly into a [`vrt::Pipeline`].
-/// The output [`TRTensor`] is pre-allocated in `new` and reused every frame.
+/// The output [`VrtTensor`] is pre-allocated in `new` and reused every frame.
 /// `_pending` holds the [`TextureGuard`] across enqueue → sync; dropped in
 /// [`finalize`](Stage::finalize) after the stream is synced.
 pub struct Preprocessor {
@@ -129,7 +129,7 @@ pub struct Preprocessor {
     src_w: u32, src_h: u32,
     dst_w: u32, dst_h: u32,
     scale: f32, pad_x: f32, pad_y: f32,
-    output:   TRTensor,
+    output:   VrtTensor,
     _pending: Option<TextureGuard>,
 }
 
@@ -149,7 +149,7 @@ impl Preprocessor {
         let pad_x = (dst_w as f32 - src_w as f32 * scale) * 0.5;
         let pad_y = (dst_h as f32 - src_h as f32 * scale) * 0.5;
 
-        let output = TRTensor::alloc(
+        let output = VrtTensor::alloc(
             &stream,
             [1, 3, dst_h as usize, dst_w as usize],
             DType::F32,
@@ -255,7 +255,7 @@ impl Preprocessor {
 
 impl Stage for Preprocessor {
     type Input  = DeviceFrame;
-    type Output = TRTensor;
+    type Output = VrtTensor;
 
     fn enqueue(&mut self, frame: &DeviceFrame) -> Result<(), BoxError> {
         // A still-pending texture means the previous frame never reached
@@ -277,5 +277,5 @@ impl Stage for Preprocessor {
         Ok(())
     }
 
-    fn output(&self) -> &TRTensor { &self.output }
+    fn output(&self) -> &VrtTensor { &self.output }
 }
