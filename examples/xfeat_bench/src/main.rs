@@ -54,16 +54,12 @@ fn main() -> Result<(), vrt::BoxError> {
     let (model_path, image_path) = (&args[1], &args[2]);
     let iters: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(300);
 
-    let engine_path = if model_path.ends_with(".onnx") {
-        let profile = vrt_hub::EngineProfile {
-            input: Some(("image".into(),
-                vec![1, 3, 240, 320], vec![1, 3, 640, 640], vec![1, 3, 1088, 1920])),
-            fp16: true, workspace_mb: 2048,
-        };
-        vrt_hub::EngineCache::default()
-            .get_or_build("xfeat-backbone", std::path::Path::new(model_path), &profile)?
-            .to_string_lossy().into_owned()
-    } else { model_path.clone() };
+    let profile = vrt_hub::EngineProfile {
+        input: Some(("image".into(),
+            vec![1, 3, 240, 320], vec![1, 3, 640, 640], vec![1, 3, 1088, 1920])),
+        fp16: true, workspace_mb: 2048,
+    };
+    let engine_path = vrt_hub::EngineCache::default().resolve("xfeat-backbone", model_path, &profile)?;
 
     let logger  = Logger::new(Severity::Warning)?;
     let runtime = Runtime::new(logger)?;

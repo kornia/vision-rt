@@ -99,23 +99,8 @@ int32_t btrt_context_set_tensor_address(btrt_context_t* ctx,
 int32_t btrt_context_enqueue_v3(btrt_context_t* ctx, void* stream);
 
 /* ── CUDA helpers ─────────────────────────────────────────────────────────── */
-/* These thin wrappers let Rust own device memory without pulling in cudarc. */
-
-/* cudaStreamCreate. out_stream: receives the new stream handle (cast to void*).
-   Returns 0 on cudaSuccess. */
-int32_t btrt_cuda_stream_create(void** out_stream);
-
-/* cudaStreamSynchronize. Returns 0 on success. */
-int32_t btrt_cuda_stream_sync(void* stream);
-
-/* cudaStreamDestroy. */
-void btrt_cuda_stream_destroy(void* stream);
-
-/* cudaMalloc. Returns 0 on success. */
-int32_t btrt_cuda_malloc(void** out_ptr, size_t bytes);
-
-/* cudaFree. */
-void btrt_cuda_free(void* ptr);
+/* Device memory + streams are owned on the Rust side (cudarc); only the pinned
+   host-buffer path and the result D2H go through this bridge. */
 
 /* cudaHostAlloc (page-locked, cacheable) — for async-D2H result buffers that
    the host then reads. Returns 0 on success. */
@@ -123,9 +108,6 @@ int32_t btrt_cuda_host_alloc(void** out_ptr, size_t bytes);
 
 /* cudaFreeHost. */
 void btrt_cuda_host_free(void* ptr);
-
-/* cudaMemcpyAsync host->device. Returns 0 on success. */
-int32_t btrt_cuda_memcpy_h2d(void* dst, const void* src, size_t bytes, void* stream);
 
 /* cudaMemcpyAsync device->host. Returns 0 on success. */
 int32_t btrt_cuda_memcpy_d2h(void* dst, const void* src, size_t bytes, void* stream);

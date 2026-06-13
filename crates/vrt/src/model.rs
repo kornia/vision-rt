@@ -30,8 +30,7 @@ use std::ffi::c_void;
 use cudarc::driver::CudaStream;
 
 use crate::engine::Engine;
-use crate::runtime::Runtime;
-use crate::session::{Session, OutputTensor};
+use crate::session::Session;
 use crate::buffer::Stream;
 use crate::tensor::VrtTensor;
 use crate::pipeline::TRTensorMap;
@@ -53,17 +52,6 @@ impl ModelSession {
         Ok(Self { session, inputs, outputs })
     }
 
-    /// Load an engine file and bind it to a fresh private stream.
-    pub fn load(runtime: Arc<Runtime>, engine_path: impl AsRef<std::path::Path>) -> Result<Self> {
-        let engine  = Engine::from_file(runtime, engine_path)?;
-        let inputs  = engine.input_names();
-        let outputs = engine.output_names();
-        let session = Session::new(engine)?;
-        Ok(Self { session, inputs, outputs })
-    }
-
-    /// Input tensor names, in engine order.
-    pub fn input_names(&self) -> &[String] { &self.inputs }
     /// Output tensor names, in engine order.
     pub fn output_names(&self) -> &[String] { &self.outputs }
 
@@ -111,13 +99,4 @@ impl ModelSession {
         Ok(TRTensorMap::new(views))
     }
 
-    /// Synchronous host-input inference (H2D → enqueue → sync → D2H).
-    ///
-    /// For non-pipeline one-shot use; returns host-resident [`OutputTensor`]s.
-    pub fn run_host(
-        &mut self,
-        inputs: &[(&str, &[f32])],
-    ) -> Result<std::collections::HashMap<String, OutputTensor>> {
-        self.session.run(inputs)
-    }
 }

@@ -84,21 +84,6 @@ impl Session {
     /// The CUDA stream this session enqueues work on.
     pub fn stream(&self) -> &Stream { &self.stream }
 
-    /// Names of all output tensors (in engine order).
-    pub fn output_shape_names(&self) -> Vec<String> {
-        self.outputs.keys().cloned().collect()
-    }
-
-    /// Resolved shape of a named output tensor (valid after at least one inference).
-    pub fn output_shape(&self, name: &str) -> Option<&[i64]> {
-        self.outputs.get(name).map(|s| s.shape.as_slice())
-    }
-
-    /// Byte length of a named output tensor's device buffer.
-    pub fn output_byte_len(&self, name: &str) -> Option<usize> {
-        self.outputs.get(name).map(|s| s.buf.len_bytes)
-    }
-
     /// Create a session that shares `cuda_stream` with other pipeline stages.
     ///
     /// All device-buffer allocations and TRT enqueue calls use the provided

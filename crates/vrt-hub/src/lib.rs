@@ -214,7 +214,7 @@ impl EngineCache {
     /// Cache path for a model — exists or not.
     pub fn key_path(&self, name: &str, onnx: &Path) -> Result<PathBuf, HubError> {
         let onnx_sha8 = &sha256_file(onnx)?[..8];
-        let trt_ver = trt_sys_version();
+        let trt_ver = vrt::TENSORRT_VERSION;
         let sm = compute_capability()?;
         Ok(self.dir.join(format!("{name}-{onnx_sha8}-trt{trt_ver}-sm{sm}.engine")))
     }
@@ -249,22 +249,31 @@ impl EngineCache {
         fs::rename(&tmp, &path)?;
         Ok(path)
     }
-}
 
-/// TRT version string for cache keys (from NvInferVersion.h at build time).
-fn trt_sys_version() -> &'static str {
-    vrt::TENSORRT_VERSION
+    /// Resolve a model path to a usable engine path: pass `.engine` files
+    /// through unchanged, or build `.onnx` into the cache (see [`get_or_build`]).
+    ///
+    /// [`get_or_build`]: EngineCache::get_or_build
+    pub fn resolve(
+        &self,
+        name: &str,
+        model_path: &str,
+        profile: &EngineProfile,
+    ) -> Result<String, HubError> {
+        if model_path.ends_with(".onnx") {
+            Ok(self.get_or_build(name, Path::new(model_path), profile)?
+                .to_string_lossy().into_owned())
+        } else {
+            Ok(model_path.to_string())
+        }
+    }
 }
 
 /// GPU compute capability as e.g. "87".
 fn compute_capability() -> Result<String, HubError> {
-    let ctx = cudarc_context()?;
+    let ctx = vrt::cudarc::driver::CudaContext::new(0)?;
     let (major, minor) = ctx.compute_capability()?;
     Ok(format!("{major}{minor}"))
-}
-
-fn cudarc_context() -> Result<std::sync::Arc<vrt::cudarc::driver::CudaContext>, HubError> {
-    Ok(vrt::cudarc::driver::CudaContext::new(0)?)
 }
 
 // ── Engine building ───────────────────────────────────────────────────────────

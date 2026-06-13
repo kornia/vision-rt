@@ -225,9 +225,6 @@ impl TRTensorMap {
             .map_err(Into::into)
     }
 
-    pub fn names(&self) -> impl Iterator<Item = &str> {
-        self.0.keys().map(String::as_str)
-    }
 }
 
 // ── TrtInferStage ─────────────────────────────────────────────────────────────
@@ -252,9 +249,6 @@ impl TrtInferStage {
         Ok(Self { model, input_name: input_name.into() })
     }
 
-    pub fn cuda_stream(&self) -> Arc<CudaStream> {
-        self.model.cuda_stream()
-    }
 }
 
 impl Operator for TrtInferStage {

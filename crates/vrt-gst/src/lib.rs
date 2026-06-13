@@ -43,8 +43,6 @@ pub enum GstSourceError {
     NvmmImport { fd: i32, size: u64, code: i32 },
     #[error(transparent)]
     Preproc(#[from] PreprocError),
-    #[error("CUDA driver: {0}")]
-    Driver(#[from] cudarc::driver::DriverError),
 }
 
 // ── CudaMemory ────────────────────────────────────────────────────────────────
@@ -277,11 +275,6 @@ impl RtspSource {
     pub fn latest_cpu_frame(&self) -> Arc<Mutex<Option<CpuFrame>>> {
         Arc::clone(&self.cpu_frame)
     }
-}
-
-impl Iterator for RtspSource {
-    type Item = NvmmFrame;
-    fn next(&mut self) -> Option<Self::Item> { self.rx.recv().ok() }
 }
 
 impl Source for RtspSource {

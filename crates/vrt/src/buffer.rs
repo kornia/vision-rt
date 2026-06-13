@@ -42,9 +42,6 @@ impl<T: Copy + Default> PinnedBuffer<T> {
 
     /// Raw host pointer (D2H destination).
     pub fn as_mut_ptr(&mut self) -> *mut T { self.ptr }
-    pub fn len(&self) -> usize { self.len }
-    pub fn is_empty(&self) -> bool { self.len == 0 }
-
     /// Host slice — valid only after the stream that copied into it has synced.
     pub fn as_slice(&self) -> &[T] {
         unsafe { std::slice::from_raw_parts(self.ptr, self.len) }
@@ -97,19 +94,6 @@ impl DeviceBuffer {
             .memcpy_dtov(&self.slice)
             .map_err(|e| driver_err(e, "cudaMemcpyD2H"))?;
         Ok(())
-    }
-
-    /// Raw CUDA device pointer for binding to TRT `setTensorAddress`.
-    ///
-    /// `sys::CUdeviceptr` is `u64`; cast to `usize` then `*mut c_void` for the C ABI.
-    /// The `_guard` ensures the stream records a dependency — drop it after TRT has
-    /// enqueued work on the same stream.
-    pub fn as_device_ptr_guarded<'a>(
-        &'a self,
-        stream: &'a Stream,
-    ) -> (*mut std::ffi::c_void, cudarc::driver::SyncOnDrop<'a>) {
-        let (ptr, guard) = self.slice.device_ptr(stream.inner.as_ref());
-        (ptr as usize as *mut std::ffi::c_void, guard)
     }
 
     /// Convenience: raw device pointer (no guard held — suitable when TRT manages sync).

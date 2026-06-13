@@ -42,8 +42,7 @@ fn main() -> Result<(), vrt::BoxError> {
     let stream  = Stream::new_standalone()?.cuda_stream().clone();
     let lb_info = LetterboxInfo::from_dims(src_w, src_h, MODEL_W, MODEL_H);
     let preproc = NvmmPreprocessStage::new(stream.clone(), src_w, src_h, MODEL_W, MODEL_H)?;
-    let infer   = YoloInferStage::new(engine, stream.clone(), lb_info, 0.25, 0.45)
-        ?;
+    let infer   = YoloInferStage::new(engine, stream.clone(), lb_info, 0.25, 0.45)?;
 
     let mut pipeline = Pipeline::new(stream, source)
         .pipe(preproc)

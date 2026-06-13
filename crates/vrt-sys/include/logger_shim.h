@@ -30,8 +30,6 @@ void btrt_logger_destroy(btrt_logger_t* logger);
 /* Thread-local last error string. */
 const char* btrt_last_error(void);
 
-/* initLibNvInferPlugins — needs ILogger*; exposed here for convenience. */
-int32_t btrt_init_plugins(btrt_logger_t* logger);
 
 #ifdef __cplusplus
 }

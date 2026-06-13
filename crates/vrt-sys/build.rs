@@ -83,7 +83,6 @@ fn main() {
             // btrt_logger_t already comes from bridge_bindings.rs
             .blocklist_type("btrt_logger_.*")
             .blocklist_function("btrt_logger_.*")
-            .blocklist_function("btrt_init_plugins")
             .generate()
             .expect("bindgen failed on builder_shim.h");
         builder_bindings

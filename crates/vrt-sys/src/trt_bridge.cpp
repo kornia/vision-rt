@@ -11,7 +11,6 @@
 //   See UPDATING.md for the full checklist.
 
 #include "NvInferRuntime.h"
-#include "NvInferPlugin.h"
 #include "cuda_runtime_api.h"
 
 #include "../include/trt_bridge.h"
@@ -257,35 +256,8 @@ int32_t btrt_context_enqueue_v3(btrt_context_t* ctx, void* stream) {
 }
 
 // ── CUDA helpers ──────────────────────────────────────────────────────────────
-
-int32_t btrt_cuda_stream_create(void** out_stream) {
-    if (!out_stream) return -1;
-    cudaStream_t s;
-    cudaError_t err = cudaStreamCreate(&s);
-    if (err == cudaSuccess) {
-        *out_stream = static_cast<void*>(s);
-    }
-    return static_cast<int32_t>(err);
-}
-
-int32_t btrt_cuda_stream_sync(void* stream) {
-    cudaError_t err = cudaStreamSynchronize(static_cast<cudaStream_t>(stream));
-    return static_cast<int32_t>(err);
-}
-
-void btrt_cuda_stream_destroy(void* stream) {
-    cudaStreamDestroy(static_cast<cudaStream_t>(stream));
-}
-
-int32_t btrt_cuda_malloc(void** out_ptr, size_t bytes) {
-    if (!out_ptr) return -1;
-    cudaError_t err = cudaMalloc(out_ptr, bytes);
-    return static_cast<int32_t>(err);
-}
-
-void btrt_cuda_free(void* ptr) {
-    cudaFree(ptr);
-}
+// Device memory + streams are owned on the Rust side (cudarc); only the pinned
+// host-buffer path and the result D2H go through this bridge.
 
 /* Page-locked (pinned) host memory, cacheable (flags=0 — NOT write-combined),
    so D2H copies into it are truly async AND host reads of the result are fast.
@@ -299,12 +271,6 @@ int32_t btrt_cuda_host_alloc(void** out_ptr, size_t bytes) {
 
 void btrt_cuda_host_free(void* ptr) {
     cudaFreeHost(ptr);
-}
-
-int32_t btrt_cuda_memcpy_h2d(void* dst, const void* src, size_t bytes, void* stream) {
-    cudaError_t err = cudaMemcpyAsync(dst, src, bytes, cudaMemcpyHostToDevice,
-                                      static_cast<cudaStream_t>(stream));
-    return static_cast<int32_t>(err);
 }
 
 int32_t btrt_cuda_memcpy_d2h(void* dst, const void* src, size_t bytes, void* stream) {

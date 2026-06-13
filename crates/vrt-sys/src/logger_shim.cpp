@@ -7,7 +7,6 @@
 //   See UPDATING.md for the full checklist.
 
 #include "NvInferRuntime.h"
-#include "NvInferPlugin.h"
 #include "../include/logger_shim.h"
 
 #include <mutex>
@@ -86,12 +85,6 @@ void* btrt_logger_get_ilogger(btrt_logger_t* logger) {
 
 void btrt_logger_destroy(btrt_logger_t* logger) {
     delete reinterpret_cast<ShimLogger*>(logger);
-}
-
-int32_t btrt_init_plugins(btrt_logger_t* logger) {
-    void* il = btrt_logger_get_ilogger(logger);
-    bool ok = initLibNvInferPlugins(il, "");
-    return ok ? 0 : -1;
 }
 
 } // extern "C"

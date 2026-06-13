@@ -59,8 +59,3 @@ extern "C" {
 /// NvInferVersion.h at build time.  Engine-cache keys depend on this.
 pub const TENSORRT_VERSION: &str = env!("TENSORRT_VERSION");
 
-/// Returns `true` if `status` indicates success (status == 0).
-#[inline]
-pub fn is_ok(status: i32) -> bool {
-    status == 0
-}

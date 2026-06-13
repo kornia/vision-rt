@@ -2,22 +2,13 @@
 
 use std::sync::Arc;
 
-use kornia_image::{Image, ImageSize, allocator::CpuAllocator};
-use kornia_imgproc::{
-    interpolation::InterpolationMode,
-    normalize::normalize_rgb_u8,
-    padding::{spatial_padding, Padding2D, PaddingMode},
-    resize::resize_fast_rgb,
-};
-use vrt::{Engine, Session, ModelSession, DeviceBuffer, CudaStream, Operator, ExecCtx, BoxError, VrtTensor};
+use vrt::{Engine, ModelSession, CudaStream, Operator, ExecCtx, BoxError, VrtTensor};
 
 /// Errors from YOLO pre/post-processing and inference.
 #[derive(Debug, thiserror::Error)]
 pub enum YoloError {
     #[error(transparent)]
     Trt(#[from] vrt::TrtError),
-    #[error("image processing: {0}")]
-    Image(#[from] kornia_image::error::ImageError),
     #[error("CUDA driver: {0}")]
     Driver(#[from] cudarc::driver::DriverError),
     #[error("no output tensor '{0}' in engine")]
@@ -53,55 +44,6 @@ impl LetterboxInfo {
         let pad_top  = (dst_h as f32 - src_h as f32 * scale) * 0.5;
         Self { scale, pad_left, pad_top }
     }
-}
-
-// ── CPU preprocessing ─────────────────────────────────────────────────────────
-
-/// Letterbox a RGB image into a flat f32 CHW tensor ready for YOLO inference.
-///
-/// Resizes preserving aspect ratio, pads with gray 114 to `(dst_w, dst_h)`,
-/// normalizes to [0, 1], and converts HWC → CHW.
-pub fn letterbox_rgb_to_chw(
-    img:   &Image<u8, 3, CpuAllocator>,
-    dst_w: u32,
-    dst_h: u32,
-) -> Result<(Vec<f32>, LetterboxInfo), YoloError> {
-    let scale     = f32::min(dst_w as f32 / img.width() as f32, dst_h as f32 / img.height() as f32);
-    let new_w     = (img.width()  as f32 * scale).round() as usize;
-    let new_h     = (img.height() as f32 * scale).round() as usize;
-    let pad_left  = (dst_w as usize - new_w) / 2;
-    let pad_top   = (dst_h as usize - new_h) / 2;
-    let pad_right  = dst_w as usize - new_w - pad_left;
-    let pad_bottom = dst_h as usize - new_h - pad_top;
-
-    let mut resized = Image::<u8, 3, _>::from_size_val(
-        ImageSize { width: new_w, height: new_h }, 0u8, CpuAllocator,
-    )?;
-    resize_fast_rgb(img, &mut resized, InterpolationMode::Bilinear)?;
-
-    let mut padded = Image::<u8, 3, _>::from_size_val(
-        ImageSize { width: dst_w as usize, height: dst_h as usize }, 114u8, CpuAllocator,
-    )?;
-    spatial_padding(
-        &resized, &mut padded,
-        Padding2D { top: pad_top, bottom: pad_bottom, left: pad_left, right: pad_right },
-        PaddingMode::Constant,
-        [114u8; 3],
-    )?;
-
-    let npixels = dst_w as usize * dst_h as usize;
-    let mut hwc_f32 = vec![0.0f32; npixels * 3];
-    normalize_rgb_u8(padded.as_slice(), &mut hwc_f32, npixels, &[1.0 / 255.0; 3], &[0.0; 3]);
-
-    // HWC → CHW: [H,W,3] → [3,H,W]
-    let mut chw = vec![0.0f32; npixels * 3];
-    for i in 0..npixels {
-        chw[i]               = hwc_f32[i * 3];
-        chw[npixels + i]     = hwc_f32[i * 3 + 1];
-        chw[2 * npixels + i] = hwc_f32[i * 3 + 2];
-    }
-
-    Ok((chw, LetterboxInfo { scale, pad_left: pad_left as f32, pad_top: pad_top as f32 }))
 }
 
 // ── CPU postprocessing ────────────────────────────────────────────────────────
@@ -226,88 +168,6 @@ pub fn postprocess(
     unletterbox(after_nms, letterbox_info, labels)
 }
 
-// ── Model abstraction ─────────────────────────────────────────────────────────
-
-/// Complete YOLO detection pipeline: TRT session + device buffer + CPU postprocessing.
-///
-/// Owns the TRT `Session` and an input device buffer. An external GPU preprocessor
-/// writes CHW FP32 data into `input_ptr()` on the shared stream, then `detect()`
-/// runs inference and returns `Detection` structs in original-image coordinates.
-pub struct Yolo {
-    session:     Session,
-    input_dev:   DeviceBuffer,
-    model_w:     u32,
-    model_h:     u32,
-    conf_thresh: f32,
-    iou_thresh:  f32,
-}
-
-impl Yolo {
-    /// Build a `Yolo` model from a pre-serialised TRT engine.
-    ///
-    /// * `engine`      — loaded YOLO engine (input tensor `"images"`, `[1,3,H,W]`)
-    /// * `model_w/h`   — model input width / height
-    /// * `conf_thresh` — minimum class score to keep a candidate
-    /// * `iou_thresh`  — IoU threshold for per-class NMS
-    pub fn new(
-        engine:      Arc<Engine>,
-        model_w:     u32,
-        model_h:     u32,
-        conf_thresh: f32,
-        iou_thresh:  f32,
-    ) -> Result<Self, YoloError> {
-        let session   = Session::new(Arc::clone(&engine))?;
-        let input_dev = DeviceBuffer::alloc_with_stream(
-            session.stream().cuda_stream(),
-            (3 * model_w * model_h) as usize * std::mem::size_of::<f32>(),
-        )?;
-        Ok(Self { session, input_dev, model_w, model_h, conf_thresh, iou_thresh })
-    }
-
-    /// The CUDA stream shared by the TRT session.
-    pub fn stream(&self) -> &vrt::Stream { self.session.stream() }
-
-    /// Raw device pointer to the CHW FP32 input buffer `(3, model_h, model_w)`.
-    ///
-    /// Write normalised `[0, 1]` f32 values here on `self.stream()` before
-    /// calling `detect()`.
-    pub fn input_ptr(&self) -> *mut std::ffi::c_void {
-        self.input_dev.as_device_ptr(self.session.stream())
-    }
-
-    /// Detect objects from device-side CHW FP32 input already in `input_ptr()`.
-    ///
-    /// The caller must have written the preprocessed frame to `input_ptr()` on
-    /// `self.stream()` before calling this (and synced if needed for correctness).
-    pub fn detect(
-        &mut self,
-        lb_info: &LetterboxInfo,
-        labels:  Option<&[&str]>,
-    ) -> Result<Vec<Detection>, YoloError> {
-        let ptr   = self.input_ptr();
-        let shape = &[1i64, 3, self.model_h as i64, self.model_w as i64];
-        let outputs = unsafe {
-            self.session.run_device_inputs(&[("images", ptr, shape)])?
-        };
-        let tensor = outputs.values().next().ok_or_else(|| YoloError::MissingOutput("any".into()))?;
-        Ok(postprocess(tensor.as_f32(), &tensor.shape, lb_info, self.conf_thresh, self.iou_thresh, labels))
-    }
-
-    /// Detect objects from a CPU-side CHW FP32 slice.
-    ///
-    /// H2D copy and stream synchronisation are handled internally by the session.
-    pub fn detect_cpu(
-        &mut self,
-        chw:     &[f32],
-        lb_info: &LetterboxInfo,
-        labels:  Option<&[&str]>,
-    ) -> Result<Vec<Detection>, YoloError> {
-        let outputs = self.session.run(&[("images", chw)])?;
-        let tensor  = outputs.values().next().ok_or_else(|| YoloError::MissingOutput("any".into()))?;
-        Ok(postprocess(tensor.as_f32(), &tensor.shape, lb_info, self.conf_thresh, self.iou_thresh, labels))
-    }
-}
-
 // ── YoloInferStage ───────────────────────────────────────────────────────────
 
 /// Pipeline stage: [`VrtTensor`] → `Vec<Detection>`.
@@ -399,29 +259,6 @@ impl Operator for YoloInferStage {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_letterbox_no_pad() {
-        let data = vec![128u8; 640 * 640 * 3];
-        let img = Image::<u8, 3, _>::new(
-            ImageSize { width: 640, height: 640 }, data, CpuAllocator,
-        ).unwrap();
-        let (chw, info) = letterbox_rgb_to_chw(&img, 640, 640).unwrap();
-        assert!((info.scale - 1.0).abs() < 1e-5);
-        assert_eq!(chw.len(), 3 * 640 * 640);
-    }
-
-    #[test]
-    fn test_letterbox_downscale_with_padding() {
-        let data = vec![128u8; 1280 * 720 * 3];
-        let img = Image::<u8, 3, _>::new(
-            ImageSize { width: 1280, height: 720 }, data, CpuAllocator,
-        ).unwrap();
-        let (chw, info) = letterbox_rgb_to_chw(&img, 640, 640).unwrap();
-        assert!((info.scale - 0.5).abs() < 1e-5);
-        assert!(info.pad_top > 0.0);
-        assert_eq!(chw.len(), 3 * 640 * 640);
-    }
 
     #[test]
     fn test_nms_removes_duplicates() {

@@ -85,24 +85,12 @@ fn main() -> Result<(), vrt::BoxError> {
     let save_dir = args.get(3).map(String::as_str).unwrap_or(".");
 
     // .onnx → versioned engine cache (build on first run); .engine → as-is.
-    let engine_path = if model_path.ends_with(".onnx") {
-        let profile = vrt_hub::EngineProfile {
-            input: Some((
-                "image".into(),
-                vec![1, 3, 240, 320],
-                vec![1, 3, 640, 640],
-                vec![1, 3, 1088, 1920],
-            )),
-            fp16: true,
-            workspace_mb: 2048,
-        };
-        vrt_hub::EngineCache::default()
-            .get_or_build("xfeat-backbone", std::path::Path::new(model_path), &profile)?
-            .to_string_lossy()
-            .into_owned()
-    } else {
-        model_path.clone()
+    let profile = vrt_hub::EngineProfile {
+        input: Some(("image".into(),
+            vec![1, 3, 240, 320], vec![1, 3, 640, 640], vec![1, 3, 1088, 1920])),
+        fp16: true, workspace_mb: 2048,
     };
+    let engine_path = vrt_hub::EngineCache::default().resolve("xfeat-backbone", model_path, &profile)?;
 
     let logger  = Logger::new(Severity::Warning)?;
     let runtime = Runtime::new(logger)?;
@@ -177,13 +165,12 @@ fn main() -> Result<(), vrt::BoxError> {
 
     if n > 0 {
         let a: Vec<f64> = sum.iter().map(|s| s / n as f64).collect();
-        let p = &peak;
-        let wall = a[0] + a[1] + a[3] + a[4];
+                let wall = a[0] + a[1] + a[3] + a[4];
         println!("\n── final ({n} frames)");
         println!("   avg: source={:.1}  enqueue={:.2}  gpu={:.2}  sync={:.1}  finalize={:.2}  total={:.1}ms",
             a[0], a[1], a[2], a[3], a[4], wall);
         println!("  peak: source={:.1}  enqueue={:.2}  gpu={:.2}  sync={:.1}  finalize={:.2}",
-            p[0], p[1], p[2], p[3], p[4]);
+            peak[0], peak[1], peak[2], peak[3], peak[4]);
         println!("   fps: {:.1}", 1000.0 / wall);
     }
 

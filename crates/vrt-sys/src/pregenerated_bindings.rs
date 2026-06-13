@@ -23,9 +23,6 @@ extern "C" {
 extern "C" {
     pub fn btrt_last_error() -> *const ::std::os::raw::c_char;
 }
-extern "C" {
-    pub fn btrt_init_plugins(logger: *mut btrt_logger_t) -> i32;
-}
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct btrt_runtime_s {
@@ -125,33 +122,10 @@ extern "C" {
     ) -> i32;
 }
 extern "C" {
-    pub fn btrt_cuda_stream_create(out_stream: *mut *mut ::std::os::raw::c_void) -> i32;
-}
-extern "C" {
-    pub fn btrt_cuda_stream_sync(stream: *mut ::std::os::raw::c_void) -> i32;
-}
-extern "C" {
-    pub fn btrt_cuda_stream_destroy(stream: *mut ::std::os::raw::c_void);
-}
-extern "C" {
-    pub fn btrt_cuda_malloc(out_ptr: *mut *mut ::std::os::raw::c_void, bytes: usize) -> i32;
-}
-extern "C" {
-    pub fn btrt_cuda_free(ptr: *mut ::std::os::raw::c_void);
-}
-extern "C" {
     pub fn btrt_cuda_host_alloc(out_ptr: *mut *mut ::std::os::raw::c_void, bytes: usize) -> i32;
 }
 extern "C" {
     pub fn btrt_cuda_host_free(ptr: *mut ::std::os::raw::c_void);
-}
-extern "C" {
-    pub fn btrt_cuda_memcpy_h2d(
-        dst: *mut ::std::os::raw::c_void,
-        src: *const ::std::os::raw::c_void,
-        bytes: usize,
-        stream: *mut ::std::os::raw::c_void,
-    ) -> i32;
 }
 extern "C" {
     pub fn btrt_cuda_memcpy_d2h(
