@@ -114,6 +114,57 @@ where
     }
 }
 
+// ── Fork ──────────────────────────────────────────────────────────────────────
+
+/// Fan-out: run two operators on the **same** input, producing both outputs.
+///
+/// The opposite of [`Chain`] (which feeds one into the next).  Both branches
+/// receive the same `&Input` in `enqueue` and run on the shared stream; the
+/// combined `Output` is the tuple `(A::Output, B::Output)`.
+///
+/// This is the structured replacement for ad-hoc side channels (e.g. the
+/// camera viz `Arc<Mutex>`): a `Fork` lets one frame drive, say, detection on
+/// one branch and keypoints on the other, or compute on one and a passthrough
+/// for visualization on the other.
+///
+/// ```no_run
+/// # use vrt::{Fork, Operator};
+/// # fn build<A, B, I>(a: A, b: B) -> Fork<A, B>
+/// # where A: Operator<Input = I>, B: Operator<Input = I> {
+/// Fork::new(a, b)   // Input = I, Output = (A::Output, B::Output)
+/// # }
+/// ```
+pub struct Fork<A, B> {
+    a: A,
+    b: B,
+}
+
+impl<A, B> Fork<A, B> {
+    pub fn new(a: A, b: B) -> Self { Self { a, b } }
+}
+
+impl<I, A, B> Operator for Fork<A, B>
+where
+    A: Operator<Input = I>,
+    B: Operator<Input = I>,
+{
+    type Input   = I;
+    type Pending = (A::Pending, B::Pending);
+    type Output  = (A::Output, B::Output);
+
+    fn enqueue(&mut self, input: &I, ctx: &ExecCtx) -> Result<Self::Pending, BoxError> {
+        let pa = self.a.enqueue(input, ctx)?;
+        let pb = self.b.enqueue(input, ctx)?;
+        Ok((pa, pb))
+    }
+
+    fn finalize(&mut self, (pa, pb): Self::Pending, ctx: &ExecCtx) -> Result<Self::Output, BoxError> {
+        let oa = self.a.finalize(pa, ctx)?;
+        let ob = self.b.finalize(pb, ctx)?;
+        Ok((oa, ob))
+    }
+}
+
 // ── TRTensorMap ───────────────────────────────────────────────────────────────
 
 /// Device-side output map from a TRT inference stage.
@@ -388,4 +439,45 @@ where
 
 fn ms(a: Instant, b: Instant) -> f64 {
     (b - a).as_secs_f64() * 1000.0
+}
+
+#[cfg(test)]
+mod fork_tests {
+    use super::*;
+    use crate::buffer::Stream;
+
+    // Trivial operators (no GPU work) to exercise the combinator wiring:
+    // enqueue passes the value through as Pending; finalize transforms it.
+    struct Doubler;
+    impl Operator for Doubler {
+        type Input = i32;
+        type Pending = i32;
+        type Output = i32;
+        fn enqueue(&mut self, input: &i32, _ctx: &ExecCtx) -> Result<i32, BoxError> { Ok(*input) }
+        fn finalize(&mut self, p: i32, _ctx: &ExecCtx) -> Result<i32, BoxError> { Ok(p * 2) }
+    }
+    struct Negator;
+    impl Operator for Negator {
+        type Input = i32;
+        type Pending = i32;
+        type Output = i32;
+        fn enqueue(&mut self, input: &i32, _ctx: &ExecCtx) -> Result<i32, BoxError> { Ok(*input) }
+        fn finalize(&mut self, p: i32, _ctx: &ExecCtx) -> Result<i32, BoxError> { Ok(-p) }
+    }
+
+    /// Fork runs both branches on the same input and returns both outputs.
+    /// Needs a CUDA context only to build an ExecCtx; run on-device:
+    ///   cargo test -p vision-rt -- --ignored
+    #[test]
+    #[ignore]
+    fn fork_runs_both_branches() {
+        let stream = Stream::new_standalone().unwrap().cuda_stream().clone();
+        let ctx = ExecCtx::new(stream, FrameMeta::default());
+
+        let mut fork = Fork::new(Doubler, Negator);
+        let pending = fork.enqueue(&7, &ctx).unwrap();
+        let (doubled, negated) = fork.finalize(pending, &ctx).unwrap();
+        assert_eq!(doubled, 14);
+        assert_eq!(negated, -7);
+    }
 }

@@ -33,6 +33,8 @@ jobs:
           -p vrt-sys -p vision-rt -p vrt-preproc
           -p vrt-xfeat -p vrt-yolo -p vrt-hub
           -- -D warnings
+      - name: cargo clippy (builder feature)
+        run: cargo clippy -p vision-rt -p vrt-hub --features vrt-hub/builder -- -D warnings
 
   # Self-hosted Jetson runner: real TensorRT + CUDA + GStreamer.
   # Register a runner on the Orin with labels [self-hosted, jetson], then

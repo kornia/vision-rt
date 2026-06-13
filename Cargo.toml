@@ -11,6 +11,7 @@ members = [
     "crates/vrt-hub",
     "examples/rtsp_yolo",
     "examples/rtsp_xfeat",
+    "examples/xfeat_match",
 ]
 
 [workspace.package]

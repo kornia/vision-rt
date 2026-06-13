@@ -20,12 +20,15 @@
 use crate::error::{Result, TrtError, last_trt_error};
 use crate::logger::Logger;
 
+/// A dynamic-shape optimization profile: `(input_name, min, opt, max)` dims.
+pub type ShapeProfile = (String, Vec<i64>, Vec<i64>, Vec<i64>);
+
 /// Builder for serialized TensorRT engines from ONNX files.
 pub struct EngineBuilder {
     onnx_path:       String,
     fp16:            bool,
     workspace_bytes: i64,
-    profile:         Option<(String, Vec<i64>, Vec<i64>, Vec<i64>)>,
+    profile:         Option<ShapeProfile>,
 }
 
 impl EngineBuilder {

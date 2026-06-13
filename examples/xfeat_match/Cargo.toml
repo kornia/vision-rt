@@ -1,0 +1,13 @@
+[package]
+name = "xfeat_match"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+vision-rt    = { path = "../../crates/vrt" }
+vrt-xfeat    = { path = "../../crates/vrt-xfeat" }
+vrt-preproc  = { path = "../../crates/vrt-preproc" }
+vrt-hub      = { path = "../../crates/vrt-hub", features = ["builder"] }
+image        = "0.25"
+env_logger   = "0.11"

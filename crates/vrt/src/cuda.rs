@@ -45,12 +45,17 @@ impl Kernels {
     /// JIT-compile CUDA C `src` for the device behind `stream`.
     ///
     /// Kernels must be declared `extern "C" __global__` (nvrtc mangles
-    /// names otherwise).
+    /// names otherwise).  The CUDA toolkit include dir (`$CUDA_HOME/include`,
+    /// default `/usr/local/cuda/include`) is on the search path, so kernels
+    /// may `#include` CUDA headers (e.g. `<cuda_texture_types.h>`).
     pub fn compile(stream: Arc<CudaStream>, src: &str) -> Result<Self> {
         let (major, minor) = stream.context().compute_capability()
             .map_err(TrtError::from)?;
+        let cuda_inc = std::env::var("CUDA_HOME")
+            .unwrap_or_else(|_| "/usr/local/cuda".into()) + "/include";
         let opts = CompileOptions {
-            options: vec![format!("--gpu-architecture=sm_{major}{minor}")],
+            options:       vec![format!("--gpu-architecture=sm_{major}{minor}")],
+            include_paths: vec![cuda_inc],
             ..Default::default()
         };
         let ptx = compile_ptx_with_opts(src, opts)

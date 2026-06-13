@@ -45,4 +45,4 @@ pub use vrt_sys::TENSORRT_VERSION;
 pub use session::{Session, OutputTensor};
 pub use tensor::{VrtTensor, DType, MemKind};
 pub use image::{VrtImage, Format};
-pub use pipeline::{Source, Operator, Chain, ExecCtx, FrameMeta, TRTensorMap, TrtInferStage, Pipeline, PipelineTiming, BoxError};
+pub use pipeline::{Source, Operator, Chain, Fork, ExecCtx, FrameMeta, TRTensorMap, TrtInferStage, Pipeline, PipelineTiming, BoxError};
