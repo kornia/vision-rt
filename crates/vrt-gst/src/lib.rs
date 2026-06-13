@@ -25,7 +25,7 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use gstreamer::prelude::*;
-use vrt::{Source, Stage, BoxError, VrtTensor, Image, Format, MemKind};
+use vrt::{Source, Stage, BoxError, VrtTensor, VrtImage, Format, MemKind};
 use vrt_preproc::PreprocError;
 
 /// Errors from the GStreamer NVMM source and preprocessing stage.
@@ -344,7 +344,7 @@ impl Stage for NvmmPreprocessStage {
         // SAFETY: the import's dev_ptr stays mapped while `mem` is held in
         // `_pending` (released only in finalize, after the stream sync).
         let image = unsafe {
-            Image::borrowed(
+            VrtImage::borrowed(
                 mem.dev_ptr, self.src_w, self.src_h, frame.pitch,
                 Format::Rgba8, MemKind::Imported,
             )

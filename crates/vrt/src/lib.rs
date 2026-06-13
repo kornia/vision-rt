@@ -44,5 +44,5 @@ pub use cudarc::driver::CudaStream;
 pub use vrt_sys::TENSORRT_VERSION;
 pub use session::{Session, OutputTensor};
 pub use tensor::{VrtTensor, DType, MemKind};
-pub use image::{Image, Format};
+pub use image::{VrtImage, Format};
 pub use pipeline::{Source, Stage, Chain, TRTensorMap, TrtInferStage, Pipeline, PipelineTiming, BoxError};

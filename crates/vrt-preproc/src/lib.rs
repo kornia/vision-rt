@@ -15,7 +15,7 @@ use std::ffi::c_void;
 use cudarc::driver::{CudaSlice, CudaStream, DevicePtr, PushKernelArg};
 use cudarc::driver::sys::CUdeviceptr;
 
-use vrt::{Stage, BoxError, VrtTensor, DType, Image};
+use vrt::{Stage, BoxError, VrtTensor, DType, VrtImage};
 use vrt::cuda::{Kernels, cfg_2d};
 
 /// Errors from GPU preprocessing.
@@ -103,7 +103,7 @@ extern "C" __global__ void letterbox_rgba_to_chw(
 
 // ── Preprocessor ─────────────────────────────────────────────────────────────
 
-/// GPU letterbox preprocessor: [`Image`] → [`VrtTensor`] (CHW FP32).
+/// GPU letterbox preprocessor: [`VrtImage`] → [`VrtTensor`] (CHW FP32).
 ///
 /// Implements [`Stage`] so it plugs directly into a [`vrt::Pipeline`].
 /// The output [`VrtTensor`] is pre-allocated in `new` and reused every frame.
@@ -240,13 +240,13 @@ impl Preprocessor {
 // ── Stage impl ────────────────────────────────────────────────────────────────
 
 impl Stage for Preprocessor {
-    type Input  = Image;
+    type Input  = VrtImage;
     type Output = VrtTensor;
 
-    fn enqueue(&mut self, frame: &Image) -> Result<(), BoxError> {
+    fn enqueue(&mut self, frame: &VrtImage) -> Result<(), BoxError> {
         debug_assert_eq!(
             (frame.width(), frame.height()), (self.src_w, self.src_h),
-            "Image dims must match the dimensions this Preprocessor was built for"
+            "VrtImage dims must match the dimensions this Preprocessor was built for"
         );
         // A still-pending texture means the previous frame never reached
         // finalize (error path).  Drain the stream before dropping it —

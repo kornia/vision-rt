@@ -1,13 +1,13 @@
 //! Pitch-linear image view — the camera-ingest counterpart to [`VrtTensor`].
 //!
-//! A [`VrtTensor`] models a dense N-D array with element strides; an [`Image`]
+//! A [`VrtTensor`] models a dense N-D array with element strides; a [`VrtImage`]
 //! models a 2-D pixel surface with a **byte pitch** (row stride, typically
 //! padded past `width * bytes_per_pixel` for hardware alignment) and a pixel
 //! [`Format`].  Both are borrowed views over device memory the producer owns.
 
 use crate::tensor::MemKind;
 
-/// Pixel layout of an [`Image`].
+/// Pixel layout of a [`VrtImage`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Format {
     /// 8-bit RGBA, 4 bytes/pixel (the NVMM/`nvvidconv` output format).
@@ -36,7 +36,7 @@ impl Format {
 ///
 /// The backing memory is owned elsewhere (an NVMM import, a CUDA allocation) —
 /// the producer must keep it alive for the duration of any GPU work reading it.
-pub struct Image {
+pub struct VrtImage {
     ptr:    *mut std::ffi::c_void,
     width:  u32,
     height: u32,
@@ -46,9 +46,9 @@ pub struct Image {
 }
 
 // SAFETY: device pointer is stable; callers enforce CUDA ordering via the stream.
-unsafe impl Send for Image {}
+unsafe impl Send for VrtImage {}
 
-impl Image {
+impl VrtImage {
     /// Wrap a device pointer to a pitch-linear image this view does not own.
     ///
     /// # Safety
