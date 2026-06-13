@@ -13,7 +13,7 @@ Device data crosses stage boundaries as one of two types in `vrt`:
   (`owner: Some`, freed on drop) or borrows one (`owner: None`, e.g. a TRT
   session output valid only until the session's next `run_*`). Accessors:
   `dim(i)`, `shape()`/`shape_i64()`, `f32_ptr()` (dtype-checked), `as_ptr()`.
-- **`Image`** — borrowed pitch-linear pixel surface: `width/height/pitch/
+- **`VrtImage`** — borrowed pitch-linear pixel surface: `width/height/pitch/
   Format/MemKind`. The camera-ingest input to the preprocessor (replaces the
   old `DeviceFrame`). `pitch` is bytes-per-row, ≥ width×bpp.
 
