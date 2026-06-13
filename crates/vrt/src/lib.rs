@@ -28,6 +28,7 @@ pub mod engine;
 pub mod buffer;
 pub mod session;
 pub mod tensor;
+pub mod image;
 pub mod pipeline;
 pub mod cuda;
 #[cfg(feature = "builder")]
@@ -43,4 +44,5 @@ pub use cudarc::driver::CudaStream;
 pub use vrt_sys::TENSORRT_VERSION;
 pub use session::{Session, OutputTensor};
 pub use tensor::{VrtTensor, DType, MemKind};
+pub use image::{Image, Format};
 pub use pipeline::{Source, Stage, Chain, TRTensorMap, TrtInferStage, Pipeline, PipelineTiming, BoxError};

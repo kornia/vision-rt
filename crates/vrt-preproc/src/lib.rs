@@ -15,7 +15,7 @@ use std::ffi::c_void;
 use cudarc::driver::{CudaSlice, CudaStream, DevicePtr, PushKernelArg};
 use cudarc::driver::sys::CUdeviceptr;
 
-use vrt::{Stage, BoxError, VrtTensor, DType};
+use vrt::{Stage, BoxError, VrtTensor, DType, Image};
 use vrt::cuda::{Kernels, cfg_2d};
 
 /// Errors from GPU preprocessing.
@@ -63,20 +63,6 @@ impl Drop for TextureGuard {
     }
 }
 
-// ── DeviceFrame ───────────────────────────────────────────────────────────────
-
-/// Primitive stage input: a CUDA device pointer to an RGBA pitch-linear buffer.
-///
-/// No NVMM or GStreamer dependency — the caller is responsible for keeping the
-/// backing allocation alive for the duration of the GPU work.
-pub struct DeviceFrame {
-    pub dev_ptr: *mut c_void,
-    pub pitch:   u32,
-}
-
-// Raw pointer represents device memory; safe to send given CUDA stream ordering.
-unsafe impl Send for DeviceFrame {}
-
 // ── CUDA kernel source ────────────────────────────────────────────────────────
 
 const KERNEL_SRC: &str = r#"
@@ -117,7 +103,7 @@ extern "C" __global__ void letterbox_rgba_to_chw(
 
 // ── Preprocessor ─────────────────────────────────────────────────────────────
 
-/// GPU letterbox preprocessor: [`DeviceFrame`] → [`VrtTensor`] (CHW FP32).
+/// GPU letterbox preprocessor: [`Image`] → [`VrtTensor`] (CHW FP32).
 ///
 /// Implements [`Stage`] so it plugs directly into a [`vrt::Pipeline`].
 /// The output [`VrtTensor`] is pre-allocated in `new` and reused every frame.
@@ -254,10 +240,14 @@ impl Preprocessor {
 // ── Stage impl ────────────────────────────────────────────────────────────────
 
 impl Stage for Preprocessor {
-    type Input  = DeviceFrame;
+    type Input  = Image;
     type Output = VrtTensor;
 
-    fn enqueue(&mut self, frame: &DeviceFrame) -> Result<(), BoxError> {
+    fn enqueue(&mut self, frame: &Image) -> Result<(), BoxError> {
+        debug_assert_eq!(
+            (frame.width(), frame.height()), (self.src_w, self.src_h),
+            "Image dims must match the dimensions this Preprocessor was built for"
+        );
         // A still-pending texture means the previous frame never reached
         // finalize (error path).  Drain the stream before dropping it —
         // the in-flight kernel may still read through the texture object.
@@ -266,8 +256,7 @@ impl Stage for Preprocessor {
             self._pending = None;
         }
         let dst = self.output.as_mut_ptr() as *mut f32;
-        let tex = unsafe { self.process_device_ptr_tex(frame.dev_ptr, frame.pitch, dst) }
-            ?;
+        let tex = unsafe { self.process_device_ptr_tex(frame.as_ptr(), frame.pitch(), dst) }?;
         self._pending = Some(tex);
         Ok(())
     }

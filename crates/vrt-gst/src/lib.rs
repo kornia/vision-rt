@@ -17,7 +17,7 @@
 //! ).unwrap();
 //! ```
 
-pub use vrt_preproc::{DeviceFrame, Preprocessor};
+pub use vrt_preproc::Preprocessor;
 
 
 use std::ffi::c_void;
@@ -25,7 +25,7 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use gstreamer::prelude::*;
-use vrt::{Source, Stage, BoxError, VrtTensor};
+use vrt::{Source, Stage, BoxError, VrtTensor, Image, Format, MemKind};
 use vrt_preproc::PreprocError;
 
 /// Errors from the GStreamer NVMM source and preprocessing stage.
@@ -103,6 +103,9 @@ impl NvmmFrame {
     }
 }
 
+/// A CPU RGBA snapshot for visualization: `(rgba_bytes, width, height)`.
+pub type CpuFrame = (Vec<u8>, u32, u32);
+
 // ── RtspSource ────────────────────────────────────────────────────────────────
 
 /// RTSP source that delivers frames as NVMM RGBA using Jetson hardware decode.
@@ -121,7 +124,7 @@ pub struct RtspSource {
     height:     u32,
     /// Latest CPU RGBA frame for visualization.  Updated asynchronously by GStreamer;
     /// take with `latest_cpu_frame()` and lock to read.
-    cpu_frame:  Arc<Mutex<Option<(Vec<u8>, u32, u32)>>>,
+    cpu_frame:  Arc<Mutex<Option<CpuFrame>>>,
 }
 
 impl RtspSource {
@@ -225,7 +228,7 @@ impl RtspSource {
                 .build(),
         );
 
-        let cpu_frame: Arc<Mutex<Option<(Vec<u8>, u32, u32)>>> = Arc::new(Mutex::new(None));
+        let cpu_frame: Arc<Mutex<Option<CpuFrame>>> = Arc::new(Mutex::new(None));
         let cpu_frame_cb = Arc::clone(&cpu_frame);
 
         appsink_cpu.set_callbacks(
@@ -271,7 +274,7 @@ impl RtspSource {
     /// Clone the `Arc` before moving the source into a `Pipeline`.  The GStreamer
     /// thread updates this every frame (overwriting old data); lock and `take()` to
     /// consume without holding the lock during PNG save.
-    pub fn latest_cpu_frame(&self) -> Arc<Mutex<Option<(Vec<u8>, u32, u32)>>> {
+    pub fn latest_cpu_frame(&self) -> Arc<Mutex<Option<CpuFrame>>> {
         Arc::clone(&self.cpu_frame)
     }
 }
@@ -308,6 +311,8 @@ impl Drop for RtspSource {
 /// memory it references is unmapped.
 pub struct NvmmPreprocessStage {
     preproc:  Preprocessor,
+    src_w:    u32,
+    src_h:    u32,
     _pending: Option<CudaMemory>,
 }
 
@@ -318,7 +323,7 @@ impl NvmmPreprocessStage {
         dst_w: u32, dst_h: u32,
     ) -> Result<Self, GstSourceError> {
         let preproc = Preprocessor::new(stream, src_w, src_h, dst_w, dst_h)?;
-        Ok(Self { preproc, _pending: None })
+        Ok(Self { preproc, src_w, src_h, _pending: None })
     }
 }
 
@@ -336,9 +341,16 @@ impl Stage for NvmmPreprocessStage {
             self._pending = None;       // then CudaMemory ✓
         }
         let mem = unsafe { frame.cuda_import()? };
-        let device_frame = DeviceFrame { dev_ptr: mem.dev_ptr, pitch: frame.pitch };
+        // SAFETY: the import's dev_ptr stays mapped while `mem` is held in
+        // `_pending` (released only in finalize, after the stream sync).
+        let image = unsafe {
+            Image::borrowed(
+                mem.dev_ptr, self.src_w, self.src_h, frame.pitch,
+                Format::Rgba8, MemKind::Imported,
+            )
+        };
         self._pending = Some(mem);
-        self.preproc.enqueue(&device_frame)
+        self.preproc.enqueue(&image)
     }
 
     fn finalize(&mut self) -> Result<(), BoxError> {
