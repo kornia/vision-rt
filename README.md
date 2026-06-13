@@ -42,14 +42,16 @@ GPU time is measured with CUDA events (`PipelineTiming.gpu_ms`).
   **on-device** into `~/.cache/vision-rt/engines/<name>-<onnx_sha8>-trt<ver>-sm<cc>.engine`
   — first run builds (~minutes, once), every run after is a cache hit.
 
-## Examples (live RTSP cameras)
+## Examples
 
 ```bash
-# XFeat keypoint detection: pass ONNX (auto-builds engine) or a .engine
-cargo run --release -p rtsp_xfeat -- model.onnx rtsp://camera/stream /tmp/out
+# Live RTSP cameras — pass ONNX (auto-builds engine) or a .engine:
+cargo run --release -p rtsp_xfeat -- model.onnx rtsp://camera/stream /tmp/out  # XFeat keypoints
+cargo run --release -p rtsp_yolo  -- yolo.engine rtsp://camera/stream          # YOLO detection
 
-# YOLO detection
-cargo run --release -p rtsp_yolo -- yolo.engine rtsp://camera/stream
+# Offline XFeat matching / relocalization: extract features from a map image
+# and a query image, match by mutual-NN, report the reloc signal + save viz.
+cargo run --release -p xfeat_match -- model.onnx map.jpg query.jpg out.png
 ```
 
 Set MAXN power mode before benchmarking: `sudo nvpmodel -m 2 && sudo jetson_clocks`.

@@ -40,3 +40,8 @@ VIC resize 1280×720    letterbox to 1280×736      + GPU NMS + top-K
 1. Implement `Operator<Input=PrevPending, Pending=.., Output=YourType>`
 2. Place GPU work in `enqueue`, CPU work in `finalize`
 3. `.pipe(your_op)` — the compiler enforces Input==prev::Pending
+
+## Combinators
+
+- `Chain<A,B>` (`.pipe()`): feed A's Pending into B (linear).
+- `Fork<A,B>` (`Fork::new`): run A and B on the SAME input → `(A::Output, B::Output)`. Fan-out for compute+viz or detect+keypoints on one frame; replaces ad-hoc `Arc<Mutex>` side channels.
