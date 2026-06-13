@@ -5,6 +5,22 @@ description: Use when working on model pre/post-processing, keypoints, descripto
 
 # Model Tensor Semantics (XFeat & YOLO)
 
+## The two data types (post-2026-06 unification)
+
+Device data crosses stage boundaries as one of two types in `vrt`:
+- **`VrtTensor`** — dense N-D array: `shape` + element `strides` + `dtype` +
+  `MemKind{Device,Unified,Imported}` + `byte_len`. Either owns its buffer
+  (`owner: Some`, freed on drop) or borrows one (`owner: None`, e.g. a TRT
+  session output valid only until the session's next `run_*`). Accessors:
+  `dim(i)`, `shape()`/`shape_i64()`, `f32_ptr()` (dtype-checked), `as_ptr()`.
+- **`Image`** — borrowed pitch-linear pixel surface: `width/height/pitch/
+  Format/MemKind`. The camera-ingest input to the preprocessor (replaces the
+  old `DeviceFrame`). `pitch` is bytes-per-row, ≥ width×bpp.
+
+`NvmmFrame` (pre-import DMA-BUF descriptor) and host-side `OutputTensor`
+are the only other carriers. The former `TRTensor`/`TensorView` split and
+the 6-representation sprawl are gone.
+
 ## Coordinate spaces — the #1 source of bugs
 
 Three spaces exist; always know which one a coordinate is in:

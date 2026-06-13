@@ -39,8 +39,8 @@ requires CPU data mid-stage (document why if so — see `XFeatInferStage` legacy
 
 ## Separation of concerns
 
-- Platform adapters (NVMM → TRTensor) live in `vrt-gst` (e.g. `NvmmPreprocessStage`).
-- Models (TRTensor → result) live in their own crate (`vrt-xfeat`, `vrt-yolo`)
+- Platform adapters (NVMM → VrtTensor) live in `vrt-gst` (e.g. `NvmmPreprocessStage`).
+- Models (VrtTensor → result) live in their own crate (`vrt-xfeat`, `vrt-yolo`)
   and present as ONE stage even if internally backbone + postproc.
 - Drop ordering matters with NVMM: release GPU texture objects in `finalize`
   BEFORE dropping the `CudaMemory` import (see `NvmmPreprocessStage` doc comment).

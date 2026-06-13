@@ -44,7 +44,7 @@ unsafe {
 - `extern "C"` on every kernel — nvrtc mangles names otherwise.
 - `__restrict__` + `__ldg()` for read-only inputs (helps Orin's L1/tex path).
 - Compile ONCE in the constructor, never per-frame.
-- Raw device pointers from TRT arrive as typed `vrt::TensorView`s — use
+- Raw device pointers from TRT arrive as borrowed `vrt::VrtTensor`s — use
   `.f32_ptr()?` (dtype-checked); cast to `CUdeviceptr` only at the launch site.
 
 ## Memory / stream rules

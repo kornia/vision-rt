@@ -16,7 +16,7 @@ The pipeline calls ONE `cudaStreamSynchronize` per frame between enqueue and fin
 
 ```
 RtspSource          →  NvmmPreprocessStage    →  XFeat
-NvmmFrame              TRTensor (CHW FP32)       XFeatResult
+NvmmFrame              VrtTensor (CHW FP32)      XFeatResult
 RTSP → nvv4l2decoder   NVMM DMA-BUF → CUDA       TRT backbone
 VIC resize 1280×720    letterbox to 1280×736      + GPU NMS + top-K
 ```
