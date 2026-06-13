@@ -60,6 +60,29 @@ algorithm truly needs CPU data mid-frame (document why — see `XFeatInferStage`
   `op::Input == previous::Pending`. If types don't line up, fix the operator
   types, don't add adapter copies.
 
+## ModelSession — the TRT-backed operator shortcut
+
+A new model operator holds a `ModelSession` (not a raw `Session`) and its
+enqueue is essentially two lines + kernels:
+```rust
+let out = self.model.run(input)?;       // safe: no unsafe, auto input-name
+let p = out.f32("output_name")?;        // dtype-checked device pointer
+```
+`ModelSession::new(engine, stream)` / `load(runtime, path)`; `run` (single
+input) / `run_inputs` (multi); returns `TrtError` so typed-error operators
+convert via `?`. This is the ~20-line-operator path — don't hand-roll
+`run_device_inputs_on_device` + manual output extraction.
+
+## Source / Sink boundaries
+
+Operators are the transforms in the middle. The boundaries are separate traits:
+- `Source` (input): pull-generator, `next_frame() -> Option<Frame>`, ends the loop.
+- `Sink` (output): `consume(output, &FrameMeta)` — draw / save / publish / match
+  against a map. A Sink is NOT an operator (a chained operator only sees the
+  upstream's Pending, never the finalized Output — that's the pipeline boundary).
+  `pipeline.drive(&mut sink)` runs Source → operators → Sink to exhaustion.
+  The SLAM reloc matcher is a Sink.
+
 ## Separation of concerns
 
 - Platform adapters (NVMM → VrtTensor) live in `vrt-gst` (e.g. `NvmmPreprocessStage`).

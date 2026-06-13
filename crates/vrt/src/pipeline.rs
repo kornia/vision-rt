@@ -9,12 +9,43 @@ use crate::model::ModelSession;
 
 pub type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>;
 
-// ── Source ────────────────────────────────────────────────────────────────────
+// ── Source / Sink ───────────────────────────────────────────────────────────
 
-/// A source of pipeline input frames (e.g. [`RtspSource`](vrt_gst::RtspSource)).
+/// The **input boundary** of a pipeline: pulls frames in until exhausted
+/// (e.g. [`RtspSource`](vrt_gst::RtspSource)).
+///
+/// A `Source` is a pull-generator, not an [`Operator`] — it has no per-frame
+/// input and signals end-of-stream by returning `None`.
 pub trait Source {
     type Frame;
     fn next_frame(&mut self) -> Option<Self::Frame>;
+}
+
+/// The **output boundary** of a pipeline: consumes each frame's result.
+///
+/// Symmetric to [`Source`].  Where a `Source` pulls frames in and [`Operator`]s
+/// transform them, a `Sink` pushes the final result out — draw it, save it,
+/// publish it to a message bus, or match it against a map for relocalization.
+///
+/// A `Sink` is **not** an `Operator`: a chained operator only sees the
+/// upstream's `Pending` (the pre-sync handle), never the finalized `Output`,
+/// which exists only at the pipeline boundary.  The sink is that boundary.
+///
+/// ```no_run
+/// # use vrt::{Sink, FrameMeta, BoxError};
+/// # struct Matches; struct Reloc { map: () }
+/// impl Sink for Reloc {                 // the SLAM relocalization sink
+///     type Input = Matches;             // each frame's XFeatResult, matched upstream
+///     fn consume(&mut self, _m: Matches, frame: &FrameMeta) -> Result<(), BoxError> {
+///         // match against self.map, estimate pose, publish …
+///         let _ = frame.seq;
+///         Ok(())
+///     }
+/// }
+/// ```
+pub trait Sink {
+    type Input;
+    fn consume(&mut self, input: Self::Input, frame: &FrameMeta) -> Result<(), BoxError>;
 }
 
 // ── ExecCtx ───────────────────────────────────────────────────────────────────
@@ -349,6 +380,28 @@ where
         }
     }
 
+    /// Run the pipeline to exhaustion, pushing each frame's [`Output`] into
+    /// `sink`.  Returns when the source ends, or on the first error (from a
+    /// pipeline stage or the sink).
+    ///
+    /// This is the symmetric counterpart to the [`Source`] driving the front:
+    /// `Source → [Operator…] → Sink`, with the pipeline owning the loop and the
+    /// single per-frame sync.  For per-frame timing or custom control flow, use
+    /// [`next`](Pipeline::next) directly instead.
+    ///
+    /// [`Output`]: Operator::Output
+    pub fn drive<S>(&mut self, sink: &mut S) -> Result<(), BoxError>
+    where
+        S: Sink<Input = Stg::Output>,
+    {
+        while let Some(res) = self.next() {
+            let (output, _timing) = res?;
+            let meta = FrameMeta { seq: self.seq, ..FrameMeta::default() };
+            sink.consume(output, &meta)?;
+        }
+        Ok(())
+    }
+
     /// Advance by one frame: source → enqueue → sync → finalize → output.
     ///
     /// Returns `None` when the source is exhausted.  On success returns the
@@ -473,5 +526,50 @@ mod fork_tests {
         let (doubled, negated) = fork.finalize(pending, &ctx).unwrap();
         assert_eq!(doubled, 14);
         assert_eq!(negated, -7);
+    }
+}
+
+#[cfg(test)]
+mod sink_tests {
+    use super::*;
+    use crate::buffer::Stream;
+    use std::sync::{Arc, Mutex};
+
+    struct CountSource { n: u32, max: u32 }
+    impl Source for CountSource {
+        type Frame = u32;
+        fn next_frame(&mut self) -> Option<u32> {
+            if self.n >= self.max { return None; }
+            self.n += 1;
+            Some(self.n)
+        }
+    }
+    struct Doubler;
+    impl Operator for Doubler {
+        type Input = u32; type Pending = u32; type Output = u32;
+        fn enqueue(&mut self, input: &u32, _: &ExecCtx) -> Result<u32, BoxError> { Ok(*input) }
+        fn finalize(&mut self, p: u32, _: &ExecCtx) -> Result<u32, BoxError> { Ok(p * 2) }
+    }
+    struct CollectSink { got: Arc<Mutex<Vec<(u64, u32)>>> }
+    impl Sink for CollectSink {
+        type Input = u32;
+        fn consume(&mut self, input: u32, frame: &FrameMeta) -> Result<(), BoxError> {
+            self.got.lock().unwrap().push((frame.seq, input));
+            Ok(())
+        }
+    }
+
+    /// drive() pulls Source → Operator → Sink to exhaustion, with frame seq.
+    /// Run on-device: cargo test -p vision-rt -- --ignored
+    #[test]
+    #[ignore]
+    fn drive_source_to_sink() {
+        let stream = Stream::new_standalone().unwrap().cuda_stream().clone();
+        let got = Arc::new(Mutex::new(Vec::new()));
+        let mut pipeline = Pipeline::new(stream, CountSource { n: 0, max: 3 }).pipe(Doubler);
+        let mut sink = CollectSink { got: got.clone() };
+        pipeline.drive(&mut sink).unwrap();
+        // frames 1,2,3 doubled → 2,4,6, tagged with seq 1,2,3.
+        assert_eq!(*got.lock().unwrap(), vec![(1, 2), (2, 4), (3, 6)]);
     }
 }

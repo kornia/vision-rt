@@ -47,4 +47,4 @@ pub use session::{Session, OutputTensor};
 pub use model::ModelSession;
 pub use tensor::{VrtTensor, DType, MemKind};
 pub use image::{VrtImage, Format};
-pub use pipeline::{Source, Operator, Chain, Fork, ExecCtx, FrameMeta, TRTensorMap, TrtInferStage, Pipeline, PipelineTiming, BoxError};
+pub use pipeline::{Source, Sink, Operator, Chain, Fork, ExecCtx, FrameMeta, TRTensorMap, TrtInferStage, Pipeline, PipelineTiming, BoxError};
