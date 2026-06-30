@@ -1,0 +1,15 @@
+[package]
+name = "vrt-lift"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+publish = false
+description = "Sensor-agnostic depth→3D bridge: lift 2D detections to Obs3D via intrinsics + depth + size priors"
+
+[lib]
+name = "vrt_lift"
+
+[dependencies]
+vrt       = { path = "../vrt", package = "vision-rt" }
+vrt-track = { path = "../vrt-track" }

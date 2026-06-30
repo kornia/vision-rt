@@ -2425,6 +2425,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "vrt-lift"
+version = "0.1.0"
+dependencies = [
+ "vision-rt",
+ "vrt-track",
+]
+
+[[package]]
 name = "vrt-reid"
 version = "0.1.0"
 dependencies = [
