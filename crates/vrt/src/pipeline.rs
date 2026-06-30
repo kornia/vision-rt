@@ -1,11 +1,11 @@
+use crate::buffer::Stream;
+use crate::model::ModelSession;
+use crate::tensor::VrtTensor;
+use crate::Engine;
+use cudarc::driver::CudaStream;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
-use cudarc::driver::CudaStream;
-use crate::buffer::Stream;
-use crate::tensor::VrtTensor;
-use crate::Engine;
-use crate::model::ModelSession;
 
 pub type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>;
 
@@ -58,9 +58,9 @@ pub trait Sink {
 #[derive(Debug, Clone, Default)]
 pub struct FrameMeta {
     /// Monotonic frame counter assigned by the pipeline.
-    pub seq:       u64,
+    pub seq: u64,
     /// Presentation timestamp in nanoseconds, if the source provides one.
-    pub pts_ns:    Option<u64>,
+    pub pts_ns: Option<u64>,
     /// Camera / stream identifier for multi-source pipelines.
     pub source_id: Option<u32>,
 }
@@ -73,7 +73,7 @@ pub struct FrameMeta {
 /// operator syncing inside `enqueue` would break the one-sync-per-frame model.
 pub struct ExecCtx {
     stream: Arc<CudaStream>,
-    frame:  FrameMeta,
+    frame: FrameMeta,
 }
 
 impl ExecCtx {
@@ -81,9 +81,13 @@ impl ExecCtx {
         Self { stream, frame }
     }
     /// The shared stream to launch kernels / TRT enqueues on (do not sync it).
-    pub fn stream(&self) -> &Arc<CudaStream> { &self.stream }
+    pub fn stream(&self) -> &Arc<CudaStream> {
+        &self.stream
+    }
     /// This frame's metadata.
-    pub fn frame(&self) -> &FrameMeta { &self.frame }
+    pub fn frame(&self) -> &FrameMeta {
+        &self.frame
+    }
 }
 
 // ── Operator ──────────────────────────────────────────────────────────────────
@@ -111,7 +115,8 @@ pub trait Operator {
     type Output;
 
     fn enqueue(&mut self, input: &Self::Input, ctx: &ExecCtx) -> Result<Self::Pending, BoxError>;
-    fn finalize(&mut self, pending: Self::Pending, ctx: &ExecCtx) -> Result<Self::Output, BoxError>;
+    fn finalize(&mut self, pending: Self::Pending, ctx: &ExecCtx)
+        -> Result<Self::Output, BoxError>;
 }
 
 // ── Chain ─────────────────────────────────────────────────────────────────────
@@ -130,9 +135,9 @@ where
     A: Operator,
     B: Operator<Input = A::Pending>,
 {
-    type Input   = A::Input;
+    type Input = A::Input;
     type Pending = (A::Pending, B::Pending);
-    type Output  = B::Output;
+    type Output = B::Output;
 
     fn enqueue(&mut self, input: &A::Input, ctx: &ExecCtx) -> Result<Self::Pending, BoxError> {
         let pa = self.a.enqueue(input, ctx)?;
@@ -141,7 +146,7 @@ where
     }
 
     fn finalize(&mut self, (pa, pb): Self::Pending, ctx: &ExecCtx) -> Result<B::Output, BoxError> {
-        self.a.finalize(pa, ctx)?;   // upstream output discarded (non-terminal)
+        self.a.finalize(pa, ctx)?; // upstream output discarded (non-terminal)
         self.b.finalize(pb, ctx)
     }
 }
@@ -172,7 +177,9 @@ pub struct Fork<A, B> {
 }
 
 impl<A, B> Fork<A, B> {
-    pub fn new(a: A, b: B) -> Self { Self { a, b } }
+    pub fn new(a: A, b: B) -> Self {
+        Self { a, b }
+    }
 }
 
 impl<I, A, B> Operator for Fork<A, B>
@@ -180,9 +187,9 @@ where
     A: Operator<Input = I>,
     B: Operator<Input = I>,
 {
-    type Input   = I;
+    type Input = I;
     type Pending = (A::Pending, B::Pending);
-    type Output  = (A::Output, B::Output);
+    type Output = (A::Output, B::Output);
 
     fn enqueue(&mut self, input: &I, ctx: &ExecCtx) -> Result<Self::Pending, BoxError> {
         let pa = self.a.enqueue(input, ctx)?;
@@ -190,7 +197,11 @@ where
         Ok((pa, pb))
     }
 
-    fn finalize(&mut self, (pa, pb): Self::Pending, ctx: &ExecCtx) -> Result<Self::Output, BoxError> {
+    fn finalize(
+        &mut self,
+        (pa, pb): Self::Pending,
+        ctx: &ExecCtx,
+    ) -> Result<Self::Output, BoxError> {
         let oa = self.a.finalize(pa, ctx)?;
         let ob = self.b.finalize(pb, ctx)?;
         Ok((oa, ob))
@@ -210,7 +221,9 @@ where
 pub struct TRTensorMap(HashMap<String, VrtTensor>);
 
 impl TRTensorMap {
-    pub fn new(views: HashMap<String, VrtTensor>) -> Self { Self(views) }
+    pub fn new(views: HashMap<String, VrtTensor>) -> Self {
+        Self(views)
+    }
 
     /// Borrowed tensor for a named output.
     pub fn get(&self, name: &str) -> Option<&VrtTensor> {
@@ -219,12 +232,12 @@ impl TRTensorMap {
 
     /// Device pointer of a named FP32 output, dtype-checked.
     pub fn f32(&self, name: &str) -> Result<*const f32, BoxError> {
-        self.0.get(name)
+        self.0
+            .get(name)
             .ok_or_else(|| format!("no output tensor '{name}'"))?
             .f32_ptr()
             .map_err(Into::into)
     }
-
 }
 
 // ── TrtInferStage ─────────────────────────────────────────────────────────────
@@ -234,30 +247,34 @@ impl TRTensorMap {
 /// Outputs stay on the GPU — a downstream postprocessing stage reads them
 /// either via device kernels (no copy) or async D2H in its own `enqueue`.
 pub struct TrtInferStage {
-    model:      ModelSession,
+    model: ModelSession,
     input_name: String,
 }
 
 impl TrtInferStage {
     /// Create a stage that shares `cuda_stream` with all other pipeline stages.
     pub fn new(
-        engine:      Arc<Engine>,
-        input_name:  impl Into<String>,
+        engine: Arc<Engine>,
+        input_name: impl Into<String>,
         cuda_stream: Arc<CudaStream>,
     ) -> crate::error::Result<Self> {
         let model = ModelSession::new(engine, cuda_stream)?;
-        Ok(Self { model, input_name: input_name.into() })
+        Ok(Self {
+            model,
+            input_name: input_name.into(),
+        })
     }
-
 }
 
 impl Operator for TrtInferStage {
-    type Input   = VrtTensor;
+    type Input = VrtTensor;
     type Pending = TRTensorMap;
-    type Output  = ();
+    type Output = ();
 
     fn enqueue(&mut self, input: &VrtTensor, _ctx: &ExecCtx) -> Result<TRTensorMap, BoxError> {
-        self.model.run_inputs(&[(self.input_name.as_str(), input)]).map_err(Into::into)
+        self.model
+            .run_inputs(&[(self.input_name.as_str(), input)])
+            .map_err(Into::into)
     }
 
     fn finalize(&mut self, _pending: TRTensorMap, _ctx: &ExecCtx) -> Result<(), BoxError> {
@@ -280,11 +297,11 @@ impl Operator for TrtInferStage {
 /// `gpu_ms` is the authoritative GPU metric.  `sync_ms` ≥ `gpu_ms` due to CPU scheduling.
 #[derive(Debug, Clone, Default)]
 pub struct PipelineTiming {
-    pub source_ms:   f64,
-    pub enqueue_ms:  f64,
+    pub source_ms: f64,
+    pub enqueue_ms: f64,
     /// Actual GPU execution time from CUDA events — more accurate than `sync_ms`.
-    pub gpu_ms:      f64,
-    pub sync_ms:     f64,
+    pub gpu_ms: f64,
+    pub sync_ms: f64,
     pub finalize_ms: f64,
 }
 
@@ -329,9 +346,9 @@ impl std::fmt::Display for PipelineTiming {
 /// ```
 pub struct Pipeline<Src, Stg> {
     source: Src,
-    stage:  Stg,
+    stage: Stg,
     stream: Arc<CudaStream>,
-    seq:    u64,
+    seq: u64,
 }
 
 // ── Builder state (no stage attached yet) ────────────────────────────────────
@@ -339,7 +356,12 @@ pub struct Pipeline<Src, Stg> {
 impl<Src: Source> Pipeline<Src, ()> {
     /// Create a pipeline from a source.  Attach operators with [`.pipe()`](Pipeline::pipe).
     pub fn new(stream: Arc<CudaStream>, source: Src) -> Self {
-        Pipeline { source, stage: (), stream, seq: 0 }
+        Pipeline {
+            source,
+            stage: (),
+            stream,
+            seq: 0,
+        }
     }
 
     /// Attach the first operator.  Its `Input` must match the source's `Frame` type.
@@ -347,7 +369,12 @@ impl<Src: Source> Pipeline<Src, ()> {
     where
         Stg: Operator<Input = Src::Frame>,
     {
-        Pipeline { source: self.source, stage, stream: self.stream, seq: 0 }
+        Pipeline {
+            source: self.source,
+            stage,
+            stream: self.stream,
+            seq: 0,
+        }
     }
 }
 
@@ -368,9 +395,12 @@ where
     {
         Pipeline {
             source: self.source,
-            stage:  Chain { a: self.stage, b: next },
+            stage: Chain {
+                a: self.stage,
+                b: next,
+            },
             stream: self.stream,
-            seq:    0,
+            seq: 0,
         }
     }
 
@@ -390,7 +420,10 @@ where
     {
         while let Some(res) = self.next() {
             let (output, _timing) = res?;
-            let meta = FrameMeta { seq: self.seq, ..FrameMeta::default() };
+            let meta = FrameMeta {
+                seq: self.seq,
+                ..FrameMeta::default()
+            };
             sink.consume(output, &meta)?;
         }
         Ok(())
@@ -421,7 +454,10 @@ where
         self.seq += 1;
         let ctx = ExecCtx::new(
             self.stream.clone(),
-            FrameMeta { seq: self.seq, ..FrameMeta::default() },
+            FrameMeta {
+                seq: self.seq,
+                ..FrameMeta::default()
+            },
         );
 
         // Drain the stream before surfacing an error — see "Error safety" above.
@@ -435,18 +471,18 @@ where
         // which makes elapsed_ms fail (and gpu_ms silently 0).
         let timing_flags = Some(cudarc::driver::sys::CUevent_flags::CU_EVENT_DEFAULT);
         let gpu_start = match self.stream.record_event(timing_flags) {
-            Ok(e)  => e,
+            Ok(e) => e,
             Err(e) => return fail(&self.stream, e.into()),
         };
 
         let pending = match self.stage.enqueue(&frame, &ctx) {
-            Ok(p)  => p,
+            Ok(p) => p,
             Err(e) => return fail(&self.stream, e),
         };
 
         // Place a stop-marker after all GPU work has been submitted.
         let gpu_stop = match self.stream.record_event(timing_flags) {
-            Ok(e)  => e,
+            Ok(e) => e,
             Err(e) => return fail(&self.stream, e.into()),
         };
 
@@ -462,16 +498,16 @@ where
         let gpu_ms = gpu_start.elapsed_ms(&gpu_stop).unwrap_or(0.0) as f64;
 
         let output = match self.stage.finalize(pending, &ctx) {
-            Ok(o)  => o,
+            Ok(o) => o,
             Err(e) => return Some(Err(e)),
         };
         let t4 = Instant::now();
 
         let timing = PipelineTiming {
-            source_ms:   ms(t0, t1),
-            enqueue_ms:  ms(t1, t2),
+            source_ms: ms(t0, t1),
+            enqueue_ms: ms(t1, t2),
             gpu_ms,
-            sync_ms:     ms(t2, t3),
+            sync_ms: ms(t2, t3),
             finalize_ms: ms(t3, t4),
         };
         Some(Ok((output, timing)))
@@ -494,16 +530,24 @@ mod fork_tests {
         type Input = i32;
         type Pending = i32;
         type Output = i32;
-        fn enqueue(&mut self, input: &i32, _ctx: &ExecCtx) -> Result<i32, BoxError> { Ok(*input) }
-        fn finalize(&mut self, p: i32, _ctx: &ExecCtx) -> Result<i32, BoxError> { Ok(p * 2) }
+        fn enqueue(&mut self, input: &i32, _ctx: &ExecCtx) -> Result<i32, BoxError> {
+            Ok(*input)
+        }
+        fn finalize(&mut self, p: i32, _ctx: &ExecCtx) -> Result<i32, BoxError> {
+            Ok(p * 2)
+        }
     }
     struct Negator;
     impl Operator for Negator {
         type Input = i32;
         type Pending = i32;
         type Output = i32;
-        fn enqueue(&mut self, input: &i32, _ctx: &ExecCtx) -> Result<i32, BoxError> { Ok(*input) }
-        fn finalize(&mut self, p: i32, _ctx: &ExecCtx) -> Result<i32, BoxError> { Ok(-p) }
+        fn enqueue(&mut self, input: &i32, _ctx: &ExecCtx) -> Result<i32, BoxError> {
+            Ok(*input)
+        }
+        fn finalize(&mut self, p: i32, _ctx: &ExecCtx) -> Result<i32, BoxError> {
+            Ok(-p)
+        }
     }
 
     /// Fork runs both branches on the same input and returns both outputs.
@@ -529,22 +573,35 @@ mod sink_tests {
     use crate::buffer::Stream;
     use std::sync::{Arc, Mutex};
 
-    struct CountSource { n: u32, max: u32 }
+    struct CountSource {
+        n: u32,
+        max: u32,
+    }
     impl Source for CountSource {
         type Frame = u32;
         fn next_frame(&mut self) -> Option<u32> {
-            if self.n >= self.max { return None; }
+            if self.n >= self.max {
+                return None;
+            }
             self.n += 1;
             Some(self.n)
         }
     }
     struct Doubler;
     impl Operator for Doubler {
-        type Input = u32; type Pending = u32; type Output = u32;
-        fn enqueue(&mut self, input: &u32, _: &ExecCtx) -> Result<u32, BoxError> { Ok(*input) }
-        fn finalize(&mut self, p: u32, _: &ExecCtx) -> Result<u32, BoxError> { Ok(p * 2) }
+        type Input = u32;
+        type Pending = u32;
+        type Output = u32;
+        fn enqueue(&mut self, input: &u32, _: &ExecCtx) -> Result<u32, BoxError> {
+            Ok(*input)
+        }
+        fn finalize(&mut self, p: u32, _: &ExecCtx) -> Result<u32, BoxError> {
+            Ok(p * 2)
+        }
     }
-    struct CollectSink { got: Arc<Mutex<Vec<(u64, u32)>>> }
+    struct CollectSink {
+        got: Arc<Mutex<Vec<(u64, u32)>>>,
+    }
     impl Sink for CollectSink {
         type Input = u32;
         fn consume(&mut self, input: u32, frame: &FrameMeta) -> Result<(), BoxError> {

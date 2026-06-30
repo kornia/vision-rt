@@ -19,13 +19,12 @@
 
 pub use vrt_preproc::Preprocessor;
 
-
 use std::ffi::c_void;
-use std::sync::{Arc, Mutex, mpsc};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc, Mutex};
 
 use gstreamer::prelude::*;
-use vrt::{Source, Operator, ExecCtx, BoxError, VrtTensor, VrtImage, Format, MemKind};
+use vrt::{BoxError, ExecCtx, Format, MemKind, Operator, Source, VrtImage, VrtTensor};
 use vrt_preproc::PreprocError;
 
 /// Errors from the GStreamer NVMM source and preprocessing stage.
@@ -53,14 +52,16 @@ pub enum GstSourceError {
 /// stream that has used `dev_ptr`.
 pub struct CudaMemory {
     pub dev_ptr: *mut c_void,
-    ext_mem:     *mut c_void,
+    ext_mem: *mut c_void,
 }
 
 unsafe impl Send for CudaMemory {}
 
 impl Drop for CudaMemory {
     fn drop(&mut self) {
-        unsafe { nvbuf_sys::nvbuf_cuda_release(self.ext_mem, self.dev_ptr); }
+        unsafe {
+            nvbuf_sys::nvbuf_cuda_release(self.ext_mem, self.dev_ptr);
+        }
     }
 }
 
@@ -73,16 +74,21 @@ impl Drop for CudaMemory {
 pub struct NvmmFrame {
     _keep_alive: Box<dyn Send + Sync + 'static>,
     /// DMA-BUF file descriptor — valid for the lifetime of this frame.
-    pub fd:    i32,
+    pub fd: i32,
     /// Row pitch in bytes.
     pub pitch: u32,
     /// Total NVMM allocation size in bytes, required for `cudaImportExternalMemory`.
-    pub size:  u64,
+    pub size: u64,
 }
 
 impl NvmmFrame {
     pub fn new(keep_alive: impl Send + Sync + 'static, fd: i32, pitch: u32, size: u64) -> Self {
-        Self { _keep_alive: Box::new(keep_alive), fd, pitch, size }
+        Self {
+            _keep_alive: Box::new(keep_alive),
+            fd,
+            pitch,
+            size,
+        }
     }
 
     /// Import this NVMM buffer into CUDA device memory.
@@ -95,7 +101,11 @@ impl NvmmFrame {
         let mut dev_ptr: *mut c_void = std::ptr::null_mut();
         let rc = nvbuf_sys::nvbuf_cuda_import(self.fd, self.size, &mut ext_mem, &mut dev_ptr);
         if rc != 0 {
-            return Err(GstSourceError::NvmmImport { fd: self.fd, size: self.size, code: rc });
+            return Err(GstSourceError::NvmmImport {
+                fd: self.fd,
+                size: self.size,
+                code: rc,
+            });
         }
         Ok(CudaMemory { dev_ptr, ext_mem })
     }
@@ -116,13 +126,13 @@ pub type CpuFrame = (Vec<u8>, u32, u32);
 ///              └→ nvvidconv → video/x-raw,format=RGBA → appsink(CPU)  [viz snapshot]
 /// ```
 pub struct RtspSource {
-    pipeline:   gstreamer::Pipeline,
-    rx:         mpsc::Receiver<NvmmFrame>,
-    width:      u32,
-    height:     u32,
+    pipeline: gstreamer::Pipeline,
+    rx: mpsc::Receiver<NvmmFrame>,
+    width: u32,
+    height: u32,
     /// Latest CPU RGBA frame for visualization.  Updated asynchronously by GStreamer;
     /// take with `latest_cpu_frame()` and lock to read.
-    cpu_frame:  Arc<Mutex<Option<CpuFrame>>>,
+    cpu_frame: Arc<Mutex<Option<CpuFrame>>>,
 }
 
 impl RtspSource {
@@ -154,7 +164,7 @@ impl RtspSource {
         // leaky=upstream on both queues: if a branch falls behind it drops new frames
         // rather than blocking the decoder.
         let nvmm_caps = match resize {
-            None         => "video/x-raw(memory:NVMM),format=RGBA".to_string(),
+            None => "video/x-raw(memory:NVMM),format=RGBA".to_string(),
             Some((w, h)) => format!("video/x-raw(memory:NVMM),format=RGBA,width={w},height={h}"),
         };
         let pipeline_str = format!(
@@ -173,42 +183,47 @@ impl RtspSource {
             .map_err(|_| GstSourceError::Setup("pipeline cast failed"))?;
 
         let appsink = pipeline
-            .by_name("sink").ok_or(GstSourceError::Setup("no appsink"))?
+            .by_name("sink")
+            .ok_or(GstSourceError::Setup("no appsink"))?
             .dynamic_cast::<gstreamer_app::AppSink>()
             .map_err(|_| GstSourceError::Setup("element is not AppSink"))?;
 
         let appsink_cpu = pipeline
-            .by_name("sink_cpu").ok_or(GstSourceError::Setup("no sink_cpu"))?
+            .by_name("sink_cpu")
+            .ok_or(GstSourceError::Setup("no sink_cpu"))?
             .dynamic_cast::<gstreamer_app::AppSink>()
             .map_err(|_| GstSourceError::Setup("sink_cpu is not AppSink"))?;
 
         let (frame_tx, frame_rx) = mpsc::sync_channel::<NvmmFrame>(2);
-        let (dim_tx, dim_rx)     = mpsc::sync_channel::<(u32, u32)>(1);
+        let (dim_tx, dim_rx) = mpsc::sync_channel::<(u32, u32)>(1);
         let dims_sent = Arc::new(AtomicBool::new(false));
 
         appsink.set_callbacks(
             gstreamer_app::AppSinkCallbacks::builder()
                 .new_sample(move |sink| {
-                    let sample = sink.pull_sample()
+                    let sample = sink
+                        .pull_sample()
                         .map_err(|_| gstreamer::FlowError::Error)?;
-                    let buffer = sample.buffer()
-                        .ok_or(gstreamer::FlowError::Error)?;
-                    let caps = sample.caps()
-                        .ok_or(gstreamer::FlowError::Error)?;
-                    let st = caps.structure(0)
-                        .ok_or(gstreamer::FlowError::Error)?;
-                    let width = st.get::<i32>("width")
-                        .map_err(|_| gstreamer::FlowError::Error)? as u32;
-                    let height = st.get::<i32>("height")
-                        .map_err(|_| gstreamer::FlowError::Error)? as u32;
+                    let buffer = sample.buffer().ok_or(gstreamer::FlowError::Error)?;
+                    let caps = sample.caps().ok_or(gstreamer::FlowError::Error)?;
+                    let st = caps.structure(0).ok_or(gstreamer::FlowError::Error)?;
+                    let width = st
+                        .get::<i32>("width")
+                        .map_err(|_| gstreamer::FlowError::Error)?
+                        as u32;
+                    let height = st
+                        .get::<i32>("height")
+                        .map_err(|_| gstreamer::FlowError::Error)?
+                        as u32;
 
-                    let map  = buffer.map_readable()
+                    let map = buffer
+                        .map_readable()
                         .map_err(|_| gstreamer::FlowError::Error)?;
                     let surf = map.as_slice().as_ptr() as *const c_void;
 
-                    let fd     = unsafe { nvbuf_sys::nvbuf_dmabuf_fd(surf) };
-                    let pitch  = unsafe { nvbuf_sys::nvbuf_pitch(surf) };
-                    let size   = unsafe { nvbuf_sys::nvbuf_data_size(surf) };
+                    let fd = unsafe { nvbuf_sys::nvbuf_dmabuf_fd(surf) };
+                    let pitch = unsafe { nvbuf_sys::nvbuf_pitch(surf) };
+                    let size = unsafe { nvbuf_sys::nvbuf_data_size(surf) };
                     let layout = unsafe { nvbuf_sys::nvbuf_layout(surf) };
                     drop(map);
 
@@ -232,19 +247,22 @@ impl RtspSource {
         appsink_cpu.set_callbacks(
             gstreamer_app::AppSinkCallbacks::builder()
                 .new_sample(move |sink| {
-                    let sample = sink.pull_sample()
+                    let sample = sink
+                        .pull_sample()
                         .map_err(|_| gstreamer::FlowError::Error)?;
-                    let buffer = sample.buffer()
-                        .ok_or(gstreamer::FlowError::Error)?;
-                    let caps = sample.caps()
-                        .ok_or(gstreamer::FlowError::Error)?;
-                    let st = caps.structure(0)
-                        .ok_or(gstreamer::FlowError::Error)?;
-                    let w = st.get::<i32>("width")
-                        .map_err(|_| gstreamer::FlowError::Error)? as u32;
-                    let h = st.get::<i32>("height")
-                        .map_err(|_| gstreamer::FlowError::Error)? as u32;
-                    let map = buffer.map_readable()
+                    let buffer = sample.buffer().ok_or(gstreamer::FlowError::Error)?;
+                    let caps = sample.caps().ok_or(gstreamer::FlowError::Error)?;
+                    let st = caps.structure(0).ok_or(gstreamer::FlowError::Error)?;
+                    let w = st
+                        .get::<i32>("width")
+                        .map_err(|_| gstreamer::FlowError::Error)?
+                        as u32;
+                    let h = st
+                        .get::<i32>("height")
+                        .map_err(|_| gstreamer::FlowError::Error)?
+                        as u32;
+                    let map = buffer
+                        .map_readable()
                         .map_err(|_| gstreamer::FlowError::Error)?;
                     let data = map.as_slice().to_vec();
                     drop(map);
@@ -258,14 +276,23 @@ impl RtspSource {
 
         pipeline.set_state(gstreamer::State::Playing)?;
 
-        let (width, height) = dim_rx.recv()
-            .map_err(|_| GstSourceError::NoFirstFrame)?;
+        let (width, height) = dim_rx.recv().map_err(|_| GstSourceError::NoFirstFrame)?;
 
-        Ok(Self { pipeline, rx: frame_rx, width, height, cpu_frame })
+        Ok(Self {
+            pipeline,
+            rx: frame_rx,
+            width,
+            height,
+            cpu_frame,
+        })
     }
 
-    pub fn width(&self)  -> u32 { self.width }
-    pub fn height(&self) -> u32 { self.height }
+    pub fn width(&self) -> u32 {
+        self.width
+    }
+    pub fn height(&self) -> u32 {
+        self.height
+    }
 
     /// Returns a shared handle to the latest CPU RGBA snapshot.
     ///
@@ -279,7 +306,9 @@ impl RtspSource {
 
 impl Source for RtspSource {
     type Frame = NvmmFrame;
-    fn next_frame(&mut self) -> Option<NvmmFrame> { self.rx.recv().ok() }
+    fn next_frame(&mut self) -> Option<NvmmFrame> {
+        self.rx.recv().ok()
+    }
 }
 
 impl Drop for RtspSource {
@@ -303,27 +332,34 @@ impl Drop for RtspSource {
 /// This order is mandatory: the texture must be released before the device
 /// memory it references is unmapped.
 pub struct NvmmPreprocessStage {
-    preproc:  Preprocessor,
-    src_w:    u32,
-    src_h:    u32,
+    preproc: Preprocessor,
+    src_w: u32,
+    src_h: u32,
     _pending: Option<CudaMemory>,
 }
 
 impl NvmmPreprocessStage {
     pub fn new(
         stream: Arc<vrt::CudaStream>,
-        src_w: u32, src_h: u32,
-        dst_w: u32, dst_h: u32,
+        src_w: u32,
+        src_h: u32,
+        dst_w: u32,
+        dst_h: u32,
     ) -> Result<Self, GstSourceError> {
         let preproc = Preprocessor::new(stream, src_w, src_h, dst_w, dst_h)?;
-        Ok(Self { preproc, src_w, src_h, _pending: None })
+        Ok(Self {
+            preproc,
+            src_w,
+            src_h,
+            _pending: None,
+        })
     }
 }
 
 impl Operator for NvmmPreprocessStage {
-    type Input   = NvmmFrame;
-    type Pending = VrtTensor;   // borrowed view of the preprocessor's output
-    type Output  = ();
+    type Input = NvmmFrame;
+    type Pending = VrtTensor; // borrowed view of the preprocessor's output
+    type Output = ();
 
     fn enqueue(&mut self, frame: &NvmmFrame, ctx: &ExecCtx) -> Result<VrtTensor, BoxError> {
         // A still-pending import means the previous frame never reached
@@ -331,16 +367,20 @@ impl Operator for NvmmPreprocessStage {
         // drain the GPU, drop the texture object, then the NVMM import.
         if self._pending.is_some() {
             self.preproc.stream().synchronize()?;
-            self.preproc.release_pending();  // drops TextureGuard first ✓
-            self._pending = None;             // then CudaMemory ✓
+            self.preproc.release_pending(); // drops TextureGuard first ✓
+            self._pending = None; // then CudaMemory ✓
         }
         let mem = unsafe { frame.cuda_import()? };
         // SAFETY: the import's dev_ptr stays mapped while `mem` is held in
         // `_pending` (released only in finalize, after the stream sync).
         let image = unsafe {
             VrtImage::borrowed(
-                mem.dev_ptr, self.src_w, self.src_h, frame.pitch,
-                Format::Rgba8, MemKind::Imported,
+                mem.dev_ptr,
+                self.src_w,
+                self.src_h,
+                frame.pitch,
+                Format::Rgba8,
+                MemKind::Imported,
             )
         };
         self._pending = Some(mem);
@@ -348,8 +388,8 @@ impl Operator for NvmmPreprocessStage {
     }
 
     fn finalize(&mut self, pending: VrtTensor, ctx: &ExecCtx) -> Result<(), BoxError> {
-        self.preproc.finalize(pending, ctx)?;  // drops TextureGuard first ✓
-        self._pending = None;                    // then drops CudaMemory ✓
+        self.preproc.finalize(pending, ctx)?; // drops TextureGuard first ✓
+        self._pending = None; // then drops CudaMemory ✓
         Ok(())
     }
 }

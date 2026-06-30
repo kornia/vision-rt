@@ -1,15 +1,29 @@
-use std::sync::Arc;
+use crate::{
+    error::{last_trt_error, Result, TrtError},
+    runtime::Runtime,
+};
 use std::path::Path;
+use std::sync::Arc;
 use vrt_sys::*;
-use crate::{runtime::Runtime, error::{Result, TrtError, last_trt_error}};
 
 /// I/O mode of a tensor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TensorMode { None = 0, Input = 1, Output = 2 }
+pub enum TensorMode {
+    None = 0,
+    Input = 1,
+    Output = 2,
+}
 
 /// Data type of a tensor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DataType { Float32 = 0, Float16 = 1, Int8 = 2, Int32 = 3, Bool = 4, UInt8 = 5 }
+pub enum DataType {
+    Float32 = 0,
+    Float16 = 1,
+    Int8 = 2,
+    Int32 = 3,
+    Bool = 4,
+    UInt8 = 5,
+}
 
 /// Metadata for one engine I/O tensor (discovered via named-tensor API).
 #[derive(Debug, Clone)]
@@ -40,9 +54,8 @@ unsafe impl Sync for Engine {}
 impl Engine {
     /// Load a pre-built `.engine` file from disk.
     pub fn from_file(runtime: Arc<Runtime>, path: impl AsRef<Path>) -> Result<Arc<Self>> {
-        let bytes = std::fs::read(path).map_err(|e| {
-            TrtError::Deserialize(format!("could not read file: {e}"))
-        })?;
+        let bytes = std::fs::read(path)
+            .map_err(|e| TrtError::Deserialize(format!("could not read file: {e}")))?;
         Self::deserialize(runtime, &bytes)
     }
 
@@ -55,13 +68,21 @@ impl Engine {
             let msg = last_trt_error();
             return Err(TrtError::Deserialize(if msg.is_empty() {
                 "unknown error (wrong TRT version or architecture?)".into()
-            } else { msg }));
+            } else {
+                msg
+            }));
         }
         let specs = discover_specs(ptr)?;
-        Ok(Arc::new(Self { ptr, _runtime: runtime, specs }))
+        Ok(Arc::new(Self {
+            ptr,
+            _runtime: runtime,
+            specs,
+        }))
     }
 
-    pub fn specs(&self) -> &[TensorSpec] { &self.specs }
+    pub fn specs(&self) -> &[TensorSpec] {
+        &self.specs
+    }
     pub fn inputs(&self) -> impl Iterator<Item = &TensorSpec> {
         self.specs.iter().filter(|s| s.mode == TensorMode::Input)
     }
@@ -77,7 +98,9 @@ impl Engine {
         self.outputs().map(|s| s.name.clone()).collect()
     }
 
-    pub(crate) fn as_ptr(&self) -> *mut btrt_engine_t { self.ptr }
+    pub(crate) fn as_ptr(&self) -> *mut btrt_engine_t {
+        self.ptr
+    }
 }
 
 fn discover_specs(engine: *mut btrt_engine_t) -> Result<Vec<TensorSpec>> {
@@ -85,7 +108,11 @@ fn discover_specs(engine: *mut btrt_engine_t) -> Result<Vec<TensorSpec>> {
     let mut specs = Vec::with_capacity(n as usize);
     for i in 0..n {
         let name_ptr = unsafe { btrt_engine_io_tensor_name(engine, i) };
-        let name = unsafe { std::ffi::CStr::from_ptr(name_ptr).to_string_lossy().into_owned() };
+        let name = unsafe {
+            std::ffi::CStr::from_ptr(name_ptr)
+                .to_string_lossy()
+                .into_owned()
+        };
         let c_name = std::ffi::CString::new(name.as_bytes()).unwrap();
         let mode = match unsafe { btrt_engine_tensor_io_mode(engine, c_name.as_ptr()) } {
             1 => TensorMode::Input,
@@ -103,9 +130,16 @@ fn discover_specs(engine: *mut btrt_engine_t) -> Result<Vec<TensorSpec>> {
         };
         let mut raw_dims = [0i64; 8];
         let mut ndims = 0i32;
-        unsafe { btrt_engine_tensor_shape(engine, c_name.as_ptr(), raw_dims.as_mut_ptr(), &mut ndims) };
+        unsafe {
+            btrt_engine_tensor_shape(engine, c_name.as_ptr(), raw_dims.as_mut_ptr(), &mut ndims)
+        };
         let dims = raw_dims[..ndims as usize].to_vec();
-        specs.push(TensorSpec { name, mode, dtype, dims });
+        specs.push(TensorSpec {
+            name,
+            mode,
+            dtype,
+            dims,
+        });
     }
     Ok(specs)
 }
@@ -114,6 +148,8 @@ impl Drop for Engine {
     fn drop(&mut self) {
         // SAFETY: unique owner; all Contexts (which hold Arc<Engine>) have
         // dropped before this fires.
-        unsafe { btrt_engine_destroy(self.ptr); }
+        unsafe {
+            btrt_engine_destroy(self.ptr);
+        }
     }
 }

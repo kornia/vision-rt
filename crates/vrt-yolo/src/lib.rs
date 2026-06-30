@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use vrt::{Engine, ModelSession, CudaStream, Operator, ExecCtx, BoxError, VrtTensor};
+use vrt::{BoxError, CudaStream, Engine, ExecCtx, ModelSession, Operator, VrtTensor};
 
 /// Errors from YOLO pre/post-processing and inference.
 #[derive(Debug, thiserror::Error)]
@@ -21,8 +21,8 @@ pub enum YoloError {
 #[derive(Debug, Clone)]
 pub struct Detection {
     pub class_id: u32,
-    pub label:    Option<String>,
-    pub score:    f32,
+    pub label: Option<String>,
+    pub score: f32,
     /// Bounding box: [x1, y1, x2, y2] pixels in the original image.
     pub bbox: [f32; 4],
 }
@@ -30,19 +30,23 @@ pub struct Detection {
 /// Scale and padding applied during letterbox, used to map boxes back.
 #[derive(Debug, Clone)]
 pub struct LetterboxInfo {
-    pub scale:    f32,
+    pub scale: f32,
     pub pad_left: f32,
-    pub pad_top:  f32,
+    pub pad_top: f32,
 }
 
 impl LetterboxInfo {
     /// Compute letterbox parameters from source → destination dimensions.
     /// Matches the geometry used by `Preprocessor` kernel exactly.
     pub fn from_dims(src_w: u32, src_h: u32, dst_w: u32, dst_h: u32) -> Self {
-        let scale    = f32::min(dst_w as f32 / src_w as f32, dst_h as f32 / src_h as f32);
+        let scale = f32::min(dst_w as f32 / src_w as f32, dst_h as f32 / src_h as f32);
         let pad_left = (dst_w as f32 - src_w as f32 * scale) * 0.5;
-        let pad_top  = (dst_h as f32 - src_h as f32 * scale) * 0.5;
-        Self { scale, pad_left, pad_top }
+        let pad_top = (dst_h as f32 - src_h as f32 * scale) * 0.5;
+        Self {
+            scale,
+            pad_left,
+            pad_top,
+        }
     }
 }
 
@@ -53,18 +57,22 @@ impl LetterboxInfo {
 /// Handles both `[1, 84, N]` (col-first) and `[1, N, 84]` (row-first) layouts.
 /// Returns `(x1, y1, x2, y2, class_id, score)` tuples in letterboxed space.
 pub fn decode_output(
-    output:         &[f32],
-    shape:          &[i64],
+    output: &[f32],
+    shape: &[i64],
     conf_threshold: f32,
 ) -> Vec<(f32, f32, f32, f32, u32, f32)> {
-    if shape.len() < 3 { return vec![]; }
+    if shape.len() < 3 {
+        return vec![];
+    }
     let a = shape[1] as usize;
     let b = shape[2] as usize;
     // YOLO11/v8 exports [1, num_features, num_anchors] e.g. [1, 84, 8400].
     let col_first = a < b;
     let (num_anchors, num_cols) = if col_first { (b, a) } else { (a, b) };
     let num_classes = num_cols.saturating_sub(4);
-    if num_classes == 0 { return vec![]; }
+    if num_classes == 0 {
+        return vec![];
+    }
 
     let mut detections = Vec::new();
     for i in 0..num_anchors {
@@ -98,22 +106,35 @@ pub fn decode_output(
             }
         }
 
-        if best_score < conf_threshold { continue; }
-        detections.push((cx - w / 2.0, cy - h / 2.0, cx + w / 2.0, cy + h / 2.0, best_class, best_score));
+        if best_score < conf_threshold {
+            continue;
+        }
+        detections.push((
+            cx - w / 2.0,
+            cy - h / 2.0,
+            cx + w / 2.0,
+            cy + h / 2.0,
+            best_class,
+            best_score,
+        ));
     }
     detections
 }
 
 /// Greedy per-class non-maximum suppression.
 pub fn nms(
-    mut boxes:     Vec<(f32, f32, f32, f32, u32, f32)>,
+    mut boxes: Vec<(f32, f32, f32, f32, u32, f32)>,
     iou_threshold: f32,
 ) -> Vec<(f32, f32, f32, f32, u32, f32)> {
     boxes.sort_by(|a, b| b.5.partial_cmp(&a.5).unwrap_or(std::cmp::Ordering::Equal));
     let mut kept: Vec<(f32, f32, f32, f32, u32, f32)> = Vec::new();
     for candidate in boxes {
-        let suppress = kept.iter().any(|k| k.4 == candidate.4 && iou(k, &candidate) > iou_threshold);
-        if !suppress { kept.push(candidate); }
+        let suppress = kept
+            .iter()
+            .any(|k| k.4 == candidate.4 && iou(k, &candidate) > iou_threshold);
+        if !suppress {
+            kept.push(candidate);
+        }
     }
     kept
 }
@@ -121,18 +142,24 @@ pub fn nms(
 fn iou(a: &(f32, f32, f32, f32, u32, f32), b: &(f32, f32, f32, f32, u32, f32)) -> f32 {
     let inter_w = (a.2.min(b.2) - a.0.max(b.0)).max(0.0);
     let inter_h = (a.3.min(b.3) - a.1.max(b.1)).max(0.0);
-    let inter   = inter_w * inter_h;
-    if inter == 0.0 { return 0.0; }
+    let inter = inter_w * inter_h;
+    if inter == 0.0 {
+        return 0.0;
+    }
     let area_a = (a.2 - a.0).max(0.0) * (a.3 - a.1).max(0.0);
     let area_b = (b.2 - b.0).max(0.0) * (b.3 - b.1).max(0.0);
-    let union  = area_a + area_b - inter;
-    if union <= 0.0 { 0.0 } else { inter / union }
+    let union = area_a + area_b - inter;
+    if union <= 0.0 {
+        0.0
+    } else {
+        inter / union
+    }
 }
 
 /// Map boxes from model-input space back to original image coordinates.
 pub fn unletterbox(
-    boxes:  Vec<(f32, f32, f32, f32, u32, f32)>,
-    info:   &LetterboxInfo,
+    boxes: Vec<(f32, f32, f32, f32, u32, f32)>,
+    info: &LetterboxInfo,
     labels: Option<&[&str]>,
 ) -> Vec<Detection> {
     boxes
@@ -142,12 +169,14 @@ pub fn unletterbox(
                 .and_then(|l| l.get(class_id as usize))
                 .map(|s| s.to_string());
             Detection {
-                class_id, label, score,
+                class_id,
+                label,
+                score,
                 bbox: [
                     (x1 - info.pad_left) / info.scale,
-                    (y1 - info.pad_top)  / info.scale,
+                    (y1 - info.pad_top) / info.scale,
                     (x2 - info.pad_left) / info.scale,
-                    (y2 - info.pad_top)  / info.scale,
+                    (y2 - info.pad_top) / info.scale,
                 ],
             }
         })
@@ -156,14 +185,14 @@ pub fn unletterbox(
 
 /// Full postprocess pipeline: decode → NMS → unletterbox.
 pub fn postprocess(
-    raw_output:    &[f32],
-    output_shape:  &[i64],
+    raw_output: &[f32],
+    output_shape: &[i64],
     letterbox_info: &LetterboxInfo,
     conf_threshold: f32,
-    iou_threshold:  f32,
-    labels:         Option<&[&str]>,
+    iou_threshold: f32,
+    labels: Option<&[&str]>,
 ) -> Vec<Detection> {
-    let decoded   = decode_output(raw_output, output_shape, conf_threshold);
+    let decoded = decode_output(raw_output, output_shape, conf_threshold);
     let after_nms = nms(decoded, iou_threshold);
     unletterbox(after_nms, letterbox_info, labels)
 }
@@ -177,12 +206,12 @@ pub fn postprocess(
 /// Owns its `Session` — share the CUDA stream with other stages via
 /// [`Session::with_stream`](vrt::Session::with_stream).
 pub struct YoloInferStage {
-    model:        ModelSession,
-    lb_info:      LetterboxInfo,
-    conf_thresh:  f32,
-    iou_thresh:   f32,
-    output_name:  String,
-    output_cpu:   Vec<f32>,   // async-D2H target, reused every frame
+    model: ModelSession,
+    lb_info: LetterboxInfo,
+    conf_thresh: f32,
+    iou_thresh: f32,
+    output_name: String,
+    output_cpu: Vec<f32>, // async-D2H target, reused every frame
     output_shape: Vec<i64>,
 }
 
@@ -192,20 +221,26 @@ impl YoloInferStage {
     /// `lb_info` must match the source → model dimension mapping used by the
     /// upstream [`NvmmPreprocessStage`](vrt_gst::NvmmPreprocessStage).
     pub fn new(
-        engine:      Arc<Engine>,
+        engine: Arc<Engine>,
         cuda_stream: Arc<CudaStream>,
-        lb_info:     LetterboxInfo,
+        lb_info: LetterboxInfo,
         conf_thresh: f32,
-        iou_thresh:  f32,
+        iou_thresh: f32,
     ) -> Result<Self, BoxError> {
         let model = ModelSession::new(engine, cuda_stream)?;
         // Pick the first output tensor name from the engine (YOLO has one output).
-        let output_name = model.output_names().first().cloned()
+        let output_name = model
+            .output_names()
+            .first()
+            .cloned()
             .ok_or("engine has no output tensors")?;
         Ok(Self {
-            model, lb_info, conf_thresh, iou_thresh,
+            model,
+            lb_info,
+            conf_thresh,
+            iou_thresh,
             output_name,
-            output_cpu:   Vec::new(),
+            output_cpu: Vec::new(),
             output_shape: Vec::new(),
         })
     }
@@ -216,15 +251,16 @@ impl YoloInferStage {
 }
 
 impl Operator for YoloInferStage {
-    type Input   = VrtTensor;
-    type Pending = ();   // async-D2H target lives in self; nothing to hand forward
-    type Output  = Vec<Detection>;
+    type Input = VrtTensor;
+    type Pending = (); // async-D2H target lives in self; nothing to hand forward
+    type Output = Vec<Detection>;
 
     fn enqueue(&mut self, input: &VrtTensor, _ctx: &ExecCtx) -> Result<(), BoxError> {
         let out = self.model.run(input)?;
 
         // The view carries pointer + resolved shape + byte length together.
-        let view = out.get(&self.output_name)
+        let view = out
+            .get(&self.output_name)
             .ok_or_else(|| format!("no output tensor '{}'", self.output_name))?;
         let out_bytes = view.byte_len();
 
@@ -248,8 +284,12 @@ impl Operator for YoloInferStage {
 
     fn finalize(&mut self, _pending: (), _ctx: &ExecCtx) -> Result<Vec<Detection>, BoxError> {
         Ok(postprocess(
-            &self.output_cpu, &self.output_shape,
-            &self.lb_info, self.conf_thresh, self.iou_thresh, None,
+            &self.output_cpu,
+            &self.output_shape,
+            &self.lb_info,
+            self.conf_thresh,
+            self.iou_thresh,
+            None,
         ))
     }
 }
@@ -313,7 +353,11 @@ mod tests {
 
     #[test]
     fn test_unletterbox_roundtrip() {
-        let info = LetterboxInfo { scale: 0.5, pad_left: 0.0, pad_top: 40.0 };
+        let info = LetterboxInfo {
+            scale: 0.5,
+            pad_left: 0.0,
+            pad_top: 40.0,
+        };
         let boxes = vec![(100.0f32, 80.0, 200.0, 160.0, 0u32, 0.9)];
         let dets = unletterbox(boxes, &info, None);
         assert_eq!(dets.len(), 1);
@@ -332,9 +376,13 @@ mod tests {
         data[2 * n + 0] = 100.0;
         data[3 * n + 0] = 80.0;
         data[4 * n + 0] = 0.9;
-        let info   = LetterboxInfo { scale: 1.0, pad_left: 0.0, pad_top: 0.0 };
+        let info = LetterboxInfo {
+            scale: 1.0,
+            pad_left: 0.0,
+            pad_top: 0.0,
+        };
         let labels = ["person", "bicycle", "car"];
-        let dets   = postprocess(&data, &[1, 84, n as i64], &info, 0.25, 0.45, Some(&labels));
+        let dets = postprocess(&data, &[1, 84, n as i64], &info, 0.25, 0.45, Some(&labels));
         assert!(!dets.is_empty());
         assert_eq!(dets[0].class_id, 0);
         assert_eq!(dets[0].label.as_deref(), Some("person"));

@@ -4,9 +4,9 @@
 //! - [`postprocess`] — GPU kernels (NMS, descriptor sampling, L2 norm, matching) + `XFeatResult`
 //! - [`model`]       — `XFeat` struct (backbone + postproc stage) + builder
 
-pub mod postprocess;
 pub mod model;
+pub mod postprocess;
 
-pub use postprocess::{XFeatResult, XFeatPostproc, XFeatError, TopkBufs, match_mutual_nn};
 pub use model::{XFeat, XFeatParams};
+pub use postprocess::{match_mutual_nn, TopkBufs, XFeatError, XFeatPostproc, XFeatResult};
 pub use vrt_preproc::{Preprocessor, TextureGuard};

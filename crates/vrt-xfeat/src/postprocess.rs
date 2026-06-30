@@ -19,11 +19,11 @@
 //! `kpts`, `descs`, and `scores` share that order. Kernels are JIT-compiled via
 //! vrt::cuda::Kernels (arch auto-detected).
 
-use std::sync::Arc;
-use cudarc::driver::{CudaSlice, CudaStream, PushKernelArg};
 use cudarc::driver::sys::CUdeviceptr;
+use cudarc::driver::{CudaSlice, CudaStream, PushKernelArg};
+use std::sync::Arc;
 
-use vrt::cuda::{Kernels, cfg_1d, cfg_2d, cfg_per_item};
+use vrt::cuda::{cfg_1d, cfg_2d, cfg_per_item, Kernels};
 
 /// Errors from XFeat post-processing and matching.
 #[derive(Debug, thiserror::Error)]
@@ -275,11 +275,11 @@ extern "C" __global__ void xfeat_topk_select(
 /// fields share the same (GPU-select, atomic-append) order.
 pub struct XFeatResult {
     /// Pixel-space (x, y) coordinates on device, capacity [top_k × 2].
-    pub kpts:     CudaSlice<f32>,
+    pub kpts: CudaSlice<f32>,
     /// L2-normalised 64-D descriptors on device, capacity [top_k × 64].
-    pub descs:    CudaSlice<f32>,
+    pub descs: CudaSlice<f32>,
     /// Combined NMS scores on host, length [count] (= the valid keypoint count).
-    pub scores:   Vec<f32>,
+    pub scores: Vec<f32>,
     /// Pixel-space (x, y) coordinates on host — flat interleaved `[x0,y0,x1,y1,…]`,
     /// length [count × 2].  Same ordering as `scores`.
     pub kpts_cpu: Vec<f32>,
@@ -294,57 +294,67 @@ pub struct XFeatResult {
 /// host-side scores/xy are read from the post-processor's reused pinned buffers
 /// (async-D2H target) in `finish_topk`.
 pub struct TopkBufs {
-    kpts_dev:  CudaSlice<f32>,   // [top_k * 2]
-    descs_dev: CudaSlice<f32>,   // [top_k * 64]
-    top_k:     usize,
+    kpts_dev: CudaSlice<f32>,  // [top_k * 2]
+    descs_dev: CudaSlice<f32>, // [top_k * 64]
+    top_k: usize,
 }
 
 pub struct XFeatPostproc {
-    fn_score_nms:     cudarc::driver::CudaFunction,
-    fn_sample_descs:  cudarc::driver::CudaFunction,
-    fn_l2_norm:       cudarc::driver::CudaFunction,
-    fn_match_argmax:  cudarc::driver::CudaFunction,
-    fn_histogram:     cudarc::driver::CudaFunction,
-    fn_cutoff:        cudarc::driver::CudaFunction,
-    fn_select:        cudarc::driver::CudaFunction,
-    stream:           Arc<CudaStream>,
-    top_k:            usize,
-    threshold:        f32,
+    fn_score_nms: cudarc::driver::CudaFunction,
+    fn_sample_descs: cudarc::driver::CudaFunction,
+    fn_l2_norm: cudarc::driver::CudaFunction,
+    fn_match_argmax: cudarc::driver::CudaFunction,
+    fn_histogram: cudarc::driver::CudaFunction,
+    fn_cutoff: cudarc::driver::CudaFunction,
+    fn_select: cudarc::driver::CudaFunction,
+    stream: Arc<CudaStream>,
+    top_k: usize,
+    threshold: f32,
     // Pinned host buffers (async-D2H targets), allocated once and reused.
-    count_pin:        vrt::PinnedBuffer<i32>,   // [1]
-    scores_pin:       vrt::PinnedBuffer<f32>,   // [top_k]
-    kpts_pin:         vrt::PinnedBuffer<f32>,   // [top_k * 2]
+    count_pin: vrt::PinnedBuffer<i32>,  // [1]
+    scores_pin: vrt::PinnedBuffer<f32>, // [top_k]
+    kpts_pin: vrt::PinnedBuffer<f32>,   // [top_k * 2]
 }
 
 const TOPK_NBINS: usize = 1024;
 
 impl XFeatPostproc {
     /// The CUDA stream used for all GPU work.
-    pub fn stream(&self) -> &Arc<CudaStream> { &self.stream }
+    pub fn stream(&self) -> &Arc<CudaStream> {
+        &self.stream
+    }
 
     /// Compile all CUDA kernels and return a ready post-processor.
-    pub fn new(
-        stream:    Arc<CudaStream>,
-        top_k:     usize,
-        threshold: f32,
-    ) -> Result<Self, XFeatError> {
+    pub fn new(stream: Arc<CudaStream>, top_k: usize, threshold: f32) -> Result<Self, XFeatError> {
         let kernels = Kernels::compile(stream.clone(), KERNELS_SRC)?;
 
-        let fn_score_nms     = kernels.function("xfeat_score_nms")?;
-        let fn_sample_descs  = kernels.function("xfeat_sample_descs")?;
-        let fn_l2_norm       = kernels.function("xfeat_l2_norm")?;
-        let fn_match_argmax  = kernels.function("xfeat_match_argmax")?;
-        let fn_histogram     = kernels.function("xfeat_topk_histogram")?;
-        let fn_cutoff        = kernels.function("xfeat_topk_cutoff")?;
-        let fn_select        = kernels.function("xfeat_topk_select")?;
+        let fn_score_nms = kernels.function("xfeat_score_nms")?;
+        let fn_sample_descs = kernels.function("xfeat_sample_descs")?;
+        let fn_l2_norm = kernels.function("xfeat_l2_norm")?;
+        let fn_match_argmax = kernels.function("xfeat_match_argmax")?;
+        let fn_histogram = kernels.function("xfeat_topk_histogram")?;
+        let fn_cutoff = kernels.function("xfeat_topk_cutoff")?;
+        let fn_select = kernels.function("xfeat_topk_select")?;
 
-        let count_pin  = vrt::PinnedBuffer::<i32>::alloc(1)?;
+        let count_pin = vrt::PinnedBuffer::<i32>::alloc(1)?;
         let scores_pin = vrt::PinnedBuffer::<f32>::alloc(top_k)?;
-        let kpts_pin   = vrt::PinnedBuffer::<f32>::alloc(top_k * 2)?;
+        let kpts_pin = vrt::PinnedBuffer::<f32>::alloc(top_k * 2)?;
 
-        Ok(Self { fn_score_nms, fn_sample_descs, fn_l2_norm, fn_match_argmax,
-                  fn_histogram, fn_cutoff, fn_select, stream, top_k, threshold,
-                  count_pin, scores_pin, kpts_pin })
+        Ok(Self {
+            fn_score_nms,
+            fn_sample_descs,
+            fn_l2_norm,
+            fn_match_argmax,
+            fn_histogram,
+            fn_cutoff,
+            fn_select,
+            stream,
+            top_k,
+            threshold,
+            count_pin,
+            scores_pin,
+            kpts_pin,
+        })
     }
 
     /// Enqueue the NMS score kernel into `score_dev` (async — caller must sync before reading).
@@ -352,15 +362,15 @@ impl XFeatPostproc {
     /// `score_dev` must be pre-allocated with `h * w` f32 elements.
     pub fn launch_score_nms(
         &self,
-        heat_ptr:  *const f32,
-        rel_ptr:   *const f32,
+        heat_ptr: *const f32,
+        rel_ptr: *const f32,
         score_dev: &CudaSlice<f32>,
-        h:         usize,
-        w:         usize,
+        h: usize,
+        w: usize,
     ) -> Result<(), XFeatError> {
         use cudarc::driver::DevicePtr;
-        let heat_raw:  CUdeviceptr = heat_ptr  as usize as CUdeviceptr;
-        let rel_raw:   CUdeviceptr = rel_ptr   as usize as CUdeviceptr;
+        let heat_raw: CUdeviceptr = heat_ptr as usize as CUdeviceptr;
+        let rel_raw: CUdeviceptr = rel_ptr as usize as CUdeviceptr;
         let score_raw: CUdeviceptr = score_dev.device_ptr(self.stream.as_ref()).0;
 
         let cfg = cfg_2d(w, h);
@@ -368,9 +378,14 @@ impl XFeatPostproc {
         let w_i = w as i32;
         let thr = self.threshold;
         unsafe {
-            self.stream.launch_builder(&self.fn_score_nms)
-                .arg(&heat_raw).arg(&rel_raw).arg(&score_raw)
-                .arg(&h_i).arg(&w_i).arg(&thr)
+            self.stream
+                .launch_builder(&self.fn_score_nms)
+                .arg(&heat_raw)
+                .arg(&rel_raw)
+                .arg(&score_raw)
+                .arg(&h_i)
+                .arg(&w_i)
+                .arg(&thr)
                 .launch(cfg)?;
         }
         Ok(())
@@ -389,73 +404,96 @@ impl XFeatPostproc {
     /// [`finish_topk`]: XFeatPostproc::finish_topk
     pub fn launch_topk(
         &mut self,
-        desc_ptr:  *const f32,
+        desc_ptr: *const f32,
         score_dev: &CudaSlice<f32>,
-        h:         usize,
-        w:         usize,
+        h: usize,
+        w: usize,
     ) -> Result<TopkBufs, XFeatError> {
         use cudarc::driver::DevicePtr;
-        let (hd, wd)   = (h / 8, w / 8);
-        let n_pixels   = h * w;
-        let k          = self.top_k;
+        let (hd, wd) = (h / 8, w / 8);
+        let n_pixels = h * w;
+        let k = self.top_k;
 
         // Per-frame scratch + outputs (counts/cutoff zeroed; kpts zeroed so the
         // unused [count..k) tail samples at (0,0) instead of garbage coords).
-        let hist_dev:   CudaSlice<i32> = self.stream.alloc_zeros(TOPK_NBINS)?;
+        let hist_dev: CudaSlice<i32> = self.stream.alloc_zeros(TOPK_NBINS)?;
         let cutoff_dev: CudaSlice<f32> = self.stream.alloc_zeros(1)?;
-        let count_dev:  CudaSlice<i32> = self.stream.alloc_zeros(1)?;
-        let kpts_dev:   CudaSlice<f32> = self.stream.alloc_zeros(k * 2)?;
+        let count_dev: CudaSlice<i32> = self.stream.alloc_zeros(1)?;
+        let kpts_dev: CudaSlice<f32> = self.stream.alloc_zeros(k * 2)?;
         let scores_dev: CudaSlice<f32> = self.stream.alloc_zeros(k)?;
-        let descs_dev:  CudaSlice<f32> = unsafe { self.stream.alloc(k * 64)? };
+        let descs_dev: CudaSlice<f32> = unsafe { self.stream.alloc(k * 64)? };
 
         let raw = |s: &CudaSlice<f32>| -> CUdeviceptr { s.device_ptr(self.stream.as_ref()).0 };
         let raw_i = |s: &CudaSlice<i32>| -> CUdeviceptr { s.device_ptr(self.stream.as_ref()).0 };
 
         let score_raw = score_dev.device_ptr(self.stream.as_ref()).0;
-        let hist_raw  = raw_i(&hist_dev);
-        let cut_raw   = raw(&cutoff_dev);
-        let cnt_raw   = raw_i(&count_dev);
-        let kxy_raw   = raw(&kpts_dev);
-        let sco_raw   = raw(&scores_dev);
-        let total     = n_pixels as i32;
-        let k_i       = k as i32;
-        let h_i = h as i32;  let w_i = w as i32;
+        let hist_raw = raw_i(&hist_dev);
+        let cut_raw = raw(&cutoff_dev);
+        let cnt_raw = raw_i(&count_dev);
+        let kxy_raw = raw(&kpts_dev);
+        let sco_raw = raw(&scores_dev);
+        let total = n_pixels as i32;
+        let k_i = k as i32;
+        let h_i = h as i32;
+        let w_i = w as i32;
 
         // 1. histogram of survivor scores
         unsafe {
-            self.stream.launch_builder(&self.fn_histogram)
-                .arg(&score_raw).arg(&hist_raw).arg(&total)
+            self.stream
+                .launch_builder(&self.fn_histogram)
+                .arg(&score_raw)
+                .arg(&hist_raw)
+                .arg(&total)
                 .launch(cfg_1d(n_pixels, 256))?;
         }
         // 2. find the score cutoff for ~K survivors (one block, one thread)
         unsafe {
-            self.stream.launch_builder(&self.fn_cutoff)
-                .arg(&hist_raw).arg(&k_i).arg(&cut_raw)
+            self.stream
+                .launch_builder(&self.fn_cutoff)
+                .arg(&hist_raw)
+                .arg(&k_i)
+                .arg(&cut_raw)
                 .launch(cfg_1d(1, 1))?;
         }
         // 3. gather survivors >= cutoff, capped at K
         unsafe {
-            self.stream.launch_builder(&self.fn_select)
-                .arg(&score_raw).arg(&cut_raw).arg(&kxy_raw).arg(&sco_raw).arg(&cnt_raw)
-                .arg(&h_i).arg(&w_i).arg(&k_i)
+            self.stream
+                .launch_builder(&self.fn_select)
+                .arg(&score_raw)
+                .arg(&cut_raw)
+                .arg(&kxy_raw)
+                .arg(&sco_raw)
+                .arg(&cnt_raw)
+                .arg(&h_i)
+                .arg(&w_i)
+                .arg(&k_i)
                 .launch(cfg_1d(n_pixels, 256))?;
         }
         // 4. sample 64-D descriptors at the selected keypoints (cap K; the
         //    unused tail samples at (0,0) and is ignored by `finish_topk`).
-        let desc_raw  = desc_ptr as usize as CUdeviceptr;
+        let desc_raw = desc_ptr as usize as CUdeviceptr;
         let descs_raw = raw(&descs_dev);
-        let hd_i = hd as i32;  let wd_i = wd as i32;
+        let hd_i = hd as i32;
+        let wd_i = wd as i32;
         let cfg64 = cfg_per_item(k, 64);
         unsafe {
-            self.stream.launch_builder(&self.fn_sample_descs)
-                .arg(&desc_raw).arg(&kxy_raw).arg(&descs_raw)
-                .arg(&hd_i).arg(&wd_i).arg(&h_i).arg(&w_i)
+            self.stream
+                .launch_builder(&self.fn_sample_descs)
+                .arg(&desc_raw)
+                .arg(&kxy_raw)
+                .arg(&descs_raw)
+                .arg(&hd_i)
+                .arg(&wd_i)
+                .arg(&h_i)
+                .arg(&w_i)
                 .launch(cfg64)?;
         }
         // 5. L2-normalise each descriptor row in place
         unsafe {
-            self.stream.launch_builder(&self.fn_l2_norm)
-                .arg(&descs_raw).arg(&k_i)
+            self.stream
+                .launch_builder(&self.fn_l2_norm)
+                .arg(&descs_raw)
+                .arg(&k_i)
                 .launch(cfg64)?;
         }
 
@@ -465,15 +503,28 @@ impl XFeatPostproc {
         //    is free until the pipeline's single per-frame sync.
         let vstream = vrt::Stream::from_cuda_stream(self.stream.clone());
         unsafe {
-            vstream.memcpy_d2h_raw(self.count_pin.as_mut_ptr() as *mut u8,
-                cnt_raw as usize as *const _, std::mem::size_of::<i32>())?;
-            vstream.memcpy_d2h_raw(self.scores_pin.as_mut_ptr() as *mut u8,
-                sco_raw as usize as *const _, k * std::mem::size_of::<f32>())?;
-            vstream.memcpy_d2h_raw(self.kpts_pin.as_mut_ptr() as *mut u8,
-                kxy_raw as usize as *const _, k * 2 * std::mem::size_of::<f32>())?;
+            vstream.memcpy_d2h_raw(
+                self.count_pin.as_mut_ptr() as *mut u8,
+                cnt_raw as usize as *const _,
+                std::mem::size_of::<i32>(),
+            )?;
+            vstream.memcpy_d2h_raw(
+                self.scores_pin.as_mut_ptr() as *mut u8,
+                sco_raw as usize as *const _,
+                k * std::mem::size_of::<f32>(),
+            )?;
+            vstream.memcpy_d2h_raw(
+                self.kpts_pin.as_mut_ptr() as *mut u8,
+                kxy_raw as usize as *const _,
+                k * 2 * std::mem::size_of::<f32>(),
+            )?;
         }
 
-        Ok(TopkBufs { kpts_dev, descs_dev, top_k: k })
+        Ok(TopkBufs {
+            kpts_dev,
+            descs_dev,
+            top_k: k,
+        })
     }
 
     /// Assemble the final [`XFeatResult`] from [`TopkBufs`] **after the stream
@@ -485,9 +536,14 @@ impl XFeatPostproc {
     /// `result.scores.len()` as the keypoint count.
     pub fn finish_topk(&self, bufs: TopkBufs) -> XFeatResult {
         let count = (self.count_pin.as_slice()[0].max(0) as usize).min(bufs.top_k);
-        let scores   = self.scores_pin.as_slice()[..count].to_vec();
+        let scores = self.scores_pin.as_slice()[..count].to_vec();
         let kpts_cpu = self.kpts_pin.as_slice()[..count * 2].to_vec();
-        XFeatResult { kpts: bufs.kpts_dev, descs: bufs.descs_dev, scores, kpts_cpu }
+        XFeatResult {
+            kpts: bufs.kpts_dev,
+            descs: bufs.descs_dev,
+            scores,
+            kpts_cpu,
+        }
     }
 
     /// Synchronous one-shot: [`launch_topk`] + a single sync + [`finish_topk`].
@@ -499,10 +555,10 @@ impl XFeatPostproc {
     /// [`finish_topk`]: XFeatPostproc::finish_topk
     pub fn process_topk_sample(
         &mut self,
-        desc_ptr:  *const f32,
+        desc_ptr: *const f32,
         score_dev: &CudaSlice<f32>,
-        h:         usize,
-        w:         usize,
+        h: usize,
+        w: usize,
     ) -> Result<XFeatResult, XFeatError> {
         let bufs = self.launch_topk(desc_ptr, score_dev, h, w)?;
         self.stream.synchronize()?;
@@ -519,7 +575,7 @@ impl XFeatPostproc {
         &mut self,
         desc_ptr: *const f32,
         heat_ptr: *const f32,
-        rel_ptr:  *const f32,
+        rel_ptr: *const f32,
         h: usize,
         w: usize,
     ) -> Result<XFeatResult, XFeatError> {
@@ -536,49 +592,74 @@ impl XFeatPostproc {
     /// Returns pairs `(i, j)` where keypoint `i` from `res0` matches `j` from `res1`.
     pub fn match_mutual_nn_gpu(
         &self,
-        res0:       &XFeatResult,
-        res1:       &XFeatResult,
+        res0: &XFeatResult,
+        res1: &XFeatResult,
         min_cossim: f32,
     ) -> Result<Vec<(usize, usize)>, XFeatError> {
         let n0 = res0.scores.len();
         let n1 = res1.scores.len();
-        if n0 == 0 || n1 == 0 { return Ok(Vec::new()); }
+        if n0 == 0 || n1 == 0 {
+            return Ok(Vec::new());
+        }
 
         let match12_dev: CudaSlice<i32> = unsafe { self.stream.alloc(n0)? };
         let match21_dev: CudaSlice<i32> = unsafe { self.stream.alloc(n1)? };
-        let sim12_dev:   CudaSlice<f32> = unsafe { self.stream.alloc(n0)? };
+        let sim12_dev: CudaSlice<f32> = unsafe { self.stream.alloc(n0)? };
 
         let n0_i = n0 as i32;
         let n1_i = n1 as i32;
 
-        let d0_raw:  CUdeviceptr = { use cudarc::driver::DevicePtr; res0.descs.device_ptr(self.stream.as_ref()).0 };
-        let d1_raw:  CUdeviceptr = { use cudarc::driver::DevicePtr; res1.descs.device_ptr(self.stream.as_ref()).0 };
-        let m12_raw: CUdeviceptr = { use cudarc::driver::DevicePtr; match12_dev.device_ptr(self.stream.as_ref()).0 };
-        let m21_raw: CUdeviceptr = { use cudarc::driver::DevicePtr; match21_dev.device_ptr(self.stream.as_ref()).0 };
-        let s12_raw: CUdeviceptr = { use cudarc::driver::DevicePtr; sim12_dev.device_ptr(self.stream.as_ref()).0 };
+        let d0_raw: CUdeviceptr = {
+            use cudarc::driver::DevicePtr;
+            res0.descs.device_ptr(self.stream.as_ref()).0
+        };
+        let d1_raw: CUdeviceptr = {
+            use cudarc::driver::DevicePtr;
+            res1.descs.device_ptr(self.stream.as_ref()).0
+        };
+        let m12_raw: CUdeviceptr = {
+            use cudarc::driver::DevicePtr;
+            match12_dev.device_ptr(self.stream.as_ref()).0
+        };
+        let m21_raw: CUdeviceptr = {
+            use cudarc::driver::DevicePtr;
+            match21_dev.device_ptr(self.stream.as_ref()).0
+        };
+        let s12_raw: CUdeviceptr = {
+            use cudarc::driver::DevicePtr;
+            sim12_dev.device_ptr(self.stream.as_ref()).0
+        };
         let null_sim: CUdeviceptr = 0;
 
         // One tiled argmax kernel, both directions (sim only needed for 1→2).
         // Block size must match MATCH_BLOCK in the kernel source.
         unsafe {
-            self.stream.launch_builder(&self.fn_match_argmax)
-                .arg(&d0_raw).arg(&d1_raw)
-                .arg(&m12_raw).arg(&s12_raw)
-                .arg(&n0_i).arg(&n1_i)
+            self.stream
+                .launch_builder(&self.fn_match_argmax)
+                .arg(&d0_raw)
+                .arg(&d1_raw)
+                .arg(&m12_raw)
+                .arg(&s12_raw)
+                .arg(&n0_i)
+                .arg(&n1_i)
                 .launch(vrt::cuda::cfg_1d(n0, 128))?;
         }
         unsafe {
-            self.stream.launch_builder(&self.fn_match_argmax)
-                .arg(&d1_raw).arg(&d0_raw)
-                .arg(&m21_raw).arg(&null_sim)
-                .arg(&n1_i).arg(&n0_i)
+            self.stream
+                .launch_builder(&self.fn_match_argmax)
+                .arg(&d1_raw)
+                .arg(&d0_raw)
+                .arg(&m21_raw)
+                .arg(&null_sim)
+                .arg(&n1_i)
+                .arg(&n0_i)
                 .launch(vrt::cuda::cfg_1d(n1, 128))?;
         }
 
         self.stream.synchronize()?;
         let match12: Vec<i32> = self.stream.memcpy_dtov(&match12_dev)?;
         let match21: Vec<i32> = self.stream.memcpy_dtov(&match21_dev)?;
-        let sim12:   Vec<f32> = self.stream.memcpy_dtov(&sim12_dev)?;
+        let sim12: Vec<f32> = self.stream.memcpy_dtov(&sim12_dev)?;
 
         let pairs = (0..n0)
             .filter(|&i| {
@@ -597,40 +678,48 @@ impl XFeatPostproc {
 /// CPU mutual nearest-neighbour matching (fallback, O(n²×64)).
 ///
 /// Descriptors must be L2-normalised; cosim = dot product.
-pub fn match_mutual_nn(
-    descs0:     &[f32],
-    descs1:     &[f32],
-    min_cossim: f32,
-) -> Vec<(usize, usize)> {
+pub fn match_mutual_nn(descs0: &[f32], descs1: &[f32], min_cossim: f32) -> Vec<(usize, usize)> {
     const D: usize = 64;
     let n0 = descs0.len() / D;
     let n1 = descs1.len() / D;
-    if n0 == 0 || n1 == 0 { return Vec::new(); }
+    if n0 == 0 || n1 == 0 {
+        return Vec::new();
+    }
 
     let mut d1t = vec![0.0f32; D * n1];
     for j in 0..n1 {
-        for d in 0..D { d1t[d * n1 + j] = descs1[j * D + d]; }
+        for d in 0..D {
+            d1t[d * n1 + j] = descs1[j * D + d];
+        }
     }
 
     let mut match12 = vec![0usize; n0];
-    let mut sim12   = vec![f32::NEG_INFINITY; n0];
+    let mut sim12 = vec![f32::NEG_INFINITY; n0];
     for i in 0..n0 {
         let d0 = &descs0[i * D..(i + 1) * D];
         for j in 0..n1 {
             let mut s = 0.0f32;
-            for d in 0..D { s += d0[d] * d1t[d * n1 + j]; }
-            if s > sim12[i] { sim12[i] = s; match12[i] = j; }
+            for d in 0..D {
+                s += d0[d] * d1t[d * n1 + j];
+            }
+            if s > sim12[i] {
+                sim12[i] = s;
+                match12[i] = j;
+            }
         }
     }
 
     let mut match21 = vec![0usize; n1];
-    let mut sim21   = vec![f32::NEG_INFINITY; n1];
+    let mut sim21 = vec![f32::NEG_INFINITY; n1];
     for j in 0..n1 {
         let d1 = &descs1[j * D..(j + 1) * D];
         for i in 0..n0 {
             let d0 = &descs0[i * D..(i + 1) * D];
             let s: f32 = d0.iter().zip(d1).map(|(a, b)| a * b).sum();
-            if s > sim21[j] { sim21[j] = s; match21[j] = i; }
+            if s > sim21[j] {
+                sim21[j] = s;
+                match21[j] = i;
+            }
         }
     }
 
@@ -648,7 +737,9 @@ mod gpu_tests {
     fn random_descs(n: usize, seed: u64) -> Vec<f32> {
         let mut state = seed;
         let mut next = || {
-            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             ((state >> 33) as f32 / (1u64 << 31) as f32) - 1.0
         };
         let mut v: Vec<f32> = (0..n * 64).map(|_| next()).collect();
@@ -665,24 +756,24 @@ mod gpu_tests {
     #[test]
     #[ignore]
     fn gpu_match_agrees_with_cpu_reference() {
-        let ctx    = cudarc::driver::CudaContext::new(0).unwrap();
+        let ctx = cudarc::driver::CudaContext::new(0).unwrap();
         let stream = ctx.new_stream().unwrap();
-        let pp     = XFeatPostproc::new(stream.clone(), 4096, 0.05).unwrap();
+        let pp = XFeatPostproc::new(stream.clone(), 4096, 0.05).unwrap();
 
         for (n0, n1) in [(4096usize, 4096usize), (1000, 3000), (1, 4096), (130, 1)] {
             let h0 = random_descs(n0, 42);
             let h1 = random_descs(n1, 7);
 
             let r0 = XFeatResult {
-                kpts:     stream.memcpy_stod(&vec![0.0f32; n0 * 2]).unwrap(),
-                descs:    stream.memcpy_stod(&h0).unwrap(),
-                scores:   vec![1.0; n0],
+                kpts: stream.memcpy_stod(&vec![0.0f32; n0 * 2]).unwrap(),
+                descs: stream.memcpy_stod(&h0).unwrap(),
+                scores: vec![1.0; n0],
                 kpts_cpu: Vec::new(),
             };
             let r1 = XFeatResult {
-                kpts:     stream.memcpy_stod(&vec![0.0f32; n1 * 2]).unwrap(),
-                descs:    stream.memcpy_stod(&h1).unwrap(),
-                scores:   vec![1.0; n1],
+                kpts: stream.memcpy_stod(&vec![0.0f32; n1 * 2]).unwrap(),
+                descs: stream.memcpy_stod(&h1).unwrap(),
+                scores: vec![1.0; n1],
                 kpts_cpu: Vec::new(),
             };
 
@@ -697,7 +788,10 @@ mod gpu_tests {
             let gset: std::collections::HashSet<_> = gpu.iter().copied().collect();
             let cset: std::collections::HashSet<_> = cpu.iter().copied().collect();
             assert_eq!(gset, cset, "GPU/CPU match mismatch at n0={n0} n1={n1}");
-            eprintln!("match n0={n0:5} n1={n1:5}: {} pairs, GPU wall {gpu_ms:.2} ms", gpu.len());
+            eprintln!(
+                "match n0={n0:5} n1={n1:5}: {} pairs, GPU wall {gpu_ms:.2} ms",
+                gpu.len()
+            );
         }
     }
 
@@ -707,9 +801,9 @@ mod gpu_tests {
     #[ignore]
     fn gpu_match_kernel_only_timing() {
         use cudarc::driver::DevicePtr;
-        let ctx    = cudarc::driver::CudaContext::new(0).unwrap();
+        let ctx = cudarc::driver::CudaContext::new(0).unwrap();
         let stream = ctx.new_stream().unwrap();
-        let pp     = XFeatPostproc::new(stream.clone(), 4096, 0.05).unwrap();
+        let pp = XFeatPostproc::new(stream.clone(), 4096, 0.05).unwrap();
 
         let n = 4096usize;
         let d0 = stream.memcpy_stod(&random_descs(n, 42)).unwrap();
@@ -719,21 +813,31 @@ mod gpu_tests {
 
         let d0r: CUdeviceptr = d0.device_ptr(stream.as_ref()).0;
         let d1r: CUdeviceptr = d1.device_ptr(stream.as_ref()).0;
-        let mr:  CUdeviceptr = m12.device_ptr(stream.as_ref()).0;
-        let sr:  CUdeviceptr = s12.device_ptr(stream.as_ref()).0;
+        let mr: CUdeviceptr = m12.device_ptr(stream.as_ref()).0;
+        let sr: CUdeviceptr = s12.device_ptr(stream.as_ref()).0;
         let n_i = n as i32;
 
         let launch = || unsafe {
-            stream.launch_builder(&pp.fn_match_argmax)
-                .arg(&d0r).arg(&d1r).arg(&mr).arg(&sr).arg(&n_i).arg(&n_i)
-                .launch(vrt::cuda::cfg_1d(n, 128)).unwrap();
+            stream
+                .launch_builder(&pp.fn_match_argmax)
+                .arg(&d0r)
+                .arg(&d1r)
+                .arg(&mr)
+                .arg(&sr)
+                .arg(&n_i)
+                .arg(&n_i)
+                .launch(vrt::cuda::cfg_1d(n, 128))
+                .unwrap();
         };
 
-        launch(); stream.synchronize().unwrap();  // warm-up
+        launch();
+        stream.synchronize().unwrap(); // warm-up
 
         let flags = Some(cudarc::driver::sys::CUevent_flags::CU_EVENT_DEFAULT);
         let start = stream.record_event(flags).unwrap();
-        for _ in 0..20 { launch(); }
+        for _ in 0..20 {
+            launch();
+        }
         let stop = stream.record_event(flags).unwrap();
         stream.synchronize().unwrap();
         let ms = start.elapsed_ms(&stop).unwrap() / 20.0;
@@ -751,9 +855,9 @@ mod gpu_compact_tests {
     #[test]
     #[ignore]
     fn gpu_topk_selects_correct_keypoints() {
-        let ctx    = cudarc::driver::CudaContext::new(0).unwrap();
+        let ctx = cudarc::driver::CudaContext::new(0).unwrap();
         let stream = ctx.new_stream().unwrap();
-        let mut pp = XFeatPostproc::new(stream.clone(), 2, 0.05).unwrap();  // top_k = 2
+        let mut pp = XFeatPostproc::new(stream.clone(), 2, 0.05).unwrap(); // top_k = 2
 
         let (h, w) = (32usize, 32usize);
         let (hd, wd) = (h / 8, w / 8);
@@ -768,7 +872,9 @@ mod gpu_compact_tests {
         // Constant-per-channel descriptor map: sampled vector = (c+1) before norm.
         let mut desc_map = vec![0.0f32; 64 * hd * wd];
         for c in 0..64 {
-            for i in 0..hd * wd { desc_map[c * hd * wd + i] = (c + 1) as f32; }
+            for i in 0..hd * wd {
+                desc_map[c * hd * wd + i] = (c + 1) as f32;
+            }
         }
         let desc_dev = stream.memcpy_stod(&desc_map).unwrap();
         let desc_ptr = {
@@ -780,24 +886,38 @@ mod gpu_compact_tests {
 
         // Exactly the top-2 keypoints, in any order: pair (score, x, y) and sort.
         assert_eq!(res.scores.len(), 2);
-        let mut got: Vec<(i32, u32, u32)> = res.scores.iter().zip(res.kpts_cpu.chunks_exact(2))
+        let mut got: Vec<(i32, u32, u32)> = res
+            .scores
+            .iter()
+            .zip(res.kpts_cpu.chunks_exact(2))
             .map(|(s, xy)| ((s * 1000.0) as i32, xy[0] as u32, xy[1] as u32))
             .collect();
         got.sort_by(|a, b| b.0.cmp(&a.0));
-        assert_eq!(got, vec![
-            (900, (100 % w) as u32, (100 / w) as u32),
-            (700, (999 % w) as u32, (999 / w) as u32),
-        ]);
+        assert_eq!(
+            got,
+            vec![
+                (900, (100 % w) as u32, (100 / w) as u32),
+                (700, (999 % w) as u32, (999 / w) as u32),
+            ]
+        );
 
         // Descriptors (count rows of the capacity-K buffer) must be L2-normalized
         // samples of the constant map.
         let descs: Vec<f32> = stream.memcpy_dtov(&res.descs).unwrap();
         for row in descs.chunks_exact(64).take(res.scores.len()) {
             let norm: f32 = row.iter().map(|v| v * v).sum::<f32>().sqrt();
-            assert!((norm - 1.0).abs() < 1e-4, "descriptor not normalized: {norm}");
+            assert!(
+                (norm - 1.0).abs() < 1e-4,
+                "descriptor not normalized: {norm}"
+            );
             // direction must follow (1, 2, ..., 64) / |(1,...,64)|
             let expect0 = 1.0 / (1..=64).map(|c| (c * c) as f32).sum::<f32>().sqrt();
-            assert!((row[0] - expect0).abs() < 1e-3, "row[0]={} expect {}", row[0], expect0);
+            assert!(
+                (row[0] - expect0).abs() < 1e-3,
+                "row[0]={} expect {}",
+                row[0],
+                expect0
+            );
         }
     }
 }

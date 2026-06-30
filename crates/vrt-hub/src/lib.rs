@@ -42,7 +42,11 @@ pub enum HubError {
     #[error("model '{0}' has no files in the registry")]
     EmptyModel(String),
     #[error("sha256 mismatch for {path}: expected {expected}, got {actual} (corrupted download? delete and retry)")]
-    Sha256Mismatch { path: PathBuf, expected: String, actual: String },
+    Sha256Mismatch {
+        path: PathBuf,
+        expected: String,
+        actual: String,
+    },
     #[cfg(feature = "hub")]
     #[error("Hugging Face Hub: {0}")]
     Hf(#[from] hf_hub::api::sync::ApiError),
@@ -57,14 +61,12 @@ pub enum HubError {
     Build(String),
 }
 
-
-
 // ── Model registry ────────────────────────────────────────────────────────────
 
 /// One file inside a hub model: name + sha256 pin.
 pub struct ModelFile {
     pub filename: &'static str,
-    pub sha256:   &'static str,
+    pub sha256: &'static str,
 }
 
 /// A distributable model: where it lives on the Hub and what it contains.
@@ -72,33 +74,31 @@ pub struct ModelFile {
 /// `files[0]` is the entry-point .onnx; the rest are sidecars (e.g.
 /// `.onnx.data` external weights) that must land in the same directory.
 pub struct ModelSpec {
-    pub name:     &'static str,
-    pub hf_repo:  &'static str,
+    pub name: &'static str,
+    pub hf_repo: &'static str,
     pub revision: &'static str,
-    pub files:    &'static [ModelFile],
+    pub files: &'static [ModelFile],
 }
 
 /// Static registry of known models.
 ///
 /// To add a model: export ONNX (scripts/), upload to the HF repo, add an
 /// entry here with `sha256sum` pins.
-pub static REGISTRY: &[ModelSpec] = &[
-    ModelSpec {
-        name:     "xfeat-backbone",
-        hf_repo:  "edgarriba/vision-rt-models",
-        revision: "main",
-        files: &[
-            ModelFile {
-                filename: "xfeat_backbone.onnx",
-                sha256:   "86d7d549b380405f208933efb5202e1584d9762f3a72e06e7ed81ca1436972e0",
-            },
-            ModelFile {
-                filename: "xfeat_backbone.onnx.data",
-                sha256:   "d4498528d37bf7c737cce9c135f9b0340d828bab7dc808339e50553ac8c1b7d9",
-            },
-        ],
-    },
-];
+pub static REGISTRY: &[ModelSpec] = &[ModelSpec {
+    name: "xfeat-backbone",
+    hf_repo: "edgarriba/vision-rt-models",
+    revision: "main",
+    files: &[
+        ModelFile {
+            filename: "xfeat_backbone.onnx",
+            sha256: "86d7d549b380405f208933efb5202e1584d9762f3a72e06e7ed81ca1436972e0",
+        },
+        ModelFile {
+            filename: "xfeat_backbone.onnx.data",
+            sha256: "d4498528d37bf7c737cce9c135f9b0340d828bab7dc808339e50553ac8c1b7d9",
+        },
+    ],
+}];
 
 /// Look up a model spec by name.
 pub fn spec(name: &str) -> Option<&'static ModelSpec> {
@@ -133,7 +133,9 @@ impl ModelHub {
         for f in spec.files {
             let path = repo.get(f.filename)?;
             verify_sha256(&path, f.sha256)?;
-            if entry.is_none() { entry = Some(path); }
+            if entry.is_none() {
+                entry = Some(path);
+            }
         }
         entry.ok_or_else(|| HubError::EmptyModel(name.into()))
     }
@@ -149,7 +151,7 @@ pub fn verify_sha256(path: &Path, expected: &str) -> Result<(), HubError> {
     let actual = sha256_file(path)?;
     if actual != expected {
         return Err(HubError::Sha256Mismatch {
-            path:     path.to_path_buf(),
+            path: path.to_path_buf(),
             expected: expected.into(),
             actual,
         });
@@ -163,7 +165,9 @@ fn sha256_file(path: &Path) -> Result<String, HubError> {
     let mut buf = [0u8; 1 << 16];
     loop {
         let n = file.read(&mut buf)?;
-        if n == 0 { break; }
+        if n == 0 {
+            break;
+        }
         hasher.update(&buf[..n]);
     }
     Ok(format!("{:x}", hasher.finalize()))
@@ -177,14 +181,18 @@ pub type ShapeProfile = (String, Vec<i64>, Vec<i64>, Vec<i64>);
 /// Optimization profile + build options for an engine.
 pub struct EngineProfile {
     /// Profile for dynamic-shape models; None = static shapes.
-    pub input:        Option<ShapeProfile>,
-    pub fp16:         bool,
+    pub input: Option<ShapeProfile>,
+    pub fp16: bool,
     pub workspace_mb: i64,
 }
 
 impl Default for EngineProfile {
     fn default() -> Self {
-        Self { input: None, fp16: true, workspace_mb: 2048 }
+        Self {
+            input: None,
+            fp16: true,
+            workspace_mb: 2048,
+        }
     }
 }
 
@@ -202,7 +210,9 @@ pub struct EngineCache {
 impl Default for EngineCache {
     fn default() -> Self {
         let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-        Self { dir: PathBuf::from(home).join(".cache/vision-rt/engines") }
+        Self {
+            dir: PathBuf::from(home).join(".cache/vision-rt/engines"),
+        }
     }
 }
 
@@ -216,7 +226,9 @@ impl EngineCache {
         let onnx_sha8 = &sha256_file(onnx)?[..8];
         let trt_ver = vrt::TENSORRT_VERSION;
         let sm = compute_capability()?;
-        Ok(self.dir.join(format!("{name}-{onnx_sha8}-trt{trt_ver}-sm{sm}.engine")))
+        Ok(self
+            .dir
+            .join(format!("{name}-{onnx_sha8}-trt{trt_ver}-sm{sm}.engine")))
     }
 
     /// Return the cached engine for (`name`, `onnx`), building it on-device
@@ -261,8 +273,10 @@ impl EngineCache {
         profile: &EngineProfile,
     ) -> Result<String, HubError> {
         if model_path.ends_with(".onnx") {
-            Ok(self.get_or_build(name, Path::new(model_path), profile)?
-                .to_string_lossy().into_owned())
+            Ok(self
+                .get_or_build(name, Path::new(model_path), profile)?
+                .to_string_lossy()
+                .into_owned())
         } else {
             Ok(model_path.to_string())
         }
@@ -297,7 +311,9 @@ fn build_engine(onnx: &Path, profile: &EngineProfile) -> Result<Vec<u8>, HubErro
     let trtexec = ["/usr/src/tensorrt/bin/trtexec", "trtexec"]
         .iter()
         .find(|p| Path::new(p).exists() || which(p))
-        .ok_or_else(|| HubError::Build("trtexec not found and 'builder' feature is disabled".into()))?;
+        .ok_or_else(|| {
+            HubError::Build("trtexec not found and 'builder' feature is disabled".into())
+        })?;
 
     let out = tempfile_path("engine")?;
     let mut cmd = Command::new(trtexec);
@@ -324,14 +340,16 @@ fn build_engine(onnx: &Path, profile: &EngineProfile) -> Result<Vec<u8>, HubErro
 
 #[cfg(not(feature = "builder"))]
 fn dims_x(dims: &[i64]) -> String {
-    dims.iter().map(|d| d.to_string()).collect::<Vec<_>>().join("x")
+    dims.iter()
+        .map(|d| d.to_string())
+        .collect::<Vec<_>>()
+        .join("x")
 }
 
 #[cfg(not(feature = "builder"))]
 fn which(bin: &str) -> bool {
-    std::env::var_os("PATH").is_some_and(|paths| {
-        std::env::split_paths(&paths).any(|p| p.join(bin).exists())
-    })
+    std::env::var_os("PATH")
+        .is_some_and(|paths| std::env::split_paths(&paths).any(|p| p.join(bin).exists()))
 }
 
 #[cfg(not(feature = "builder"))]
@@ -371,7 +389,10 @@ mod integration {
     #[test]
     #[ignore]
     fn build_xfeat_engine_via_cache() {
-        let onnx_path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../models/xfeat/xfeat_backbone.onnx");
+        let onnx_path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../models/xfeat/xfeat_backbone.onnx"
+        );
         let onnx = Path::new(onnx_path);
         assert!(onnx.exists(), "test needs the local xfeat ONNX");
 

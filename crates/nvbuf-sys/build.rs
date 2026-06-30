@@ -1,6 +1,5 @@
 fn main() {
-    let cuda_inc = std::env::var("CUDA_HOME")
-        .unwrap_or_else(|_| "/usr/local/cuda".into());
+    let cuda_inc = std::env::var("CUDA_HOME").unwrap_or_else(|_| "/usr/local/cuda".into());
 
     cc::Build::new()
         .cpp(true)

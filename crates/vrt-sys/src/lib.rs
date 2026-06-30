@@ -58,4 +58,3 @@ extern "C" {
 /// Installed TensorRT version "MAJOR.MINOR.PATCH.BUILD", parsed from
 /// NvInferVersion.h at build time.  Engine-cache keys depend on this.
 pub const TENSORRT_VERSION: &str = env!("TENSORRT_VERSION");
-

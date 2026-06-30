@@ -15,10 +15,9 @@ fn main() {
     }
     println!("cargo:rerun-if-env-changed=TRT_STUB");
 
-    let trt_inc = env::var("TRT_INCLUDE_DIR")
-        .unwrap_or_else(|_| "/usr/include/aarch64-linux-gnu".into());
-    let trt_lib = env::var("TRT_LIB_DIR")
-        .unwrap_or_else(|_| "/usr/lib/aarch64-linux-gnu".into());
+    let trt_inc =
+        env::var("TRT_INCLUDE_DIR").unwrap_or_else(|_| "/usr/include/aarch64-linux-gnu".into());
+    let trt_lib = env::var("TRT_LIB_DIR").unwrap_or_else(|_| "/usr/lib/aarch64-linux-gnu".into());
     let cuda_home = env::var("CUDA_HOME").unwrap_or_else(|_| "/usr/local/cuda".into());
     let cuda_inc = format!("{cuda_home}/include");
     let cuda_lib = format!("{cuda_home}/lib64");
@@ -102,8 +101,7 @@ fn main() {
     println!("cargo:rustc-link-lib=dylib=stdc++");
 
     // ── 5. Version constants — parsed from NvInferVersion.h, not hardcoded ─────────────
-    let version = parse_trt_version(&trt_inc)
-        .unwrap_or_else(|| "10.3.0.30".to_string());
+    let version = parse_trt_version(&trt_inc).unwrap_or_else(|| "10.3.0.30".to_string());
     println!("cargo:rustc-env=TENSORRT_VERSION={version}");
     println!("cargo:rerun-if-changed={trt_inc}/NvInferVersion.h");
 

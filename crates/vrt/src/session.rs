@@ -2,14 +2,14 @@ use std::collections::HashMap;
 use std::ffi::CString;
 use std::sync::Arc;
 
+use crate::{
+    buffer::{DeviceBuffer, Stream},
+    engine::{DataType, Engine, TensorMode},
+    error::{last_trt_error, Result, TrtError},
+    tensor::{DType, MemKind, VrtTensor},
+};
 use cudarc::driver::{CudaContext, CudaStream};
 use vrt_sys::*;
-use crate::{
-    engine::{Engine, TensorMode, DataType},
-    buffer::{DeviceBuffer, Stream},
-    tensor::{VrtTensor, MemKind, DType},
-    error::{Result, TrtError, last_trt_error},
-};
 
 /// Map an engine I/O [`DataType`] to a tensor [`DType`].
 ///
@@ -19,7 +19,7 @@ fn dtype_of(d: DataType) -> DType {
     match d {
         DataType::Float32 => DType::F32,
         DataType::Float16 => DType::F16,
-        DataType::Int32   => DType::I32,
+        DataType::Int32 => DType::I32,
         DataType::Int8 | DataType::UInt8 | DataType::Bool => DType::U8,
     }
 }
@@ -51,7 +51,8 @@ impl OutputTensor {
     pub fn as_f32_from_f16(&self) -> Vec<f32> {
         assert_eq!(self.dtype, DataType::Float16, "tensor is not f16");
         use half::f16;
-        self.data.chunks_exact(2)
+        self.data
+            .chunks_exact(2)
             .map(|b| f16::from_le_bytes([b[0], b[1]]).to_f32())
             .collect()
     }
@@ -82,7 +83,9 @@ unsafe impl Send for Session {}
 
 impl Session {
     /// The CUDA stream this session enqueues work on.
-    pub fn stream(&self) -> &Stream { &self.stream }
+    pub fn stream(&self) -> &Stream {
+        &self.stream
+    }
 
     /// Create a session that shares `cuda_stream` with other pipeline stages.
     ///
@@ -96,11 +99,15 @@ impl Session {
     /// Create a new inference session for the given engine (private stream).
     pub fn new(engine: Arc<Engine>) -> Result<Self> {
         // Retain the primary CUDA context (same context TRT uses internally).
-        let cuda_ctx = CudaContext::new(0)
-            .map_err(|e| TrtError::Cuda { code: e.0 as i32, msg: "CudaContext" })?;
+        let cuda_ctx = CudaContext::new(0).map_err(|e| TrtError::Cuda {
+            code: e.0 as i32,
+            msg: "CudaContext",
+        })?;
         // Single-stream usage — drop cudarc's cross-stream event tracking overhead.
         // SAFETY: all session buffers live on this one stream; none crosses streams.
-        unsafe { cuda_ctx.disable_event_tracking(); }
+        unsafe {
+            cuda_ctx.disable_event_tracking();
+        }
         let stream = Stream::new(&cuda_ctx)?;
         Self::init(engine, stream)
     }
@@ -111,7 +118,9 @@ impl Session {
         struct CtxGuard(*mut btrt_context_t);
         impl Drop for CtxGuard {
             fn drop(&mut self) {
-                if !self.0.is_null() { unsafe { btrt_context_destroy(self.0) } }
+                if !self.0.is_null() {
+                    unsafe { btrt_context_destroy(self.0) }
+                }
             }
         }
 
@@ -124,16 +133,17 @@ impl Session {
         let mut inputs = HashMap::new();
         let mut outputs = HashMap::new();
         for spec in engine.specs() {
-            let n_elems: i64 = spec.dims.iter()
-                .filter(|&&d| d > 0)
-                .product::<i64>()
-                .max(1);
+            let n_elems: i64 = spec.dims.iter().filter(|&&d| d > 0).product::<i64>().max(1);
             let bytes_per_elem = dtype_bytes(spec.dtype);
             let buf = DeviceBuffer::alloc_with_stream(
                 stream.cuda_stream(),
                 n_elems as usize * bytes_per_elem,
             )?;
-            let state = TensorState { buf, shape: spec.dims.clone(), dtype: spec.dtype };
+            let state = TensorState {
+                buf,
+                shape: spec.dims.clone(),
+                dtype: spec.dtype,
+            };
             if spec.mode == TensorMode::Input {
                 inputs.insert(spec.name.clone(), state);
             } else {
@@ -142,18 +152,30 @@ impl Session {
         }
 
         guard.0 = std::ptr::null_mut(); // ownership transfers to Session::drop
-        Ok(Self { ctx, _engine: engine, stream, inputs, outputs,
-                  _not_sync: std::marker::PhantomData })
+        Ok(Self {
+            ctx,
+            _engine: engine,
+            stream,
+            inputs,
+            outputs,
+            _not_sync: std::marker::PhantomData,
+        })
     }
 
     /// Set the runtime shape for a dynamic-shape input (call before `run`).
     pub fn set_input_shape(&mut self, name: &str, shape: &[i64]) -> Result<()> {
         let c_name = CString::new(name).map_err(|_| TrtError::UnknownTensor(name.into()))?;
         let code = unsafe {
-            btrt_context_set_input_shape(self.ctx, c_name.as_ptr(),
-                                          shape.as_ptr(), shape.len() as i32)
+            btrt_context_set_input_shape(
+                self.ctx,
+                c_name.as_ptr(),
+                shape.as_ptr(),
+                shape.len() as i32,
+            )
         };
-        if code != 0 { return Err(TrtError::Trt(last_trt_error())); }
+        if code != 0 {
+            return Err(TrtError::Trt(last_trt_error()));
+        }
         self.resize_output_buffers()?;
         Ok(())
     }
@@ -161,16 +183,21 @@ impl Session {
     /// Run inference with CPU inputs (H2D copy then enqueue).
     pub fn run(&mut self, inputs: &[(&str, &[f32])]) -> Result<HashMap<String, OutputTensor>> {
         for (name, data) in inputs {
-            let c_name = CString::new(*name)
-                .map_err(|_| TrtError::UnknownTensor((*name).into()))?;
-            let state = self.inputs.get_mut(*name)
+            let c_name =
+                CString::new(*name).map_err(|_| TrtError::UnknownTensor((*name).into()))?;
+            let state = self
+                .inputs
+                .get_mut(*name)
                 .ok_or_else(|| TrtError::UnknownTensor((*name).into()))?;
-            state.buf.copy_from_host(bytemuck_f32_to_u8(data), &self.stream)?;
+            state
+                .buf
+                .copy_from_host(bytemuck_f32_to_u8(data), &self.stream)?;
             let dev_ptr = state.buf.as_device_ptr(&self.stream);
-            let code = unsafe {
-                btrt_context_set_tensor_address(self.ctx, c_name.as_ptr(), dev_ptr)
-            };
-            if code != 0 { return Err(TrtError::Trt(last_trt_error())); }
+            let code =
+                unsafe { btrt_context_set_tensor_address(self.ctx, c_name.as_ptr(), dev_ptr) };
+            if code != 0 {
+                return Err(TrtError::Trt(last_trt_error()));
+            }
         }
         self.enqueue_and_collect()
     }
@@ -187,14 +214,21 @@ impl Session {
         device_inputs: &[(&str, *mut std::ffi::c_void, &[i64])],
     ) -> Result<HashMap<String, OutputTensor>> {
         for (name, dev_ptr, shape) in device_inputs {
-            let c_name = CString::new(*name)
-                .map_err(|_| TrtError::UnknownTensor((*name).into()))?;
+            let c_name =
+                CString::new(*name).map_err(|_| TrtError::UnknownTensor((*name).into()))?;
             let rc = btrt_context_set_input_shape(
-                self.ctx, c_name.as_ptr(), shape.as_ptr(), shape.len() as i32,
+                self.ctx,
+                c_name.as_ptr(),
+                shape.as_ptr(),
+                shape.len() as i32,
             );
-            if rc != 0 { return Err(TrtError::Trt(last_trt_error())); }
+            if rc != 0 {
+                return Err(TrtError::Trt(last_trt_error()));
+            }
             let rc = btrt_context_set_tensor_address(self.ctx, c_name.as_ptr(), *dev_ptr);
-            if rc != 0 { return Err(TrtError::Trt(last_trt_error())); }
+            if rc != 0 {
+                return Err(TrtError::Trt(last_trt_error()));
+            }
         }
         self.resize_output_buffers()?;
         self.enqueue_and_collect()
@@ -217,14 +251,21 @@ impl Session {
         device_inputs: &[(&str, *mut std::ffi::c_void, &[i64])],
     ) -> Result<HashMap<String, VrtTensor>> {
         for (name, dev_ptr, shape) in device_inputs {
-            let c_name = CString::new(*name)
-                .map_err(|_| TrtError::UnknownTensor((*name).into()))?;
+            let c_name =
+                CString::new(*name).map_err(|_| TrtError::UnknownTensor((*name).into()))?;
             let rc = btrt_context_set_input_shape(
-                self.ctx, c_name.as_ptr(), shape.as_ptr(), shape.len() as i32,
+                self.ctx,
+                c_name.as_ptr(),
+                shape.as_ptr(),
+                shape.len() as i32,
             );
-            if rc != 0 { return Err(TrtError::Trt(last_trt_error())); }
+            if rc != 0 {
+                return Err(TrtError::Trt(last_trt_error()));
+            }
             let rc = btrt_context_set_tensor_address(self.ctx, c_name.as_ptr(), *dev_ptr);
-            if rc != 0 { return Err(TrtError::Trt(last_trt_error())); }
+            if rc != 0 {
+                return Err(TrtError::Trt(last_trt_error()));
+            }
         }
         self.resize_output_buffers()?;
         self.enqueue_outputs_only()
@@ -234,14 +275,17 @@ impl Session {
         for (name, state) in &self.outputs {
             let c_name = CString::new(name.as_str()).unwrap();
             let dev_ptr = state.buf.as_device_ptr(&self.stream);
-            let code = unsafe {
-                btrt_context_set_tensor_address(self.ctx, c_name.as_ptr(), dev_ptr)
-            };
-            if code != 0 { return Err(TrtError::Trt(last_trt_error())); }
+            let code =
+                unsafe { btrt_context_set_tensor_address(self.ctx, c_name.as_ptr(), dev_ptr) };
+            if code != 0 {
+                return Err(TrtError::Trt(last_trt_error()));
+            }
         }
 
         let code = unsafe { btrt_context_enqueue_v3(self.ctx, self.stream.as_raw()) };
-        if code != 0 { return Err(TrtError::Trt(last_trt_error())); }
+        if code != 0 {
+            return Err(TrtError::Trt(last_trt_error()));
+        }
 
         let cuda_stream = self.stream.cuda_stream().clone();
         let mut result = HashMap::new();
@@ -267,14 +311,17 @@ impl Session {
         for (name, state) in &self.outputs {
             let c_name = CString::new(name.as_str()).unwrap();
             let dev_ptr = state.buf.as_device_ptr(&self.stream);
-            let code = unsafe {
-                btrt_context_set_tensor_address(self.ctx, c_name.as_ptr(), dev_ptr)
-            };
-            if code != 0 { return Err(TrtError::Trt(last_trt_error())); }
+            let code =
+                unsafe { btrt_context_set_tensor_address(self.ctx, c_name.as_ptr(), dev_ptr) };
+            if code != 0 {
+                return Err(TrtError::Trt(last_trt_error()));
+            }
         }
 
         let code = unsafe { btrt_context_enqueue_v3(self.ctx, self.stream.as_raw()) };
-        if code != 0 { return Err(TrtError::Trt(last_trt_error())); }
+        if code != 0 {
+            return Err(TrtError::Trt(last_trt_error()));
+        }
 
         let mut raw_outputs: HashMap<String, Vec<u8>> = HashMap::new();
         for (name, state) in &self.outputs {
@@ -289,7 +336,15 @@ impl Session {
         for (name, data) in raw_outputs {
             let state = &self.outputs[&name];
             let shape = self.resolved_output_shape(&name)?;
-            result.insert(name.clone(), OutputTensor { name, data, dtype: state.dtype, shape });
+            result.insert(
+                name.clone(),
+                OutputTensor {
+                    name,
+                    data,
+                    dtype: state.dtype,
+                    shape,
+                },
+            );
         }
         Ok(result)
     }
@@ -299,10 +354,11 @@ impl Session {
         let mut dims = [0i64; 8];
         let mut ndims = 0i32;
         let code = unsafe {
-            btrt_context_get_tensor_shape(self.ctx, c_name.as_ptr(),
-                                           dims.as_mut_ptr(), &mut ndims)
+            btrt_context_get_tensor_shape(self.ctx, c_name.as_ptr(), dims.as_mut_ptr(), &mut ndims)
         };
-        if code != 0 { return Err(TrtError::UnknownTensor(name.into())); }
+        if code != 0 {
+            return Err(TrtError::UnknownTensor(name.into()));
+        }
         Ok(dims[..ndims as usize].to_vec())
     }
 
@@ -328,7 +384,9 @@ impl Session {
 impl Drop for Session {
     fn drop(&mut self) {
         if !self.ctx.is_null() {
-            unsafe { btrt_context_destroy(self.ctx); }
+            unsafe {
+                btrt_context_destroy(self.ctx);
+            }
         }
     }
 }
@@ -342,7 +400,5 @@ fn dtype_bytes(dtype: DataType) -> usize {
 }
 
 fn bytemuck_f32_to_u8(s: &[f32]) -> &[u8] {
-    unsafe {
-        std::slice::from_raw_parts(s.as_ptr() as *const u8, s.len() * 4)
-    }
+    unsafe { std::slice::from_raw_parts(s.as_ptr() as *const u8, s.len() * 4) }
 }

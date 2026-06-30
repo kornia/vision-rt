@@ -12,10 +12,10 @@
 //! Usage:
 //!   cargo run --example rtsp_yolo -- <engine_path> <rtsp_url>
 
-use vrt::{Engine, Logger, Runtime, Stream, Pipeline};
 use vrt::logger::Severity;
-use vrt_yolo::{YoloInferStage, LetterboxInfo};
-use vrt_gst::{RtspSource, NvmmPreprocessStage};
+use vrt::{Engine, Logger, Pipeline, Runtime, Stream};
+use vrt_gst::{NvmmPreprocessStage, RtspSource};
+use vrt_yolo::{LetterboxInfo, YoloInferStage};
 
 const MODEL_W: u32 = 640;
 const MODEL_H: u32 = 640;
@@ -30,23 +30,21 @@ fn main() -> Result<(), vrt::BoxError> {
     }
     let (engine_path, rtsp_url) = (&args[1], &args[2]);
 
-    let logger  = Logger::new(Severity::Warning)?;
+    let logger = Logger::new(Severity::Warning)?;
     let runtime = Runtime::new(logger)?;
-    let engine  = Engine::from_file(runtime, engine_path)?;
+    let engine = Engine::from_file(runtime, engine_path)?;
 
     // Connect to stream — blocks until the first frame establishes resolution.
     let source = RtspSource::connect(rtsp_url)?;
     let (src_w, src_h) = (source.width(), source.height());
     println!("Stream: {src_w}×{src_h} | model: {MODEL_W}×{MODEL_H}");
 
-    let stream  = Stream::new_standalone()?.cuda_stream().clone();
+    let stream = Stream::new_standalone()?.cuda_stream().clone();
     let lb_info = LetterboxInfo::from_dims(src_w, src_h, MODEL_W, MODEL_H);
     let preproc = NvmmPreprocessStage::new(stream.clone(), src_w, src_h, MODEL_W, MODEL_H)?;
-    let infer   = YoloInferStage::new(engine, stream.clone(), lb_info, 0.25, 0.45)?;
+    let infer = YoloInferStage::new(engine, stream.clone(), lb_info, 0.25, 0.45)?;
 
-    let mut pipeline = Pipeline::new(stream, source)
-        .pipe(preproc)
-        .pipe(infer);
+    let mut pipeline = Pipeline::new(stream, source).pipe(preproc).pipe(infer);
 
     let mut frame_idx = 0usize;
     while let Some(result) = pipeline.next() {
@@ -56,8 +54,7 @@ fn main() -> Result<(), vrt::BoxError> {
                 for d in detections.iter().take(3) {
                     println!(
                         "  class={} score={:.2} [{:.0},{:.0},{:.0},{:.0}]",
-                        d.class_id, d.score,
-                        d.bbox[0], d.bbox[1], d.bbox[2], d.bbox[3],
+                        d.class_id, d.score, d.bbox[0], d.bbox[1], d.bbox[2], d.bbox[3],
                     );
                 }
             }

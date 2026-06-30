@@ -10,13 +10,13 @@
 //!   create/destroy pair (~10 µs) and the kernel itself.
 //! - **CPU path** (`process`): one H2D transfer then kernel.
 
-use std::sync::Arc;
-use std::ffi::c_void;
-use cudarc::driver::{CudaSlice, CudaStream, DevicePtr, PushKernelArg};
 use cudarc::driver::sys::CUdeviceptr;
+use cudarc::driver::{CudaSlice, CudaStream, DevicePtr, PushKernelArg};
+use std::ffi::c_void;
+use std::sync::Arc;
 
-use vrt::{Operator, ExecCtx, BoxError, VrtTensor, DType, VrtImage};
-use vrt::cuda::{Kernels, cfg_2d};
+use vrt::cuda::{cfg_2d, Kernels};
+use vrt::{BoxError, DType, ExecCtx, Operator, VrtImage, VrtTensor};
 
 /// Errors from GPU preprocessing.
 #[derive(Debug, thiserror::Error)]
@@ -33,10 +33,10 @@ pub enum PreprocError {
 
 extern "C" {
     fn preproc_create_tex2d(
-        dev_ptr:     *mut c_void,
-        width:       u32,
-        height:      u32,
-        pitch:       u32,
+        dev_ptr: *mut c_void,
+        width: u32,
+        height: u32,
+        pitch: u32,
         tex_obj_out: *mut u64,
     ) -> i32;
 
@@ -50,7 +50,7 @@ extern "C" {
 /// **Drop only after stream sync** — the kernel that reads through this texture
 /// must have completed before the texture object is destroyed.
 pub struct TextureGuard {
-    tex:  u64,
+    tex: u64,
     /// For the CPU path only: the H2D-copied device buffer backing this texture.
     _src: Option<CudaSlice<u8>>,
 }
@@ -58,7 +58,9 @@ pub struct TextureGuard {
 impl Drop for TextureGuard {
     fn drop(&mut self) {
         if self.tex != 0 {
-            unsafe { preproc_destroy_tex2d(self.tex); }
+            unsafe {
+                preproc_destroy_tex2d(self.tex);
+            }
         }
     }
 }
@@ -110,12 +112,16 @@ extern "C" __global__ void letterbox_rgba_to_chw(
 /// `_pending` holds the [`TextureGuard`] across enqueue → sync; dropped in
 /// [`finalize`](Stage::finalize) after the stream is synced.
 pub struct Preprocessor {
-    func:   cudarc::driver::CudaFunction,
+    func: cudarc::driver::CudaFunction,
     stream: Arc<CudaStream>,
-    src_w: u32, src_h: u32,
-    dst_w: u32, dst_h: u32,
-    scale: f32, pad_x: f32, pad_y: f32,
-    output:   VrtTensor,
+    src_w: u32,
+    src_h: u32,
+    dst_w: u32,
+    dst_h: u32,
+    scale: f32,
+    pad_x: f32,
+    pad_y: f32,
+    output: VrtTensor,
     _pending: Option<TextureGuard>,
 }
 
@@ -125,33 +131,47 @@ impl Preprocessor {
     /// output tensor on `stream`.
     pub fn new(
         stream: Arc<CudaStream>,
-        src_w: u32, src_h: u32,
-        dst_w: u32, dst_h: u32,
+        src_w: u32,
+        src_h: u32,
+        dst_w: u32,
+        dst_h: u32,
     ) -> Result<Self, PreprocError> {
         let kernels = Kernels::compile(stream.clone(), KERNEL_SRC)?;
-        let func    = kernels.function("letterbox_rgba_to_chw")?;
+        let func = kernels.function("letterbox_rgba_to_chw")?;
 
         let scale = f32::min(dst_w as f32 / src_w as f32, dst_h as f32 / src_h as f32);
         let pad_x = (dst_w as f32 - src_w as f32 * scale) * 0.5;
         let pad_y = (dst_h as f32 - src_h as f32 * scale) * 0.5;
 
-        let output = VrtTensor::alloc(
-            &stream,
-            [1, 3, dst_h as usize, dst_w as usize],
-            DType::F32,
-        )?;
+        let output = VrtTensor::alloc(&stream, [1, 3, dst_h as usize, dst_w as usize], DType::F32)?;
 
-        Ok(Self { func, stream, src_w, src_h, dst_w, dst_h, scale, pad_x, pad_y, output, _pending: None })
+        Ok(Self {
+            func,
+            stream,
+            src_w,
+            src_h,
+            dst_w,
+            dst_h,
+            scale,
+            pad_x,
+            pad_y,
+            output,
+            _pending: None,
+        })
     }
 
     /// The CUDA stream this preprocessor launches on.
-    pub fn stream(&self) -> &Arc<CudaStream> { &self.stream }
+    pub fn stream(&self) -> &Arc<CudaStream> {
+        &self.stream
+    }
 
     /// Drop a still-pending [`TextureGuard`] (error-recovery path).
     ///
     /// Call only after the stream has been synced — the texture must not be
     /// destroyed while a kernel may still read through it.
-    pub fn release_pending(&mut self) { self._pending = None; }
+    pub fn release_pending(&mut self) {
+        self._pending = None;
+    }
 
     /// H2D + kernel: RGBA host bytes → device, then letterbox into `dst_dev_ptr`.
     ///
@@ -172,7 +192,9 @@ impl Preprocessor {
         let rc = unsafe {
             preproc_create_tex2d(
                 raw_ptr as usize as *mut c_void,
-                self.src_w, self.src_h, src_pitch,
+                self.src_w,
+                self.src_h,
+                src_pitch,
                 &mut tex,
             )
         };
@@ -181,7 +203,10 @@ impl Preprocessor {
         }
 
         self.launch_kernel(tex, dst_dev_ptr)?;
-        Ok(TextureGuard { tex, _src: Some(src_dev) })
+        Ok(TextureGuard {
+            tex,
+            _src: Some(src_dev),
+        })
     }
 
     /// Zero-copy kernel: `src_dev_ptr` is already a CUDA device pointer.
@@ -197,11 +222,7 @@ impl Preprocessor {
     ) -> Result<TextureGuard, PreprocError> {
         let mut tex: u64 = 0;
         let rc = unsafe {
-            preproc_create_tex2d(
-                src_dev_ptr,
-                self.src_w, self.src_h, src_pitch,
-                &mut tex,
-            )
+            preproc_create_tex2d(src_dev_ptr, self.src_w, self.src_h, src_pitch, &mut tex)
         };
         if rc != 0 {
             return Err(PreprocError::TextureCreate(rc));
@@ -211,11 +232,7 @@ impl Preprocessor {
         Ok(TextureGuard { tex, _src: None })
     }
 
-    fn launch_kernel(
-        &self,
-        src_tex: u64,
-        dst_dev_ptr: *mut f32,
-    ) -> Result<(), PreprocError> {
+    fn launch_kernel(&self, src_tex: u64, dst_dev_ptr: *mut f32) -> Result<(), PreprocError> {
         let dst_raw: CUdeviceptr = dst_dev_ptr as usize as CUdeviceptr;
 
         let cfg = cfg_2d(self.dst_w as usize, self.dst_h as usize);
@@ -246,13 +263,14 @@ impl Preprocessor {
 // ── Stage impl ────────────────────────────────────────────────────────────────
 
 impl Operator for Preprocessor {
-    type Input   = VrtImage;
-    type Pending = VrtTensor;   // borrowed view of the reused output buffer
-    type Output  = ();
+    type Input = VrtImage;
+    type Pending = VrtTensor; // borrowed view of the reused output buffer
+    type Output = ();
 
     fn enqueue(&mut self, frame: &VrtImage, _ctx: &ExecCtx) -> Result<VrtTensor, BoxError> {
         debug_assert_eq!(
-            (frame.width(), frame.height()), (self.src_w, self.src_h),
+            (frame.width(), frame.height()),
+            (self.src_w, self.src_h),
             "VrtImage dims must match the dimensions this Preprocessor was built for"
         );
         // A still-pending texture means the previous frame never reached
@@ -269,7 +287,7 @@ impl Operator for Preprocessor {
     }
 
     fn finalize(&mut self, _pending: VrtTensor, _ctx: &ExecCtx) -> Result<(), BoxError> {
-        self._pending = None;   // drop the TextureGuard after the pipeline sync
+        self._pending = None; // drop the TextureGuard after the pipeline sync
         Ok(())
     }
 }

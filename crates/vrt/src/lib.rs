@@ -21,30 +21,33 @@
 //! - `Session` is `Send` but **not `Sync`** — IExecutionContext is not thread-safe.
 //!   Create one `Session` per thread from a shared `Arc<Engine>`.
 
-pub mod error;
-pub mod logger;
-pub mod runtime;
-pub mod engine;
 pub mod buffer;
-pub mod session;
-pub mod tensor;
-pub mod image;
-pub mod pipeline;
-pub mod model;
-pub mod cuda;
 #[cfg(feature = "builder")]
 pub mod builder;
+pub mod cuda;
+pub mod engine;
+pub mod error;
+pub mod image;
+pub mod logger;
+pub mod model;
+pub mod pipeline;
+pub mod runtime;
+pub mod session;
+pub mod tensor;
 
-pub use error::{TrtError, Result};
-pub use logger::Logger;
-pub use runtime::Runtime;
-pub use engine::{Engine, TensorSpec, TensorMode, DataType};
-pub use buffer::{DeviceBuffer, Stream, PinnedBuffer};
+pub use buffer::{DeviceBuffer, PinnedBuffer, Stream};
 pub use cudarc;
 pub use cudarc::driver::CudaStream;
-pub use vrt_sys::TENSORRT_VERSION;
-pub use session::{Session, OutputTensor};
+pub use engine::{DataType, Engine, TensorMode, TensorSpec};
+pub use error::{Result, TrtError};
+pub use image::{Format, VrtImage};
+pub use logger::Logger;
 pub use model::ModelSession;
-pub use tensor::{VrtTensor, DType, MemKind};
-pub use image::{VrtImage, Format};
-pub use pipeline::{Source, Sink, Operator, Chain, Fork, ExecCtx, FrameMeta, TRTensorMap, TrtInferStage, Pipeline, PipelineTiming, BoxError};
+pub use pipeline::{
+    BoxError, Chain, ExecCtx, Fork, FrameMeta, Operator, Pipeline, PipelineTiming, Sink, Source,
+    TRTensorMap, TrtInferStage,
+};
+pub use runtime::Runtime;
+pub use session::{OutputTensor, Session};
+pub use tensor::{DType, MemKind, VrtTensor};
+pub use vrt_sys::TENSORRT_VERSION;

@@ -24,39 +24,49 @@
 //! }
 //! ```
 
-use std::sync::Arc;
 use std::ffi::c_void;
+use std::sync::Arc;
 
 use cudarc::driver::CudaStream;
 
-use crate::engine::Engine;
-use crate::session::Session;
 use crate::buffer::Stream;
-use crate::tensor::VrtTensor;
-use crate::pipeline::TRTensorMap;
+use crate::engine::Engine;
 use crate::error::{Result, TrtError};
+use crate::pipeline::TRTensorMap;
+use crate::session::Session;
+use crate::tensor::VrtTensor;
 
 /// A TensorRT model bound to a CUDA stream — inference without the FFI sharp edges.
 pub struct ModelSession {
     session: Session,
-    inputs:  Vec<String>,
+    inputs: Vec<String>,
     outputs: Vec<String>,
 }
 
 impl ModelSession {
     /// Bind an engine to a shared pipeline stream.
     pub fn new(engine: Arc<Engine>, stream: Arc<CudaStream>) -> Result<Self> {
-        let inputs  = engine.input_names();
+        let inputs = engine.input_names();
         let outputs = engine.output_names();
         let session = Session::with_stream(engine, stream)?;
-        Ok(Self { session, inputs, outputs })
+        Ok(Self {
+            session,
+            inputs,
+            outputs,
+        })
     }
 
     /// Output tensor names, in engine order.
-    pub fn output_names(&self) -> &[String] { &self.outputs }
+    pub fn output_names(&self) -> &[String] {
+        &self.outputs
+    }
 
-    pub fn stream(&self) -> &Stream { self.session.stream() }
-    pub fn cuda_stream(&self) -> Arc<CudaStream> { self.session.stream().cuda_stream().clone() }
+    pub fn stream(&self) -> &Stream {
+        self.session.stream()
+    }
+    pub fn cuda_stream(&self) -> Arc<CudaStream> {
+        self.session.stream().cuda_stream().clone()
+    }
 
     /// Run inference on a single device input, returning the device outputs.
     ///
@@ -72,7 +82,8 @@ impl ModelSession {
             }
             names => Err(TrtError::Trt(format!(
                 "model has {} inputs {:?}; use run_inputs() to bind by name",
-                names.len(), names
+                names.len(),
+                names
             ))),
         }
     }
@@ -81,15 +92,14 @@ impl ModelSession {
     ///
     /// Leaves outputs in GPU memory; the caller (the pipeline) syncs the stream
     /// once, then reads via the returned [`TRTensorMap`].
-    pub fn run_inputs(
-        &mut self,
-        inputs: &[(&str, &VrtTensor)],
-    ) -> Result<TRTensorMap> {
+    pub fn run_inputs(&mut self, inputs: &[(&str, &VrtTensor)]) -> Result<TRTensorMap> {
         // Own the shape vecs, then borrow them for the FFI binding slice.
-        let owned: Vec<(&str, *mut c_void, Vec<i64>)> = inputs.iter()
+        let owned: Vec<(&str, *mut c_void, Vec<i64>)> = inputs
+            .iter()
             .map(|(n, t)| (*n, t.as_mut_ptr(), t.shape_i64()))
             .collect();
-        let binds: Vec<(&str, *mut c_void, &[i64])> = owned.iter()
+        let binds: Vec<(&str, *mut c_void, &[i64])> = owned
+            .iter()
             .map(|(n, p, s)| (*n, *p, s.as_slice()))
             .collect();
         // SAFETY: every pointer comes from a live VrtTensor borrowed for this
@@ -98,5 +108,4 @@ impl ModelSession {
         let views = unsafe { self.session.run_device_inputs_on_device(&binds)? };
         Ok(TRTensorMap::new(views))
     }
-
 }

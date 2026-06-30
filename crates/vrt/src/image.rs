@@ -22,7 +22,7 @@ impl Format {
     pub fn bytes_per_pixel(self) -> usize {
         match self {
             Format::Rgba8 => 4,
-            Format::Rgb8  => 3,
+            Format::Rgb8 => 3,
             Format::Gray8 => 1,
         }
     }
@@ -37,12 +37,12 @@ impl Format {
 /// The backing memory is owned elsewhere (an NVMM import, a CUDA allocation) —
 /// the producer must keep it alive for the duration of any GPU work reading it.
 pub struct VrtImage {
-    ptr:    *mut std::ffi::c_void,
-    width:  u32,
+    ptr: *mut std::ffi::c_void,
+    width: u32,
     height: u32,
-    pitch:  u32,
+    pitch: u32,
     format: Format,
-    kind:   MemKind,
+    kind: MemKind,
 }
 
 // SAFETY: device pointer is stable; callers enforce CUDA ordering via the stream.
@@ -55,21 +55,40 @@ impl VrtImage {
     /// `ptr` must point to at least `pitch * height` bytes of valid device
     /// memory in `format`, alive for the duration of any GPU work reading it.
     pub unsafe fn borrowed(
-        ptr:    *mut std::ffi::c_void,
-        width:  u32,
+        ptr: *mut std::ffi::c_void,
+        width: u32,
         height: u32,
-        pitch:  u32,
+        pitch: u32,
         format: Format,
-        kind:   MemKind,
+        kind: MemKind,
     ) -> Self {
-        Self { ptr, width, height, pitch, format, kind }
+        Self {
+            ptr,
+            width,
+            height,
+            pitch,
+            format,
+            kind,
+        }
     }
 
-    pub fn as_ptr(&self) -> *mut std::ffi::c_void { self.ptr }
-    pub fn width(&self) -> u32 { self.width }
-    pub fn height(&self) -> u32 { self.height }
+    pub fn as_ptr(&self) -> *mut std::ffi::c_void {
+        self.ptr
+    }
+    pub fn width(&self) -> u32 {
+        self.width
+    }
+    pub fn height(&self) -> u32 {
+        self.height
+    }
     /// Row stride in bytes (≥ `width * format.bytes_per_pixel()`).
-    pub fn pitch(&self) -> u32 { self.pitch }
-    pub fn format(&self) -> Format { self.format }
-    pub fn kind(&self) -> MemKind { self.kind }
+    pub fn pitch(&self) -> u32 {
+        self.pitch
+    }
+    pub fn format(&self) -> Format {
+        self.format
+    }
+    pub fn kind(&self) -> MemKind {
+        self.kind
+    }
 }

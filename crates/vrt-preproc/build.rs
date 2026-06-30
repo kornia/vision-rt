@@ -1,6 +1,14 @@
 fn main() {
-    let cuda_home = std::env::var("CUDA_HOME")
-        .unwrap_or_else(|_| "/usr/local/cuda".into());
+    // Stub mode (docs.rs / hosted CI without CUDA): skip the C++ helper
+    // compile and link directives. `cargo check`/`clippy` typecheck the FFI
+    // without linking; anything that links or runs requires a real CUDA install.
+    if std::env::var("DOCS_RS").is_ok() || std::env::var("TRT_STUB").is_ok() {
+        println!("cargo:rerun-if-env-changed=TRT_STUB");
+        return;
+    }
+    println!("cargo:rerun-if-env-changed=TRT_STUB");
+
+    let cuda_home = std::env::var("CUDA_HOME").unwrap_or_else(|_| "/usr/local/cuda".into());
 
     cc::Build::new()
         .cpp(true)

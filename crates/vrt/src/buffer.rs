@@ -1,10 +1,13 @@
-use std::sync::Arc;
-use cudarc::driver::{CudaContext, CudaSlice, CudaStream, DevicePtr, DriverError};
 use crate::error::{Result, TrtError};
-use vrt_sys::{btrt_cuda_memcpy_d2h, btrt_cuda_host_alloc, btrt_cuda_host_free};
+use cudarc::driver::{CudaContext, CudaSlice, CudaStream, DevicePtr, DriverError};
+use std::sync::Arc;
+use vrt_sys::{btrt_cuda_host_alloc, btrt_cuda_host_free, btrt_cuda_memcpy_d2h};
 
 fn driver_err(e: DriverError, msg: &'static str) -> TrtError {
-    TrtError::Cuda { code: e.0 as i32, msg }
+    TrtError::Cuda {
+        code: e.0 as i32,
+        msg,
+    }
 }
 
 /// Page-locked (pinned), **cacheable** host memory for async D2H result reads.
@@ -32,16 +35,23 @@ impl<T: Copy + Default> PinnedBuffer<T> {
         let bytes = len * std::mem::size_of::<T>();
         let rc = unsafe { btrt_cuda_host_alloc(&mut ptr, bytes) };
         if rc != 0 || ptr.is_null() {
-            return Err(TrtError::Cuda { code: rc, msg: "cudaHostAlloc" });
+            return Err(TrtError::Cuda {
+                code: rc,
+                msg: "cudaHostAlloc",
+            });
         }
         let ptr = ptr as *mut T;
         // Zero so an unfilled tail (count < capacity) reads as default, not garbage.
-        unsafe { std::ptr::write_bytes(ptr, 0, len); }
+        unsafe {
+            std::ptr::write_bytes(ptr, 0, len);
+        }
         Ok(Self { ptr, len })
     }
 
     /// Raw host pointer (D2H destination).
-    pub fn as_mut_ptr(&mut self) -> *mut T { self.ptr }
+    pub fn as_mut_ptr(&mut self) -> *mut T {
+        self.ptr
+    }
     /// Host slice — valid only after the stream that copied into it has synced.
     pub fn as_slice(&self) -> &[T] {
         unsafe { std::slice::from_raw_parts(self.ptr, self.len) }
@@ -50,7 +60,9 @@ impl<T: Copy + Default> PinnedBuffer<T> {
 
 impl<T> Drop for PinnedBuffer<T> {
     fn drop(&mut self) {
-        unsafe { btrt_cuda_host_free(self.ptr as *mut std::ffi::c_void); }
+        unsafe {
+            btrt_cuda_host_free(self.ptr as *mut std::ffi::c_void);
+        }
     }
 }
 
@@ -152,8 +164,10 @@ impl Stream {
     /// stages.  All stages that call `Session::with_stream` with the same arc
     /// are guaranteed to share one CUDA stream.
     pub fn new_standalone() -> Result<Self> {
-        let ctx = CudaContext::new(0)
-            .map_err(|e| TrtError::Cuda { code: e.0 as i32, msg: "CudaContext::new" })?;
+        let ctx = CudaContext::new(0).map_err(|e| TrtError::Cuda {
+            code: e.0 as i32,
+            msg: "CudaContext::new",
+        })?;
         // Single stream per pipeline, one sync per frame — no cross-stream buffer
         // hazards, so cudarc's per-op event tracking is pure overhead.  Disabling
         // it drops the per-alloc event creation + thousands of cuStreamWaitEvent /
@@ -161,7 +175,9 @@ impl Stream {
         // SAFETY: every buffer in a pipeline is allocated, used, and freed on this
         // one stream (stream-ordered) — none crosses streams, so the manual-sync
         // contract of disable_event_tracking holds.
-        unsafe { ctx.disable_event_tracking(); }
+        unsafe {
+            ctx.disable_event_tracking();
+        }
         Self::new(&ctx)
     }
 
@@ -174,13 +190,16 @@ impl Stream {
     /// `src` must be a valid CUDA device pointer of at least `bytes` bytes.
     pub unsafe fn memcpy_d2h_raw(
         &self,
-        dst:   *mut u8,
-        src:   *const std::ffi::c_void,
+        dst: *mut u8,
+        src: *const std::ffi::c_void,
         bytes: usize,
     ) -> Result<()> {
         let rc = btrt_cuda_memcpy_d2h(dst as *mut _, src as *const _, bytes, self.as_raw());
         if rc != 0 {
-            return Err(TrtError::Cuda { code: rc, msg: "cudaMemcpyAsync D2H" });
+            return Err(TrtError::Cuda {
+                code: rc,
+                msg: "cudaMemcpyAsync D2H",
+            });
         }
         Ok(())
     }

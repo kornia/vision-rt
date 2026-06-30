@@ -23,10 +23,10 @@
 //! # Ok::<(), vrt::TrtError>(())
 //! ```
 
-use std::sync::Arc;
+use crate::error::{Result, TrtError};
 use cudarc::driver::{CudaFunction, CudaModule, CudaStream, LaunchConfig};
 use cudarc::nvrtc::{compile_ptx_with_opts, CompileOptions};
-use crate::error::{Result, TrtError};
+use std::sync::Arc;
 
 /// Repo-standard 2D image block: x = warp size for coalescing, 256 threads.
 pub const BLOCK_2D: (u32, u32) = (32, 8);
@@ -49,30 +49,32 @@ impl Kernels {
     /// default `/usr/local/cuda/include`) is on the search path, so kernels
     /// may `#include` CUDA headers (e.g. `<cuda_texture_types.h>`).
     pub fn compile(stream: Arc<CudaStream>, src: &str) -> Result<Self> {
-        let (major, minor) = stream.context().compute_capability()
+        let (major, minor) = stream
+            .context()
+            .compute_capability()
             .map_err(TrtError::from)?;
-        let cuda_inc = std::env::var("CUDA_HOME")
-            .unwrap_or_else(|_| "/usr/local/cuda".into()) + "/include";
+        let cuda_inc =
+            std::env::var("CUDA_HOME").unwrap_or_else(|_| "/usr/local/cuda".into()) + "/include";
         let opts = CompileOptions {
-            options:       vec![format!("--gpu-architecture=sm_{major}{minor}")],
+            options: vec![format!("--gpu-architecture=sm_{major}{minor}")],
             include_paths: vec![cuda_inc],
             ..Default::default()
         };
-        let ptx = compile_ptx_with_opts(src, opts)
-            .map_err(|e| TrtError::Nvrtc(format!("{e:?}")))?;
-        let module = stream.context().load_module(ptx)
-            .map_err(TrtError::from)?;
+        let ptx =
+            compile_ptx_with_opts(src, opts).map_err(|e| TrtError::Nvrtc(format!("{e:?}")))?;
+        let module = stream.context().load_module(ptx).map_err(TrtError::from)?;
         Ok(Self { module, stream })
     }
 
     /// Look up a compiled `extern "C" __global__` function by name.
     pub fn function(&self, name: &str) -> Result<CudaFunction> {
-        self.module.load_function(name)
-            .map_err(TrtError::from)
+        self.module.load_function(name).map_err(TrtError::from)
     }
 
     /// The stream kernels from this module launch on.
-    pub fn stream(&self) -> &Arc<CudaStream> { &self.stream }
+    pub fn stream(&self) -> &Arc<CudaStream> {
+        &self.stream
+    }
 }
 
 /// Ceil-div 2D launch config covering `w × h` with the standard
@@ -80,7 +82,7 @@ impl Kernels {
 pub fn cfg_2d(w: usize, h: usize) -> LaunchConfig {
     let (bx, by) = BLOCK_2D;
     LaunchConfig {
-        grid_dim:  ((w as u32).div_ceil(bx), (h as u32).div_ceil(by), 1),
+        grid_dim: ((w as u32).div_ceil(bx), (h as u32).div_ceil(by), 1),
         block_dim: (bx, by, 1),
         shared_mem_bytes: 0,
     }
@@ -89,7 +91,7 @@ pub fn cfg_2d(w: usize, h: usize) -> LaunchConfig {
 /// Ceil-div 1D launch config covering `n` items with `block` threads/block.
 pub fn cfg_1d(n: usize, block: u32) -> LaunchConfig {
     LaunchConfig {
-        grid_dim:  ((n as u32).div_ceil(block), 1, 1),
+        grid_dim: ((n as u32).div_ceil(block), 1, 1),
         block_dim: (block, 1, 1),
         shared_mem_bytes: 0,
     }
@@ -99,7 +101,7 @@ pub fn cfg_1d(n: usize, block: u32) -> LaunchConfig {
 /// kernels (e.g. one block per keypoint, one thread per descriptor channel).
 pub fn cfg_per_item(items: usize, threads: u32) -> LaunchConfig {
     LaunchConfig {
-        grid_dim:  (items as u32, 1, 1),
+        grid_dim: (items as u32, 1, 1),
         block_dim: (threads, 1, 1),
         shared_mem_bytes: 0,
     }

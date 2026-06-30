@@ -17,7 +17,7 @@
 //! # Ok::<(), vrt::BoxError>(())
 //! ```
 
-use crate::error::{Result, TrtError, last_trt_error};
+use crate::error::{last_trt_error, Result, TrtError};
 use crate::logger::Logger;
 
 /// A dynamic-shape optimization profile: `(input_name, min, opt, max)` dims.
@@ -25,10 +25,10 @@ pub type ShapeProfile = (String, Vec<i64>, Vec<i64>, Vec<i64>);
 
 /// Builder for serialized TensorRT engines from ONNX files.
 pub struct EngineBuilder {
-    onnx_path:       String,
-    fp16:            bool,
+    onnx_path: String,
+    fp16: bool,
     workspace_bytes: i64,
-    profile:         Option<ShapeProfile>,
+    profile: Option<ShapeProfile>,
 }
 
 impl EngineBuilder {
@@ -36,10 +36,10 @@ impl EngineBuilder {
     /// resolved relative to the file by the parser.
     pub fn from_onnx(path: impl Into<String>) -> Self {
         Self {
-            onnx_path:       path.into(),
-            fp16:            true,
+            onnx_path: path.into(),
+            fp16: true,
             workspace_bytes: 2048 << 20,
-            profile:         None,
+            profile: None,
         }
     }
 
@@ -86,9 +86,21 @@ impl EngineBuilder {
                 }
                 let c = std::ffi::CString::new(name.as_str())
                     .map_err(|_| TrtError::Create("input name contains NUL"))?;
-                (Some(c), min.as_ptr(), opt.as_ptr(), max.as_ptr(), min.len() as i32)
+                (
+                    Some(c),
+                    min.as_ptr(),
+                    opt.as_ptr(),
+                    max.as_ptr(),
+                    min.len() as i32,
+                )
             }
-            None => (None, std::ptr::null(), std::ptr::null(), std::ptr::null(), 0),
+            None => (
+                None,
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                0,
+            ),
         };
 
         let mut blob: *mut u8 = std::ptr::null_mut();
@@ -99,7 +111,10 @@ impl EngineBuilder {
                 c_path.as_ptr(),
                 self.fp16 as i32,
                 c_input.as_ref().map_or(std::ptr::null(), |c| c.as_ptr()),
-                min, opt, max, ndims,
+                min,
+                opt,
+                max,
+                ndims,
                 self.workspace_bytes,
                 &mut blob,
                 &mut len,
@@ -107,7 +122,8 @@ impl EngineBuilder {
         };
         if rc != 0 || blob.is_null() {
             return Err(TrtError::Trt(format!(
-                "engine build failed (rc={rc}): {}", last_trt_error()
+                "engine build failed (rc={rc}): {}",
+                last_trt_error()
             )));
         }
 
