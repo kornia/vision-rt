@@ -19,7 +19,7 @@ jobs:
           components: rustfmt
       - run: cargo fmt --all --check
 
-  # Hosted x86 runner: no TensorRT/CUDA — vrt-sys and vrt-preproc run in stub
+  # Hosted x86 runner: no TensorRT/CUDA — trt-sys and vrt-preproc run in stub
   # mode (TRT_STUB=1: committed pregenerated bindings, no native compile/link).
   # Jetson-only crates (vrt-gst, nvbuf-sys) are excluded.
   check:
@@ -35,12 +35,12 @@ jobs:
       - name: cargo check (stub)
         run: >
           cargo check
-          -p vrt-sys -p vision-rt -p vrt-preproc
+          -p trt-sys -p vision-rt -p vrt-preproc
           -p vrt-xfeat -p vrt-hub
       - name: cargo clippy (stub)
         run: >
           cargo clippy
-          -p vrt-sys -p vision-rt -p vrt-preproc
+          -p trt-sys -p vision-rt -p vrt-preproc
           -p vrt-xfeat -p vrt-hub
           -- -D warnings
       - name: cargo clippy (builder feature)

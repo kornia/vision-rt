@@ -2340,6 +2340,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "trt-sys"
+version = "0.1.0"
+dependencies = [
+ "bindgen",
+ "cc",
+]
+
+[[package]]
 name = "try-lock"
 version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2444,7 +2452,7 @@ dependencies = [
  "half",
  "log",
  "thiserror",
- "vrt-sys",
+ "trt-sys",
 ]
 
 [[package]]
@@ -2466,14 +2474,6 @@ dependencies = [
  "cudarc",
  "thiserror",
  "vision-rt",
-]
-
-[[package]]
-name = "vrt-sys"
-version = "0.1.0"
-dependencies = [
- "bindgen",
- "cc",
 ]
 
 [[package]]

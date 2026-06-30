@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/vrt-sys",
+    "crates/trt-sys",
     "crates/vrt",
     "crates/vrt-preproc",
     "crates/vrt-xfeat",

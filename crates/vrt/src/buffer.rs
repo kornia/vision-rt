@@ -1,7 +1,7 @@
 use crate::error::{Result, TrtError};
 use cudarc::driver::{CudaContext, CudaSlice, CudaStream, DevicePtr, DriverError};
 use std::sync::Arc;
-use vrt_sys::{btrt_cuda_host_alloc, btrt_cuda_host_free, btrt_cuda_memcpy_d2h};
+use trt_sys::{btrt_cuda_host_alloc, btrt_cuda_host_free, btrt_cuda_memcpy_d2h};
 
 fn driver_err(e: DriverError, msg: &'static str) -> TrtError {
     TrtError::Cuda {

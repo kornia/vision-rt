@@ -3,7 +3,7 @@ use crate::{
     logger::Logger,
 };
 use std::sync::Arc;
-use vrt_sys::{btrt_runtime_create, btrt_runtime_destroy, btrt_runtime_t};
+use trt_sys::{btrt_runtime_create, btrt_runtime_destroy, btrt_runtime_t};
 
 /// Wraps `nvinfer1::IRuntime`. Safe to clone (Arc) and share across threads.
 ///

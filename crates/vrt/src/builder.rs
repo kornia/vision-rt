@@ -106,7 +106,7 @@ impl EngineBuilder {
         let mut blob: *mut u8 = std::ptr::null_mut();
         let mut len: usize = 0;
         let rc = unsafe {
-            vrt_sys::btrt_build_engine_from_onnx(
+            trt_sys::btrt_build_engine_from_onnx(
                 logger.as_ptr(),
                 c_path.as_ptr(),
                 self.fp16 as i32,
@@ -128,7 +128,7 @@ impl EngineBuilder {
         }
 
         let bytes = unsafe { std::slice::from_raw_parts(blob, len) }.to_vec();
-        unsafe { vrt_sys::btrt_blob_free(blob) };
+        unsafe { trt_sys::btrt_blob_free(blob) };
         Ok(bytes)
     }
 }

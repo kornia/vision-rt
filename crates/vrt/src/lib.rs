@@ -50,4 +50,4 @@ pub use pipeline::{
 pub use runtime::Runtime;
 pub use session::{OutputTensor, Session};
 pub use tensor::{DType, MemKind, VrtTensor};
-pub use vrt_sys::TENSORRT_VERSION;
+pub use trt_sys::TENSORRT_VERSION;

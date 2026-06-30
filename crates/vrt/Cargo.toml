@@ -12,10 +12,10 @@ name = "vrt"
 [features]
 default = []
 # In-process ONNX -> engine builder (links libnvonnxparser via trt-sys)
-builder = ["vrt-sys/builder"]
+builder = ["trt-sys/builder"]
 
 [dependencies]
-vrt-sys = { path = "../vrt-sys" }
+trt-sys = { path = "../trt-sys" }
 thiserror = "2.0"
 log = "0.4"
 half = "2.4"

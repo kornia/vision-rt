@@ -1,6 +1,6 @@
 use std::ffi::CStr;
 use std::sync::Arc;
-use vrt_sys::{btrt_logger_create, btrt_logger_destroy, btrt_logger_set_callback, btrt_logger_t};
+use trt_sys::{btrt_logger_create, btrt_logger_destroy, btrt_logger_set_callback, btrt_logger_t};
 
 /// TRT log severity (mirrors ILogger::Severity).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]

@@ -9,7 +9,7 @@ use crate::{
     tensor::{DType, MemKind, VrtTensor},
 };
 use cudarc::driver::{CudaContext, CudaStream};
-use vrt_sys::*;
+use trt_sys::*;
 
 /// Map an engine I/O [`DataType`] to a tensor [`DType`].
 ///
