@@ -182,7 +182,7 @@ impl Preprocessor {
         src_pitch: u32,
         dst_dev_ptr: *mut f32,
     ) -> Result<TextureGuard, PreprocError> {
-        let src_dev = self.stream.memcpy_stod(rgba_host)?;
+        let src_dev = self.stream.clone_htod(rgba_host)?;
         let raw_ptr: u64 = {
             let (ptr, _guard) = src_dev.device_ptr(self.stream.as_ref());
             ptr

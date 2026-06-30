@@ -19,4 +19,4 @@ trt-sys = { path = "../trt-sys" }
 thiserror = "2.0"
 log = "0.4"
 half = "2.4"
-cudarc = { version = "0.17", features = ["cuda-12060", "nvrtc"] }
+cudarc = { workspace = true }

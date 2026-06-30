@@ -103,7 +103,7 @@ impl DeviceBuffer {
     pub fn copy_to_host(&self, dst: &mut Vec<u8>, stream: &Stream) -> Result<()> {
         *dst = stream
             .inner
-            .memcpy_dtov(&self.slice)
+            .clone_dtoh(&self.slice)
             .map_err(|e| driver_err(e, "cudaMemcpyD2H"))?;
         Ok(())
     }

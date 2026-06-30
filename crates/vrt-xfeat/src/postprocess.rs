@@ -657,9 +657,9 @@ impl XFeatPostproc {
         }
 
         self.stream.synchronize()?;
-        let match12: Vec<i32> = self.stream.memcpy_dtov(&match12_dev)?;
-        let match21: Vec<i32> = self.stream.memcpy_dtov(&match21_dev)?;
-        let sim12: Vec<f32> = self.stream.memcpy_dtov(&sim12_dev)?;
+        let match12: Vec<i32> = self.stream.clone_dtoh(&match12_dev)?;
+        let match21: Vec<i32> = self.stream.clone_dtoh(&match21_dev)?;
+        let sim12: Vec<f32> = self.stream.clone_dtoh(&sim12_dev)?;
 
         let pairs = (0..n0)
             .filter(|&i| {
@@ -765,14 +765,14 @@ mod gpu_tests {
             let h1 = random_descs(n1, 7);
 
             let r0 = XFeatResult {
-                kpts: stream.memcpy_stod(&vec![0.0f32; n0 * 2]).unwrap(),
-                descs: stream.memcpy_stod(&h0).unwrap(),
+                kpts: stream.clone_htod(&vec![0.0f32; n0 * 2]).unwrap(),
+                descs: stream.clone_htod(&h0).unwrap(),
                 scores: vec![1.0; n0],
                 kpts_cpu: Vec::new(),
             };
             let r1 = XFeatResult {
-                kpts: stream.memcpy_stod(&vec![0.0f32; n1 * 2]).unwrap(),
-                descs: stream.memcpy_stod(&h1).unwrap(),
+                kpts: stream.clone_htod(&vec![0.0f32; n1 * 2]).unwrap(),
+                descs: stream.clone_htod(&h1).unwrap(),
                 scores: vec![1.0; n1],
                 kpts_cpu: Vec::new(),
             };
@@ -806,8 +806,8 @@ mod gpu_tests {
         let pp = XFeatPostproc::new(stream.clone(), 4096, 0.05).unwrap();
 
         let n = 4096usize;
-        let d0 = stream.memcpy_stod(&random_descs(n, 42)).unwrap();
-        let d1 = stream.memcpy_stod(&random_descs(n, 7)).unwrap();
+        let d0 = stream.clone_htod(&random_descs(n, 42)).unwrap();
+        let d1 = stream.clone_htod(&random_descs(n, 7)).unwrap();
         let m12: CudaSlice<i32> = unsafe { stream.alloc(n).unwrap() };
         let s12: CudaSlice<f32> = unsafe { stream.alloc(n).unwrap() };
 
@@ -867,7 +867,7 @@ mod gpu_compact_tests {
         scores[100] = 0.9;
         scores[999] = 0.7;
         scores[500] = 0.1;
-        let score_dev = stream.memcpy_stod(&scores).unwrap();
+        let score_dev = stream.clone_htod(&scores).unwrap();
 
         // Constant-per-channel descriptor map: sampled vector = (c+1) before norm.
         let mut desc_map = vec![0.0f32; 64 * hd * wd];
@@ -876,7 +876,7 @@ mod gpu_compact_tests {
                 desc_map[c * hd * wd + i] = (c + 1) as f32;
             }
         }
-        let desc_dev = stream.memcpy_stod(&desc_map).unwrap();
+        let desc_dev = stream.clone_htod(&desc_map).unwrap();
         let desc_ptr = {
             use cudarc::driver::DevicePtr;
             desc_dev.device_ptr(stream.as_ref()).0 as *const f32
@@ -903,7 +903,7 @@ mod gpu_compact_tests {
 
         // Descriptors (count rows of the capacity-K buffer) must be L2-normalized
         // samples of the constant map.
-        let descs: Vec<f32> = stream.memcpy_dtov(&res.descs).unwrap();
+        let descs: Vec<f32> = stream.clone_dtoh(&res.descs).unwrap();
         for row in descs.chunks_exact(64).take(res.scores.len()) {
             let norm: f32 = row.iter().map(|v| v * v).sum::<f32>().sqrt();
             assert!(

@@ -96,7 +96,7 @@ fn main() -> Result<(), vrt::BoxError> {
     for px in resized.pixels() {
         rgba.extend_from_slice(&[px[0], px[1], px[2], 255]);
     }
-    let backing: CudaSlice<u8> = stream.memcpy_stod(&rgba)?;
+    let backing: CudaSlice<u8> = stream.clone_htod(&rgba)?;
     let ptr = backing.device_ptr(stream.as_ref()).0 as *mut c_void;
 
     let source = StaticImageSource {

@@ -10,7 +10,7 @@ description = "XFeat post-processing: NMS, TopK keypoint selection, descriptor s
 name = "vrt_xfeat"
 
 [dependencies]
-cudarc      = { version = "0.17", features = ["cuda-12060", "nvrtc"] }
+cudarc = { workspace = true }
 vision-rt   = { path = "../vrt" }
 vrt-preproc = { path = "../vrt-preproc" }
 thiserror   = "2.0"

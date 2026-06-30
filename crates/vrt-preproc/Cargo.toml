@@ -13,6 +13,6 @@ name = "vrt_preproc"
 cc = "1"
 
 [dependencies]
-cudarc    = { version = "0.17", features = ["cuda-12060", "nvrtc"] }
+cudarc = { workspace = true }
 vision-rt = { path = "../vrt" }
 thiserror = "2.0"

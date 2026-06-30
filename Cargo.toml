@@ -10,6 +10,18 @@ members = [
     "examples/xfeat_bench",
 ]
 
+[workspace.dependencies]
+# One cudarc across the workspace, matching kornia-rs's cudarc feature set so cargo
+# unifies to a single build (shared CudaStream/CudaSlice types for zero-copy interop).
+cudarc = { version = "0.19", default-features = false, features = [
+  "cuda-version-from-build-system",
+  "driver",
+  "nvrtc",
+  "std",
+  "fallback-dynamic-loading",
+  "fallback-latest",
+] }
+
 [workspace.package]
 version = "0.1.0"
 edition = "2021"

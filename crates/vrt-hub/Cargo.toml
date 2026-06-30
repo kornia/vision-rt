@@ -20,5 +20,5 @@ builder = ["vision-rt/builder"]
 vision-rt = { path = "../vrt" }
 sha2      = "0.10"
 thiserror = "2.0"
-cudarc    = { version = "0.17", features = ["cuda-12060"] }
+cudarc = { workspace = true }
 hf-hub = { version = "0.4", optional = true }
