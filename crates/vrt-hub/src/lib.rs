@@ -39,6 +39,8 @@ pub enum HubError {
     Io(#[from] std::io::Error),
     #[error("unknown model '{0}' — see vrt_hub::REGISTRY for known names")]
     UnknownModel(String),
+    #[error("invalid model name '{0}' — must be a single path component (no '/', '\\', or '..')")]
+    InvalidName(String),
     #[error("model '{0}' has no files in the registry")]
     EmptyModel(String),
     #[error("sha256 mismatch for {path}: expected {expected}, got {actual} (corrupted download? delete and retry)")]
@@ -132,7 +134,12 @@ impl ModelHub {
         let mut entry: Option<PathBuf> = None;
         for f in spec.files {
             let path = repo.get(f.filename)?;
-            verify_sha256(&path, f.sha256)?;
+            if let Err(e) = verify_sha256(&path, f.sha256) {
+                // Remove the bad file so a retry re-downloads instead of
+                // re-verifying the same corrupt bytes from the HF cache forever.
+                let _ = fs::remove_file(&path);
+                return Err(e);
+            }
             if entry.is_none() {
                 entry = Some(path);
             }
@@ -196,6 +203,21 @@ impl Default for EngineProfile {
     }
 }
 
+impl EngineProfile {
+    /// Short hash of the build options that affect the produced engine, so the
+    /// cache key changes when the profile does (different precision or shape
+    /// profile must NOT collide with a previously-built engine).
+    fn cache_tag(&self) -> String {
+        let mut s = format!("fp16={};ws={};", self.fp16, self.workspace_mb);
+        if let Some((input, min, opt, max)) = &self.input {
+            s.push_str(&format!("in={input};min={min:?};opt={opt:?};max={max:?}"));
+        }
+        let mut h = Sha256::new();
+        h.update(s.as_bytes());
+        format!("{:x}", h.finalize())[..8].to_string()
+    }
+}
+
 /// On-device engine cache keyed by ONNX content + TRT version + GPU arch.
 ///
 /// Key: `<name>-<onnx_sha8>-trt<version>-sm<cc>.engine` under
@@ -221,14 +243,31 @@ impl EngineCache {
         Self { dir: dir.into() }
     }
 
-    /// Cache path for a model — exists or not.
-    pub fn key_path(&self, name: &str, onnx: &Path) -> Result<PathBuf, HubError> {
+    /// Cache path for a model under a given build profile — exists or not.
+    ///
+    /// The key folds in the build profile (precision + shape profile) so a
+    /// different profile can't be served a previously-built incompatible engine.
+    pub fn key_path(
+        &self,
+        name: &str,
+        onnx: &Path,
+        profile: &EngineProfile,
+    ) -> Result<PathBuf, HubError> {
+        // `name` becomes a path component — reject anything that could escape dir.
+        if name.is_empty()
+            || name.contains('/')
+            || name.contains('\\')
+            || name.split(['/', '\\']).any(|c| c == "..")
+        {
+            return Err(HubError::InvalidName(name.into()));
+        }
         let onnx_sha8 = &sha256_file(onnx)?[..8];
+        let cfg = profile.cache_tag();
         let trt_ver = vrt::TENSORRT_VERSION;
         let sm = compute_capability()?;
-        Ok(self
-            .dir
-            .join(format!("{name}-{onnx_sha8}-trt{trt_ver}-sm{sm}.engine")))
+        Ok(self.dir.join(format!(
+            "{name}-{onnx_sha8}-{cfg}-trt{trt_ver}-sm{sm}.engine"
+        )))
     }
 
     /// Return the cached engine for (`name`, `onnx`), building it on-device
@@ -242,7 +281,7 @@ impl EngineCache {
         onnx: &Path,
         profile: &EngineProfile,
     ) -> Result<PathBuf, HubError> {
-        let path = self.key_path(name, onnx)?;
+        let path = self.key_path(name, onnx, profile)?;
         if path.exists() {
             return Ok(path);
         }
@@ -354,7 +393,12 @@ fn which(bin: &str) -> bool {
 
 #[cfg(not(feature = "builder"))]
 fn tempfile_path(ext: &str) -> Result<PathBuf, HubError> {
-    Ok(std::env::temp_dir().join(format!("vrt-hub-{}.{ext}", std::process::id())))
+    // PID + a process-unique counter: two concurrent get_or_build calls for
+    // DIFFERENT models in one process must not write to the same trtexec target.
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let n = SEQ.fetch_add(1, Ordering::Relaxed);
+    Ok(std::env::temp_dir().join(format!("vrt-hub-{}-{n}.{ext}", std::process::id())))
 }
 
 #[cfg(test)]
@@ -376,6 +420,47 @@ mod tests {
             "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
         );
         let _ = fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn profile_changes_cache_tag() {
+        // Different build options must hash to different tags, so the engine
+        // cache key never serves an incompatible engine as a hit.
+        let base = EngineProfile::default();
+        let diff_prec = EngineProfile {
+            fp16: !base.fp16,
+            ..EngineProfile::default()
+        };
+        let shaped = EngineProfile {
+            input: Some((
+                "x".into(),
+                vec![1, 3, 64, 64],
+                vec![1, 3, 64, 64],
+                vec![1, 3, 64, 64],
+            )),
+            ..EngineProfile::default()
+        };
+        assert_ne!(base.cache_tag(), diff_prec.cache_tag());
+        assert_ne!(base.cache_tag(), shaped.cache_tag());
+        // Deterministic.
+        assert_eq!(base.cache_tag(), EngineProfile::default().cache_tag());
+    }
+
+    #[test]
+    fn key_path_rejects_unsafe_names() {
+        // The name check runs before any CUDA call, so this is host-only.
+        let cache = EngineCache::at("/tmp/vrt-hub-test-cache");
+        let onnx = Path::new("/nonexistent.onnx");
+        let prof = EngineProfile::default();
+        for bad in ["../escape", "a/b", "..", "a\\b", ""] {
+            assert!(
+                matches!(
+                    cache.key_path(bad, onnx, &prof),
+                    Err(HubError::InvalidName(_))
+                ),
+                "expected InvalidName for {bad:?}"
+            );
+        }
     }
 }
 
