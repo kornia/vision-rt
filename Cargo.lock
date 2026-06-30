@@ -1782,6 +1782,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "rfdetr_kpts_check"
+version = "0.1.0"
+dependencies = [
+ "kornia-image",
+ "kornia-io",
+ "vision-rt",
+ "vrt-rfdetr-kpts",
+]
+
+[[package]]
 name = "ring"
 version = "0.17.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2416,6 +2426,17 @@ dependencies = [
 
 [[package]]
 name = "vrt-rfdetr"
+version = "0.1.0"
+dependencies = [
+ "cudarc",
+ "kornia-image",
+ "kornia-imgproc",
+ "kornia-tensor",
+ "vision-rt",
+]
+
+[[package]]
+name = "vrt-rfdetr-kpts"
 version = "0.1.0"
 dependencies = [
  "cudarc",

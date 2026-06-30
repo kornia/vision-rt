@@ -1,0 +1,11 @@
+[package]
+name = "rfdetr_kpts_check"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+vrt = { path = "../../crates/vrt", package = "vision-rt" }
+vrt-rfdetr-kpts = { path = "../../crates/vrt-rfdetr-kpts" }
+kornia-image   = { workspace = true }
+kornia-io      = { workspace = true }

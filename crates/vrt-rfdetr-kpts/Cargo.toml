@@ -1,0 +1,17 @@
+[package]
+name = "vrt-rfdetr-kpts"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+description = "RF-DETR Keypoint (human pose) for vision-rt — NMS-free 17-keypoint detector on TensorRT"
+
+[lib]
+name = "vrt_rfdetr_kpts"
+
+[dependencies]
+kornia-image  = { workspace = true }
+kornia-tensor = { workspace = true }
+vrt = { path = "../vrt", package = "vision-rt" }
+kornia-imgproc = { workspace = true }
+cudarc         = { workspace = true }
