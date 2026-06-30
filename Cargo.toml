@@ -7,6 +7,7 @@ members = [
     "crates/vrt-track",
     "crates/vrt-rfdetr",
     "crates/vrt-rfdetr-kpts",
+    "crates/vrt-reid",
     "crates/vrt-hub",
     "examples/xfeat_match",
     "examples/xfeat_bench",

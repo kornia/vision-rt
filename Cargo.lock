@@ -2425,6 +2425,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "vrt-reid"
+version = "0.1.0"
+dependencies = [
+ "cudarc",
+ "kornia-image",
+ "kornia-tensor",
+ "vision-rt",
+]
+
+[[package]]
 name = "vrt-rfdetr"
 version = "0.1.0"
 dependencies = [

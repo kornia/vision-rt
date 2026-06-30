@@ -1,0 +1,16 @@
+[package]
+name = "vrt-reid"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+description = "Appearance re-identification embeddings for vision-rt — OSNet on TensorRT, GPU per-box crop"
+
+[lib]
+name = "vrt_reid"
+
+[dependencies]
+kornia-image  = { workspace = true }
+kornia-tensor = { workspace = true }
+vrt    = { path = "../vrt", package = "vision-rt" }
+cudarc = { workspace = true }
