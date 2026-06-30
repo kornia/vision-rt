@@ -279,9 +279,12 @@ impl Session {
     /// **Caller must call `session.stream().sync()` before reading the outputs.**
     ///
     /// # Safety
-    /// Same as `run_device_inputs`.  Additionally the returned tensors alias
-    /// Session-owned device memory — do not outlive the Session or hold them
-    /// across a subsequent `run_*` call.
+    /// Unlike `run_device_inputs`, this does NOT sync — it enqueues async work
+    /// and returns. The GPU reads the bound input device pointers during the
+    /// caller's later `stream().sync()`, so every input buffer must stay valid
+    /// until that sync (not merely until this call returns). Additionally the
+    /// returned views alias Session-owned device memory — do not outlive the
+    /// Session or hold them across a subsequent `run_*` call.
     pub unsafe fn run_device_inputs_on_device(
         &mut self,
         device_inputs: &[(&str, *mut std::ffi::c_void, &[i64])],

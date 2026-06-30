@@ -148,9 +148,16 @@ fn discover_specs(engine: *mut btrt_engine_t) -> Result<Vec<TensorSpec>> {
         };
         let mut raw_dims = [0i64; 8];
         let mut ndims = 0i32;
-        unsafe {
+        let rc = unsafe {
             btrt_engine_tensor_shape(engine, c_name.as_ptr(), raw_dims.as_mut_ptr(), &mut ndims)
         };
+        // A failed query left ndims at 0 → empty dims → silent buffer
+        // under-allocation downstream. Surface it, and bound ndims to the buffer.
+        if rc != 0 || ndims < 0 || ndims as usize > raw_dims.len() {
+            return Err(TrtError::Trt(format!(
+                "failed to query shape for tensor '{name}' (rc={rc}, ndims={ndims})"
+            )));
+        }
         let dims = raw_dims[..ndims as usize].to_vec();
         specs.push(TensorSpec {
             name,

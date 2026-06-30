@@ -119,9 +119,12 @@ impl ModelSession {
             .iter()
             .map(|(n, p, s)| (*n, *p, s.as_slice()))
             .collect();
-        // SAFETY: every pointer comes from a live device tensor borrowed for this
-        // call; run_device_inputs_on_device requires they stay valid until it
-        // returns, which the borrow guarantees.
+        // SAFETY: each pointer is the device buffer of an input tensor the CALLER
+        // owns. run_device_inputs_on_device enqueues async work without syncing,
+        // so the GPU reads these pointers during the caller's *later*
+        // `stream().sync()` — the inputs must stay valid until then. Callers
+        // (e.g. RfDetr/XFeat holding `self.input`) keep the tensor alive across
+        // the sync, so the contract holds.
         let views = unsafe { self.session.run_device_inputs_on_device(&binds)? };
         Ok(TRTensorMap::new(views))
     }
