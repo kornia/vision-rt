@@ -5,12 +5,7 @@ members = [
     "crates/vrt",
     "crates/vrt-preproc",
     "crates/vrt-xfeat",
-    "crates/vrt-yolo",
-    "crates/vrt-gst",
-    "crates/nvbuf-sys",
     "crates/vrt-hub",
-    "examples/rtsp_yolo",
-    "examples/rtsp_xfeat",
     "examples/xfeat_match",
     "examples/xfeat_bench",
 ]

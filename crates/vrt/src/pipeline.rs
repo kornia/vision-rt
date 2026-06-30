@@ -12,7 +12,7 @@ pub type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>;
 // ── Source / Sink ───────────────────────────────────────────────────────────
 
 /// The **input boundary** of a pipeline: pulls frames in until exhausted
-/// (e.g. [`RtspSource`](vrt_gst::RtspSource)).
+/// (e.g. an RTSP camera source).
 ///
 /// A `Source` is a pull-generator, not an [`Operator`] — it has no per-frame
 /// input and signals end-of-stream by returning `None`.

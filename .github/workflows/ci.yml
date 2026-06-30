@@ -36,17 +36,17 @@ jobs:
         run: >
           cargo check
           -p vrt-sys -p vision-rt -p vrt-preproc
-          -p vrt-xfeat -p vrt-yolo -p vrt-hub
+          -p vrt-xfeat -p vrt-hub
       - name: cargo clippy (stub)
         run: >
           cargo clippy
           -p vrt-sys -p vision-rt -p vrt-preproc
-          -p vrt-xfeat -p vrt-yolo -p vrt-hub
+          -p vrt-xfeat -p vrt-hub
           -- -D warnings
       - name: cargo clippy (builder feature)
         run: cargo clippy -p vision-rt -p vrt-hub --features vrt-hub/builder -- -D warnings
 
-  # Self-hosted Jetson runner: real TensorRT + CUDA + GStreamer.
+  # Self-hosted Jetson runner: real TensorRT + CUDA.
   # Register a runner on the Orin with labels [self-hosted, jetson], then
   # remove the `if: false` guard.
   jetson:
@@ -57,6 +57,6 @@ jobs:
       - name: Build workspace (release)
         run: cargo build --release
       - name: CPU unit tests
-        run: cargo test -p vrt-yolo -p vrt-hub
+        run: cargo test -p vrt-hub
       - name: GPU tests (kernels vs CPU reference)
         run: cargo test -p vrt-xfeat --release -- --ignored
