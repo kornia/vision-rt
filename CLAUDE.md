@@ -1,62 +1,64 @@
 # vision-rt
 
-Standalone Rust TensorRT bindings + real-time vision pipelines for Jetson Orin
-(aarch64, SM87, TensorRT 10.3.0.30, CUDA 12.6). Zero bubbaloop dependency in
-the library crates.
+Standalone Rust TensorRT inference + real-time vision **algorithm libraries**
+for Jetson Orin (aarch64, SM87, TensorRT 10.3.x, CUDA 12.6). Pure libraries — no
+orchestration framework, no bubbaloop dependency. Sensor drivers live in the
+separate `sensor-rt` repo; GPU image/tensor types come from `kornia-rs`
+(pinned git dep, `cudarc` feature).
 
 ## Workspace layout
 
-Package names: `vision-rt` (core) + `vrt-*` satellites (crates.io: `trt`/`vrt` taken), but
-`[lib] name` keeps the short names — code uses `use vrt::`, `use vrt_xfeat::`.
-Errors: per-crate thiserror enums; `BoxError` only in the `Operator` trait.
+Package `vision-rt` (core) + `vrt-*` / `trt-sys` satellites. `[lib] name` keeps
+short names — code uses `use vrt::`, `use vrt_xfeat::`, `use trt_sys::`.
+Errors: per-crate `thiserror` enums; `vrt::BoxError` for algorithm constructors
+that aggregate kinds.
 
 | Crate | Role |
 |-------|------|
-| `crates/vrt-sys` | Raw FFI: pure-C shim over TensorRT C++ (bindgen never sees C++ headers) |
-| `crates/vrt` | Safe wrapper: Logger→Runtime→Engine→Session Arc chain, `Pipeline`/`Operator` |
-| `crates/vrt-preproc` | GPU letterbox RGBA→CHW (nvrtc JIT kernel) |
-| `crates/vrt-xfeat` | XFeat keypoints: backbone + GPU NMS/top-K/descriptor sampling |
-| `crates/vrt-yolo` | YOLO11/v8: CPU letterbox + decode + NMS |
-| `crates/vrt-gst` | GStreamer RTSP source, NVMM zero-copy → CUDA, VIC resize |
-| `crates/nvbuf-sys` | NVMM DMA-BUF → cudaImportExternalMemory helpers |
-| `examples/` | `rtsp_yolo`, `rtsp_xfeat` — both run live on RTSP cameras |
+| `crates/trt-sys` | Raw FFI: pure-C shim over TensorRT C++ (bindgen never sees C++ headers) |
+| `crates/vrt` | Safe core: Logger→Runtime→Engine→Session Arc chain, `ModelSession`, `Intrinsics`, `VrtDepthMap`, `stamp`, `cuda` launch helpers |
+| `crates/vrt-xfeat` | XFeat keypoints: backbone + GPU NMS/top-K/descriptor sampling/mutual-NN |
+| `crates/vrt-rfdetr` | RF-DETR object detector (NMS-free) + on-device GPU decode |
+| `crates/vrt-rfdetr-kpts` | RF-DETR human pose: box + 17 COCO keypoints + confidence |
+| `crates/vrt-track` | Generic 2D/3D BoT-SORT tracker (nalgebra only, no GPU/TRT) |
+| `crates/vrt-lift` | 2D→3D lift via intrinsics + depth + anthropometric bone priors |
+| `crates/vrt-reid` | OSNet appearance re-identification embeddings |
+| `crates/vrt-hub` | Model weights (HF Hub, sha256-pinned) + on-device engine cache |
+| `examples/` | `rfdetr_bench`, `rfdetr_kpts_check`, `track_bench`, `xfeat_match`, `xfeat_bench` |
 
 ## Architecture in one paragraph
 
-A `Pipeline` chains typed `Operator`s (`.pipe()`, compile-time type-checked) on
-ONE shared CUDA stream. Each frame: `source → enqueue (all GPU work, async) →
-one cudaStreamSynchronize → finalize (CPU postproc)`. GPU time is measured
-with CUDA events (`PipelineTiming.gpu_ms` — the authoritative metric).
-Platform adapters (NVMM→tensor) live in `vrt-gst`; models (tensor→result)
-present as one stage each.
+Each model is a plain type that owns a kornia `Preprocessor` and shares **one
+CUDA stream** with the rest of the app: `run()` = enqueue all GPU work async →
+ONE `cudaStreamSynchronize` → CPU post-process. `ModelSession` wraps the
+Session and takes a kornia `Tensor<f32,4>` device input. Detectors/keypoints
+feed `vrt-track` (identity) and `vrt-lift` (3D); provenance travels via
+`stamp` (`FrameMeta`/`Stamped`). No `Pipeline`/`Operator` framework — composition
+is just calling methods in a loop.
 
 ## Hard constraints
 
-- `.engine` files are machine-locked (TRT version + SM87). Rebuild with
+- **RAM 7.4 GB (Orin Nano): build with `-j2` / `CARGO_BUILD_JOBS=2`** — parallel
+  template builds OOM-kill the box.
+- `.engine` files are machine-locked (TRT version + SM87). Rebuild on-device with
   trtexec at `/usr/src/tensorrt/bin/trtexec` — never copy across hosts.
-- Model input H/W must be multiples of 32 (`pad32`).
-- Benchmarks only at MAXN_SUPER: `sudo nvpmodel -m 2 && sudo jetson_clocks`.
-- Cameras are H.264 RTSP; pipeline string in `vrt-gst` is H.264-only.
+- Benchmark only at MAXN: `sudo nvpmodel -m 2 && sudo jetson_clocks`.
 
 ## Commands
 
 ```bash
-cargo check                              # fast validation
-cargo build --release -p rtsp_xfeat      # build one example
-cargo test -p vrt-yolo                   # CPU-only unit tests
-/usr/src/tensorrt/bin/trtexec --loadEngine=<eng> --verbose 2>&1 | grep -i "tensor\|profile"  # inspect engine I/O
+cargo build --release -j2                              # full build (capped jobs)
+cargo test -p vrt-track -p vrt-lift -p vrt-hub         # CPU-only unit tests
+cargo test -p vrt-xfeat --release -- --ignored         # GPU kernel tests (on-device)
+TRT_STUB=1 cargo clippy --all-targets -- -D warnings   # off-Jetson check (no CUDA/TRT)
 ```
 
-## Examples
-
-```bash
-cargo run --release -p rtsp_xfeat -- models/xfeat/xfeat_backbone_fp16.engine <rtsp_url> [save_dir]
-cargo run --release -p rtsp_yolo  -- <yolo_engine> <rtsp_url>
-```
+Off-Jetson / CI: `TRT_STUB=1` makes `trt-sys` use committed bindings —
+`cargo check`/`clippy`/`doc` work with nothing native compiled. kornia builds
+via cudarc's `fallback-*` features (no CUDA needed to check).
 
 ## Detailed knowledge
 
-Project skills in `.claude/skills/` cover: pipeline stages, engine rebuilds,
-GStreamer/NVMM debugging, benchmarking discipline, Rust↔CUDA patterns,
-CUDA kernel craft, and model tensor semantics. They auto-activate; trust
-them over re-deriving from code.
+Project skills in `.claude/skills/` cover engine rebuilds, benchmarking
+discipline, Rust↔CUDA patterns, CUDA kernel craft, and model tensor semantics.
+They auto-activate; trust them over re-deriving from code.
