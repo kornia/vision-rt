@@ -109,10 +109,13 @@ extern "C" __global__ void xfeat_sample_descs(
     float wx = dx - (float)x0;
     float wy = dy - (float)y0;
 
-    int x1 = min(x0 + 1, Wd - 1);
-    int y1 = min(y0 + 1, Hd - 1);
-    x0 = max(x0, 0);
-    y0 = max(y0, 0);
+    // Clamp all four sample indices to [0, dim-1] (border replicate), for BOTH
+    // bounds — a coordinate <= -1 would otherwise give x0+1 <= 0, i.e. a negative
+    // x1/y1 index and an out-of-bounds read. wx/wy keep the true fractional offset.
+    int x1 = min(max(x0 + 1, 0), Wd - 1);
+    int y1 = min(max(y0 + 1, 0), Hd - 1);
+    x0 = min(max(x0, 0), Wd - 1);
+    y0 = min(max(y0, 0), Hd - 1);
 
     int base = c * Hd * Wd;
     float val = (1.0f - wx) * (1.0f - wy) * __ldg(&desc_map[base + y0 * Wd + x0])
@@ -432,6 +435,13 @@ impl XFeatPostproc {
     /// The NMS score map must already be in `score_dev` (see [`launch_score_nms`]).
     /// The returned [`TopkBufs`] owns the device buffers; the caller syncs the
     /// stream once and then calls [`finish_topk`] to read the count.
+    ///
+    /// **Only one frame may be outstanding at a time.** The keypoint count is
+    /// staged through a single reused pinned buffer, so a second `launch_topk`
+    /// before the first's `finish_topk` overwrites the first frame's count.
+    /// `process_topk_sample` (and `XFeat::run`) are serial and safe; if you drive
+    /// the split API yourself, sync + `finish_topk` one frame before launching
+    /// the next.
     ///
     /// [`launch_score_nms`]: XFeatPostproc::launch_score_nms
     /// [`finish_topk`]: XFeatPostproc::finish_topk
