@@ -2308,6 +2308,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "track_bench"
+version = "0.1.0"
+dependencies = [
+ "kornia-image",
+ "kornia-imgproc",
+ "kornia-io",
+ "vision-rt",
+ "vrt-hub",
+ "vrt-reid",
+ "vrt-rfdetr",
+ "vrt-track",
+]
+
+[[package]]
 name = "trt-sys"
 version = "0.1.0"
 dependencies = [

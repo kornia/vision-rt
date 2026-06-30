@@ -1,0 +1,15 @@
+[package]
+name = "track_bench"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+vrt          = { path = "../../crates/vrt", package = "vision-rt" }
+vrt-rfdetr   = { path = "../../crates/vrt-rfdetr" }
+vrt-reid     = { path = "../../crates/vrt-reid" }
+vrt-track    = { path = "../../crates/vrt-track" }
+vrt-hub      = { path = "../../crates/vrt-hub", features = ["hub", "builder"] }
+kornia-image = { workspace = true }
+kornia-imgproc = { workspace = true }
+kornia-io    = { workspace = true }
