@@ -149,7 +149,11 @@ pub fn min_cost_assign(cost: &[Vec<f32>]) -> Vec<(usize, usize)> {
     let mut sq = vec![vec![PAD; n]; n];
     for (i, row) in cost.iter().enumerate() {
         for (j, &v) in row.iter().enumerate() {
-            sq[i][j] = v;
+            // Non-finite costs (e.g. a NaN affinity from a bad depth lift) must
+            // never reach hungarian_square: NaN fails every `<` comparison, so
+            // delta/j1 stay at infinity/0 and the augmenting-path loop never
+            // terminates (hang). Treat them as unassignable.
+            sq[i][j] = if v.is_finite() { v } else { PAD };
         }
     }
 
@@ -320,5 +324,17 @@ mod tests {
             (got - std::f32::consts::FRAC_1_SQRT_2).abs() < 2e-3,
             "got {got}"
         );
+    }
+
+    #[test]
+    fn min_cost_assign_nan_terminates() {
+        // A NaN cost (e.g. NaN affinity from a bad depth lift) must not hang
+        // hungarian_square. The NaN cell is treated as unassignable (PAD), so
+        // the optimizer routes around it.
+        let cost = vec![vec![0.1, f32::NAN], vec![f32::NAN, 0.2]];
+        let pairs = min_cost_assign(&cost);
+        // Both rows get their finite column; neither picks the NaN cell.
+        assert_eq!(pairs.len(), 2);
+        assert!(pairs.contains(&(0, 0)) && pairs.contains(&(1, 1)));
     }
 }

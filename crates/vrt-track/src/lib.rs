@@ -291,6 +291,11 @@ impl AppearBank {
         let first = self.feats.first()?;
         let mut m = vec![0.0f32; first.len()];
         for f in &self.feats {
+            // Only average views matching the representative dimension; a
+            // shorter/longer view (mixed embedding sources) must not index OOB.
+            if f.len() != m.len() {
+                continue;
+            }
             for (i, &v) in f.iter().enumerate() {
                 m[i] += v;
             }
