@@ -1,0 +1,13 @@
+[package]
+name = "vrt-track"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+description = "Multi-object tracking for vision-rt — BoT-SORT-style, generic over 2D/3D state"
+
+[lib]
+name = "vrt_track"
+
+[dependencies]
+nalgebra = "0.32"

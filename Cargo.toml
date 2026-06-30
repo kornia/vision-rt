@@ -4,6 +4,7 @@ members = [
     "crates/trt-sys",
     "crates/vrt",
     "crates/vrt-xfeat",
+    "crates/vrt-track",
     "crates/vrt-hub",
     "examples/xfeat_match",
     "examples/xfeat_bench",
