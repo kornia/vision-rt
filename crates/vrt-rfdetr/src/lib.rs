@@ -150,9 +150,18 @@ impl RfDetr {
             .ok_or_else(|| format!("no output '{}'", self.logit_name))?;
         let lshape = lview.shape_i64(); // [1, Q, C]
         if lshape.len() != 3 {
-            return Ok(Vec::new());
+            // A rank-3 logits binding is a hard contract, not a runtime
+            // condition — surface it instead of silently returning no detections.
+            return Err(format!("rfdetr: expected rank-3 logits [1,Q,C], got {lshape:?}").into());
         }
         let (q, c) = (lshape[1] as usize, lshape[2] as usize);
+        // The decode kernel indexes boxes as a flat [Q*4]; if the box tensor's Q
+        // or last dim ever diverges from the logits tensor, that's an out-of-bounds
+        // device read. Validate the shape before trusting it.
+        let bshape = bview.shape_i64();
+        if bshape != [1, q as i64, 4] {
+            return Err(format!("rfdetr: box tensor shape {bshape:?} != [1, {q}, 4]").into());
+        }
         // `f32_ptr()` rejects a non-F32 dtype with a `TrtError::Shape` Err, so an
         // `--fp16`-output engine fails loudly here instead of being misread as
         // garbage by the decode kernel (no separate dtype guard needed).
