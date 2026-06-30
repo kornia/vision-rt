@@ -99,6 +99,10 @@ extern "C" int32_t btrt_build_engine_from_onnx(
         }
 
         if (input_name && ndims > 0 && min_dims && opt_dims && max_dims) {
+            if (ndims > nvinfer1::Dims::MAX_DIMS) {
+                builder_set_error("input ndims exceeds Dims::MAX_DIMS");
+                return -9;
+            }
             nvinfer1::IOptimizationProfile* profile =
                 builder->createOptimizationProfile();
             if (!profile) {

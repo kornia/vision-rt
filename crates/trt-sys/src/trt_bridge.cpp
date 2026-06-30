@@ -211,48 +211,80 @@ void btrt_context_destroy(btrt_context_t* ctx) {
 int32_t btrt_context_set_input_shape(btrt_context_t* ctx, const char* name,
                                       const int64_t* dims, int32_t ndims) {
     if (!ctx || !name || !dims || ndims < 0 || ndims > nvinfer1::Dims::MAX_DIMS) return -1;
-    auto* sc = reinterpret_cast<ShimContext*>(ctx);
-    nvinfer1::Dims64 d{};
-    d.nbDims = ndims;
-    for (int32_t i = 0; i < ndims; ++i) {
-        d.d[i] = dims[i];
+    try {
+        auto* sc = reinterpret_cast<ShimContext*>(ctx);
+        nvinfer1::Dims64 d{};
+        d.nbDims = ndims;
+        for (int32_t i = 0; i < ndims; ++i) {
+            d.d[i] = dims[i];
+        }
+        bool ok = sc->ctx->setInputShape(name, d);
+        return ok ? 0 : -1;
+    } catch (std::exception const& e) {
+        set_error(e.what());
+        return -1;
+    } catch (...) {
+        set_error("btrt_context_set_input_shape: unknown exception");
+        return -1;
     }
-    bool ok = sc->ctx->setInputShape(name, d);
-    return ok ? 0 : -1;
 }
 
 // TRT API: IExecutionContext::getTensorShape(const char*) — NvInferRuntime.h
 int32_t btrt_context_get_tensor_shape(btrt_context_t* ctx, const char* name,
                                        int64_t* out_dims, int32_t* out_ndims) {
     if (!ctx || !name || !out_dims || !out_ndims) return -1;
-    auto* sc = reinterpret_cast<ShimContext*>(ctx);
-    nvinfer1::Dims64 dims = sc->ctx->getTensorShape(name);
-    if (dims.nbDims < 0) {
-        *out_ndims = 0;
+    try {
+        auto* sc = reinterpret_cast<ShimContext*>(ctx);
+        nvinfer1::Dims64 dims = sc->ctx->getTensorShape(name);
+        if (dims.nbDims < 0) {
+            *out_ndims = 0;
+            return -1;
+        }
+        *out_ndims = dims.nbDims;
+        for (int32_t i = 0; i < dims.nbDims; ++i) {
+            out_dims[i] = dims.d[i];
+        }
+        return 0;
+    } catch (std::exception const& e) {
+        set_error(e.what());
+        return -1;
+    } catch (...) {
+        set_error("btrt_context_get_tensor_shape: unknown exception");
         return -1;
     }
-    *out_ndims = dims.nbDims;
-    for (int32_t i = 0; i < dims.nbDims; ++i) {
-        out_dims[i] = dims.d[i];
-    }
-    return 0;
 }
 
 // TRT API: IExecutionContext::setTensorAddress(const char*, void*) — NvInferRuntime.h
 int32_t btrt_context_set_tensor_address(btrt_context_t* ctx,
                                          const char* name, void* device_ptr) {
     if (!ctx || !name) return -1;
-    auto* sc = reinterpret_cast<ShimContext*>(ctx);
-    bool ok = sc->ctx->setTensorAddress(name, device_ptr);
-    return ok ? 0 : -1;
+    try {
+        auto* sc = reinterpret_cast<ShimContext*>(ctx);
+        bool ok = sc->ctx->setTensorAddress(name, device_ptr);
+        return ok ? 0 : -1;
+    } catch (std::exception const& e) {
+        set_error(e.what());
+        return -1;
+    } catch (...) {
+        set_error("btrt_context_set_tensor_address: unknown exception");
+        return -1;
+    }
 }
 
 // TRT API: IExecutionContext::enqueueV3(cudaStream_t) — NvInferRuntime.h
 int32_t btrt_context_enqueue_v3(btrt_context_t* ctx, void* stream) {
     if (!ctx) return -1;
-    auto* sc = reinterpret_cast<ShimContext*>(ctx);
-    bool ok = sc->ctx->enqueueV3(static_cast<cudaStream_t>(stream));
-    return ok ? 0 : -1;
+    try {
+        auto* sc = reinterpret_cast<ShimContext*>(ctx);
+        bool ok = sc->ctx->enqueueV3(static_cast<cudaStream_t>(stream));
+        return ok ? 0 : -1;
+    } catch (std::exception const& e) {
+        set_error(e.what());
+        return -1;
+    } catch (...) {
+        set_error("btrt_context_enqueue_v3: unknown exception");
+        return -1;
+    }
 }
 
 // ── CUDA helpers ──────────────────────────────────────────────────────────────

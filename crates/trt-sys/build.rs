@@ -123,7 +123,12 @@ fn parse_trt_version(trt_inc: &str) -> Option<String> {
     let grab = |name: &str| -> Option<u32> {
         text.lines()
             .find(|l| l.contains(&format!("#define {name} ")))
-            .and_then(|l| l.split_whitespace().last())
+            // Take the token immediately AFTER the macro name, not the last
+            // token — the headers carry trailing `//!< …` Doxygen comments, so
+            // `.last()` would grab a comment word and the parse would always
+            // fail (silently falling back to a hardcoded version → mis-keyed
+            // engine cache on any non-default TRT).
+            .and_then(|l| l.split_whitespace().skip_while(|t| *t != name).nth(1))
             .and_then(|v| v.parse().ok())
     };
     Some(format!(
