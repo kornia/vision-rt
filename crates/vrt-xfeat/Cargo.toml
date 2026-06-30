@@ -10,7 +10,9 @@ description = "XFeat post-processing: NMS, TopK keypoint selection, descriptor s
 name = "vrt_xfeat"
 
 [dependencies]
-cudarc = { workspace = true }
-vision-rt   = { path = "../vrt" }
-vrt-preproc = { path = "../vrt-preproc" }
+kornia-image  = { workspace = true }
+kornia-tensor = { workspace = true }
+cudarc      = { workspace = true }
+vrt = { path = "../vrt", package = "vision-rt" }
+kornia-imgproc = { workspace = true }
 thiserror   = "2.0"

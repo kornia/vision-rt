@@ -20,3 +20,4 @@ thiserror = "2.0"
 log = "0.4"
 half = "2.4"
 cudarc = { workspace = true }
+kornia-tensor = { workspace = true }

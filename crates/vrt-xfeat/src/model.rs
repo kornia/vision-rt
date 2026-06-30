@@ -1,9 +1,12 @@
-//! `XFeat` — complete pipeline: GPU preprocessing + TRT backbone + GPU post-processing.
+//! `XFeat` — GPU preprocessing + TRT backbone + GPU post-processing.
 
 use crate::postprocess::{TopkBufs, XFeatError, XFeatPostproc, XFeatResult};
 use cudarc::driver::CudaSlice;
+use kornia_image::Image;
+use kornia_imgproc::preprocess::Preprocessor;
+use kornia_tensor::{zeros_cuda, Tensor};
 use std::sync::Arc;
-use vrt::{BoxError, CudaStream, Engine, ExecCtx, ModelSession, Operator, VrtTensor};
+use vrt::{BoxError, CudaStream, Engine, ModelSession};
 
 // ── Params ────────────────────────────────────────────────────────────────────
 
@@ -33,45 +36,44 @@ impl XFeatParams {
 
 // ── Model ─────────────────────────────────────────────────────────────────────
 
-/// XFeat model: TRT backbone + GPU post-processing.
+/// XFeat feature extractor: GPU letterbox + TRT backbone + GPU post-processing.
 ///
-/// Takes a pre-processed [`VrtTensor`] (CHW FP32, shape `[1,3,H,W]`) and returns
-/// [`XFeatResult`] with keypoints, scores, and descriptors.
-///
-/// ## APIs
-/// - `extract(tensor)` — synchronous one-shot use (image pairs, batch jobs)
-/// - `Operator` impl — two-phase async use in a [`Pipeline`] (e.g. `rtsp_xfeat`)
-///
-/// [`Pipeline`]: vrt::Pipeline
+/// A single `Image<u8, 3> → XFeatResult` algorithm: it owns its [`Preprocessor`]
+/// (letterbox/normalize to the model's input size), so callers hand it a camera
+/// or image surface of any resolution directly. Run it with [`run`](Self::run).
 pub struct XFeat {
     model: ModelSession,
+    preproc: Preprocessor,
     postproc: XFeatPostproc,
     score_dev: CudaSlice<f32>, // pre-allocated h×w NMS score buffer
+    /// Model input tensor (`[1,3,h,w]` CHW FP32 device), written by `preproc.run`, reused.
+    input: Tensor<f32, 4>,
     h: usize,
     w: usize,
 }
 
 impl XFeat {
-    /// Pipeline constructor: shares `stream` with other stages in a [`Pipeline`].
-    ///
-    /// All stages must share the same stream so one `cudaStreamSynchronize` per frame
-    /// covers the entire graph.
-    ///
-    /// [`Pipeline`]: vrt::Pipeline
-    pub fn with_stream(
+    /// Build an extractor sharing `stream` with the rest of the application
+    /// (one CUDA stream so a single sync per frame covers all its GPU work).
+    pub fn new(
         engine: Arc<Engine>,
         stream: Arc<CudaStream>,
         params: XFeatParams,
     ) -> Result<Self, BoxError> {
         let model = ModelSession::new(Arc::clone(&engine), Arc::clone(&stream))?;
         let (h, w) = (params.h, params.w);
+        let preproc = Preprocessor::letterbox(stream.clone())?;
         let postproc = XFeatPostproc::new(stream.clone(), params.top_k, params.threshold)?;
         let score_dev: CudaSlice<f32> = unsafe { stream.alloc(h * w)? };
+        // The preprocessor writes the letterboxed frame here; the backbone reads it.
+        let input = zeros_cuda::<f32, 4>([1, 3, h, w], &stream)?;
 
         Ok(XFeat {
             model,
+            preproc,
             postproc,
             score_dev,
+            input,
             h,
             w,
         })
@@ -82,12 +84,13 @@ impl XFeat {
         &self.postproc
     }
 
-    /// Synchronous inference on a pre-processed CHW FP32 tensor.
-    ///
-    /// Runs backbone + sync + postproc in one call.  The tensor must already be on
-    /// device (shape `[1, 3, H, W]`, values in `[0, 1]`).
-    pub fn extract(&mut self, input: &VrtTensor) -> Result<XFeatResult, XFeatError> {
-        let out = self.model.run(input)?;
+    /// Submit one frame's async GPU work — preprocess → backbone → NMS → top-K —
+    /// and return the device [`TopkBufs`]. The texture is held in `self` until the
+    /// caller syncs and reads with `XFeatPostproc::finish_topk`. [`run`](Self::run)
+    /// wraps this with the sync + read.
+    fn submit(&mut self, img: &Image<u8, 3>) -> Result<TopkBufs, XFeatError> {
+        self.preproc.run(img, &mut self.input)?;
+        let out = self.model.run(&self.input)?;
         let desc_ptr = out
             .get("descriptors")
             .ok_or(XFeatError::MissingOutput("descriptors"))?
@@ -100,40 +103,21 @@ impl XFeat {
             .get("reliability")
             .ok_or(XFeatError::MissingOutput("reliability"))?
             .f32_ptr()?;
-        // process() launches NMS→top-K→sample on the same stream after the
-        // backbone (stream-ordered) and syncs internally — no separate sync.
-        self.postproc
-            .process(desc_ptr, heat_ptr, rel_ptr, self.h, self.w)
-    }
-}
-
-// ── Stage impl ────────────────────────────────────────────────────────────────
-
-/// `XFeat` as a pipeline stage: `VrtTensor → XFeatResult`.
-///
-/// Internally chains TRT backbone inference + GPU NMS/sampling using the two-phase
-/// pipeline contract:
-/// - `enqueue`: backbone async + NMS score kernel async
-/// - `finalize` (after stream sync): D2H scores → top-K → descriptor sampling + L2-norm
-impl Operator for XFeat {
-    type Input = VrtTensor;
-    type Pending = TopkBufs;
-    type Output = XFeatResult;
-
-    fn enqueue(&mut self, input: &VrtTensor, _ctx: &ExecCtx) -> Result<TopkBufs, BoxError> {
-        let out = self.model.run(input)?;
-        let desc_ptr = out.f32("descriptors")?;
-        let heat_ptr = out.f32("heatmap")?;
-        let rel_ptr = out.f32("reliability")?;
-
         self.postproc
             .launch_score_nms(heat_ptr, rel_ptr, &self.score_dev, self.h, self.w)?;
-        Ok(self
+        let topk = self
             .postproc
-            .launch_topk(desc_ptr, &self.score_dev, self.h, self.w)?)
+            .launch_topk(desc_ptr, &self.score_dev, self.h, self.w)?;
+        Ok(topk)
     }
 
-    fn finalize(&mut self, pending: TopkBufs, _ctx: &ExecCtx) -> Result<XFeatResult, BoxError> {
-        Ok(self.postproc.finish_topk(pending))
+    /// Synchronous one-shot inference on an image (was `extract`).
+    ///
+    /// [`submit`](Self::submit) + one stream sync + read. Letterboxes `img` into
+    /// the model input; `img` must be device-resident RGBA (any resolution).
+    pub fn run(&mut self, img: &Image<u8, 3>) -> Result<XFeatResult, XFeatError> {
+        let bufs = self.submit(img)?;
+        self.postproc.stream().synchronize()?;
+        Ok(self.postproc.finish_topk(bufs))
     }
 }

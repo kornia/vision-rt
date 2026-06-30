@@ -35,12 +35,12 @@ jobs:
       - name: cargo check (stub)
         run: >
           cargo check
-          -p trt-sys -p vision-rt -p vrt-preproc
+          -p trt-sys -p vision-rt
           -p vrt-xfeat -p vrt-hub
       - name: cargo clippy (stub)
         run: >
           cargo clippy
-          -p trt-sys -p vision-rt -p vrt-preproc
+          -p trt-sys -p vision-rt
           -p vrt-xfeat -p vrt-hub
           -- -D warnings
       - name: cargo clippy (builder feature)

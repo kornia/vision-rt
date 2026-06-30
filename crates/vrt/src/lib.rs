@@ -24,30 +24,33 @@
 pub mod buffer;
 #[cfg(feature = "builder")]
 pub mod builder;
+pub mod camera;
 pub mod cuda;
+pub mod depth;
+pub mod dtype;
 pub mod engine;
 pub mod error;
-pub mod image;
 pub mod logger;
 pub mod model;
-pub mod pipeline;
 pub mod runtime;
 pub mod session;
-pub mod tensor;
+pub mod stamp;
+
+/// Boxed, thread-safe error — the convenient return type for algorithm
+/// constructors that aggregate several error kinds.
+pub type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>;
 
 pub use buffer::{DeviceBuffer, PinnedBuffer, Stream};
+pub use camera::Intrinsics;
 pub use cudarc;
 pub use cudarc::driver::CudaStream;
+pub use depth::VrtDepthMap;
+pub use dtype::DType;
 pub use engine::{DataType, Engine, TensorMode, TensorSpec};
 pub use error::{Result, TrtError};
-pub use image::{Format, VrtImage};
 pub use logger::Logger;
-pub use model::ModelSession;
-pub use pipeline::{
-    BoxError, Chain, ExecCtx, Fork, FrameMeta, Operator, Pipeline, PipelineTiming, Sink, Source,
-    TRTensorMap, TrtInferStage,
-};
+pub use model::{ModelSession, TRTensorMap};
 pub use runtime::Runtime;
-pub use session::{OutputTensor, Session};
-pub use tensor::{DType, MemKind, VrtTensor};
+pub use session::{OutputTensor, OutputView, Session};
+pub use stamp::{Clock, FrameMeta, MonotonicClock, Stamped};
 pub use trt_sys::TENSORRT_VERSION;

@@ -5,8 +5,9 @@ edition.workspace = true
 publish = false
 
 [dependencies]
-vision-rt   = { path = "../../crates/vrt" }
-vrt-xfeat   = { path = "../../crates/vrt-xfeat" }
-vrt-preproc = { path = "../../crates/vrt-preproc" }
-vrt-hub     = { path = "../../crates/vrt-hub", features = ["builder"] }
-image       = "0.25"
+vrt = { path = "../../crates/vrt", package = "vision-rt" }
+vrt-xfeat      = { path = "../../crates/vrt-xfeat" }
+vrt-hub        = { path = "../../crates/vrt-hub", features = ["builder"] }
+kornia-image   = { workspace = true }
+kornia-imgproc = { workspace = true }
+kornia-io      = { workspace = true }

@@ -5,25 +5,28 @@
 //!   `heatmap`      (1,  1,   H,   W)  — keypoint confidence (FP32 on device)
 //!   `reliability`  (1,  1,   H,   W)  — channel reliability  (FP32 on device)
 //!
-//! Pipeline (entirely on the GPU — no mid-frame device→host→device round trip):
+//! Stages (entirely on the GPU — no device→host→device round trip):
 //!   GPU  xfeat_score_nms      → score_map (H×W), masked to local-max pixels above threshold
 //!   GPU  xfeat_topk_histogram → bin survivor scores into NBINS buckets
 //!   GPU  xfeat_topk_cutoff    → score threshold for ~K survivors (one thread)
 //!   GPU  xfeat_topk_select    → atomically gather survivors ≥ cutoff, capped K
 //!   GPU  xfeat_sample_descs   → K×64 descriptor vectors (bilinear sample from desc_map)
 //!   GPU  xfeat_l2_norm        → in-place L2 normalise
-//!   (async D2H of count/scores/xy — read after the pipeline's single sync)
+//!   (only the keypoint count is read to host; kpts/descs/scores stay on device)
 //!   GPU  xfeat_match_argmax   → tiled mutual-NN matching (two calls, swapped args)
 //!
-//! Output keypoints are in GPU-select (atomic-append) order, not score-sorted;
-//! `kpts`, `descs`, and `scores` share that order. Kernels are JIT-compiled via
-//! vrt::cuda::Kernels (arch auto-detected).
+//! [`XFeatResult`] holds the device buffers + `count`; matching runs on them
+//! without a download. Output keypoints are in GPU-select (atomic-append) order,
+//! not score-sorted; `kpts`, `descs`, and `scores` share that order. Kernels are
+//! JIT-compiled via kornia's `CudaKernel::compile_many` (arch auto-detected) and
+//! launched with explicit configs through `CudaLaunchBuilder::launch_cfg`.
 
 use cudarc::driver::sys::CUdeviceptr;
-use cudarc::driver::{CudaSlice, CudaStream, PushKernelArg};
+use cudarc::driver::{CudaSlice, CudaStream};
+use kornia_tensor::CudaKernel;
 use std::sync::Arc;
 
-use vrt::cuda::{cfg_1d, cfg_2d, cfg_per_item, Kernels};
+use vrt::cuda::{cfg_1d, cfg_2d, cfg_per_item};
 
 /// Errors from XFeat post-processing and matching.
 #[derive(Debug, thiserror::Error)]
@@ -32,8 +35,12 @@ pub enum XFeatError {
     Trt(#[from] vrt::TrtError),
     #[error("CUDA driver: {0}")]
     Driver(#[from] cudarc::driver::DriverError),
+    #[error("kornia CUDA: {0}")]
+    Cuda(#[from] kornia_tensor::CudaError),
     #[error("backbone output '{0}' missing from engine")]
     MissingOutput(&'static str),
+    #[error(transparent)]
+    Preproc(#[from] kornia_imgproc::preprocess::PreprocessError),
 }
 
 // ── Kernel source ─────────────────────────────────────────────────────────────
@@ -268,21 +275,51 @@ extern "C" __global__ void xfeat_topk_select(
 
 // ── Public types ──────────────────────────────────────────────────────────────
 
-/// Output of one XFeat extraction.
+/// Output of one XFeat extraction — **entirely on the GPU**.
 ///
-/// The device buffers have **capacity `top_k`**; the valid keypoint count is
-/// `scores.len()` — use it to bound any access to `kpts`/`descs`.  All four
-/// fields share the same (GPU-select, atomic-append) order.
+/// All three buffers have capacity `top_k`; [`count`](Self::count) is the valid
+/// keypoint count (the only host-side scalar). They share the same (GPU-select,
+/// atomic-append) order. Nothing is downloaded — descriptor matching stays on
+/// device ([`XFeatPostproc::match_mutual_nn_gpu`]); a consumer that needs pixel
+/// coordinates or scores on the host downloads them explicitly with
+/// [`kpts_to_host`](Self::kpts_to_host) / [`scores_to_host`](Self::scores_to_host).
 pub struct XFeatResult {
     /// Pixel-space (x, y) coordinates on device, capacity [top_k × 2].
     pub kpts: CudaSlice<f32>,
     /// L2-normalised 64-D descriptors on device, capacity [top_k × 64].
     pub descs: CudaSlice<f32>,
-    /// Combined NMS scores on host, length [count] (= the valid keypoint count).
-    pub scores: Vec<f32>,
-    /// Pixel-space (x, y) coordinates on host — flat interleaved `[x0,y0,x1,y1,…]`,
-    /// length [count × 2].  Same ordering as `scores`.
-    pub kpts_cpu: Vec<f32>,
+    /// Combined NMS scores on device, capacity [top_k].
+    pub scores: CudaSlice<f32>,
+    /// Number of valid keypoints (≤ top_k) — bounds any access to the buffers.
+    pub count: usize,
+}
+
+impl XFeatResult {
+    /// Valid keypoint count.
+    pub fn len(&self) -> usize {
+        self.count
+    }
+    pub fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+
+    /// Download the valid keypoints to host: interleaved `[x0,y0,x1,y1,…]`,
+    /// length `count × 2`. Call only when you actually need pixel coordinates on
+    /// the CPU (e.g. drawing) — descriptor matching stays on device.
+    pub fn kpts_to_host(
+        &self,
+        stream: &Arc<CudaStream>,
+    ) -> Result<Vec<f32>, cudarc::driver::DriverError> {
+        stream.clone_dtoh(&self.kpts.slice(0..self.count * 2))
+    }
+
+    /// Download the valid scores to host (length `count`).
+    pub fn scores_to_host(
+        &self,
+        stream: &Arc<CudaStream>,
+    ) -> Result<Vec<f32>, cudarc::driver::DriverError> {
+        stream.clone_dtoh(&self.scores.slice(0..self.count))
+    }
 }
 
 // ── XFeatPostproc ─────────────────────────────────────────────────────────────
@@ -290,30 +327,28 @@ pub struct XFeatResult {
 /// Device buffers carrying one frame's GPU-selected keypoints from the async
 /// launch (`launch_topk`) to the post-sync read (`finish_topk`).
 ///
-/// Device buffers have **capacity `top_k`**; the valid keypoint count and the
-/// host-side scores/xy are read from the post-processor's reused pinned buffers
-/// (async-D2H target) in `finish_topk`.
+/// All buffers have **capacity `top_k`**; the valid keypoint count is read from
+/// the post-processor's reused pinned count buffer (the only D2H) in `finish_topk`.
 pub struct TopkBufs {
-    kpts_dev: CudaSlice<f32>,  // [top_k * 2]
-    descs_dev: CudaSlice<f32>, // [top_k * 64]
+    kpts_dev: CudaSlice<f32>,   // [top_k * 2]
+    descs_dev: CudaSlice<f32>,  // [top_k * 64]
+    scores_dev: CudaSlice<f32>, // [top_k]
     top_k: usize,
 }
 
 pub struct XFeatPostproc {
-    fn_score_nms: cudarc::driver::CudaFunction,
-    fn_sample_descs: cudarc::driver::CudaFunction,
-    fn_l2_norm: cudarc::driver::CudaFunction,
-    fn_match_argmax: cudarc::driver::CudaFunction,
-    fn_histogram: cudarc::driver::CudaFunction,
-    fn_cutoff: cudarc::driver::CudaFunction,
-    fn_select: cudarc::driver::CudaFunction,
+    fn_score_nms: CudaKernel,
+    fn_sample_descs: CudaKernel,
+    fn_l2_norm: CudaKernel,
+    fn_match_argmax: CudaKernel,
+    fn_histogram: CudaKernel,
+    fn_cutoff: CudaKernel,
+    fn_select: CudaKernel,
     stream: Arc<CudaStream>,
     top_k: usize,
     threshold: f32,
-    // Pinned host buffers (async-D2H targets), allocated once and reused.
-    count_pin: vrt::PinnedBuffer<i32>,  // [1]
-    scores_pin: vrt::PinnedBuffer<f32>, // [top_k]
-    kpts_pin: vrt::PinnedBuffer<f32>,   // [top_k * 2]
+    // Pinned host buffer for the count scalar (the only D2H), reused each frame.
+    count_pin: vrt::PinnedBuffer<i32>, // [1]
 }
 
 const TOPK_NBINS: usize = 1024;
@@ -326,19 +361,22 @@ impl XFeatPostproc {
 
     /// Compile all CUDA kernels and return a ready post-processor.
     pub fn new(stream: Arc<CudaStream>, top_k: usize, threshold: f32) -> Result<Self, XFeatError> {
-        let kernels = Kernels::compile(stream.clone(), KERNELS_SRC)?;
-
-        let fn_score_nms = kernels.function("xfeat_score_nms")?;
-        let fn_sample_descs = kernels.function("xfeat_sample_descs")?;
-        let fn_l2_norm = kernels.function("xfeat_l2_norm")?;
-        let fn_match_argmax = kernels.function("xfeat_match_argmax")?;
-        let fn_histogram = kernels.function("xfeat_topk_histogram")?;
-        let fn_cutoff = kernels.function("xfeat_topk_cutoff")?;
-        let fn_select = kernels.function("xfeat_topk_select")?;
+        // Compile the kernel suite once; load all seven functions from the module.
+        let names = [
+            "xfeat_score_nms",
+            "xfeat_sample_descs",
+            "xfeat_l2_norm",
+            "xfeat_match_argmax",
+            "xfeat_topk_histogram",
+            "xfeat_topk_cutoff",
+            "xfeat_topk_select",
+        ];
+        let [fn_score_nms, fn_sample_descs, fn_l2_norm, fn_match_argmax,
+             fn_histogram, fn_cutoff, fn_select]: [CudaKernel; 7] =
+            CudaKernel::compile_many(stream.context(), KERNELS_SRC, &names)?
+                .try_into().unwrap_or_else(|_| unreachable!("compile_many returns names.len() kernels"));
 
         let count_pin = vrt::PinnedBuffer::<i32>::alloc(1)?;
-        let scores_pin = vrt::PinnedBuffer::<f32>::alloc(top_k)?;
-        let kpts_pin = vrt::PinnedBuffer::<f32>::alloc(top_k * 2)?;
 
         Ok(Self {
             fn_score_nms,
@@ -352,8 +390,6 @@ impl XFeatPostproc {
             top_k,
             threshold,
             count_pin,
-            scores_pin,
-            kpts_pin,
         })
     }
 
@@ -377,17 +413,15 @@ impl XFeatPostproc {
         let h_i = h as i32;
         let w_i = w as i32;
         let thr = self.threshold;
-        unsafe {
-            self.stream
-                .launch_builder(&self.fn_score_nms)
-                .arg(&heat_raw)
-                .arg(&rel_raw)
-                .arg(&score_raw)
-                .arg(&h_i)
-                .arg(&w_i)
-                .arg(&thr)
-                .launch(cfg)?;
-        }
+        self.fn_score_nms
+            .launch_builder(&self.stream)
+            .arg(&heat_raw)
+            .arg(&rel_raw)
+            .arg(&score_raw)
+            .arg(&h_i)
+            .arg(&w_i)
+            .arg(&thr)
+            .launch_cfg(cfg)?;
         Ok(())
     }
 
@@ -396,9 +430,8 @@ impl XFeatPostproc {
     /// the host-side results — with **no `stream.synchronize()`**.
     ///
     /// The NMS score map must already be in `score_dev` (see [`launch_score_nms`]).
-    /// The returned [`TopkBufs`] owns the device buffers and the host targets of
-    /// the async copies; the caller syncs the stream (the pipeline does this
-    /// once per frame) and then calls [`finish_topk`] to read the result.
+    /// The returned [`TopkBufs`] owns the device buffers; the caller syncs the
+    /// stream once and then calls [`finish_topk`] to read the count.
     ///
     /// [`launch_score_nms`]: XFeatPostproc::launch_score_nms
     /// [`finish_topk`]: XFeatPostproc::finish_topk
@@ -438,37 +471,31 @@ impl XFeatPostproc {
         let w_i = w as i32;
 
         // 1. histogram of survivor scores
-        unsafe {
-            self.stream
-                .launch_builder(&self.fn_histogram)
-                .arg(&score_raw)
-                .arg(&hist_raw)
-                .arg(&total)
-                .launch(cfg_1d(n_pixels, 256))?;
-        }
+        self.fn_histogram
+            .launch_builder(&self.stream)
+            .arg(&score_raw)
+            .arg(&hist_raw)
+            .arg(&total)
+            .launch_cfg(cfg_1d(n_pixels, 256))?;
         // 2. find the score cutoff for ~K survivors (one block, one thread)
-        unsafe {
-            self.stream
-                .launch_builder(&self.fn_cutoff)
-                .arg(&hist_raw)
-                .arg(&k_i)
-                .arg(&cut_raw)
-                .launch(cfg_1d(1, 1))?;
-        }
+        self.fn_cutoff
+            .launch_builder(&self.stream)
+            .arg(&hist_raw)
+            .arg(&k_i)
+            .arg(&cut_raw)
+            .launch_cfg(cfg_1d(1, 1))?;
         // 3. gather survivors >= cutoff, capped at K
-        unsafe {
-            self.stream
-                .launch_builder(&self.fn_select)
-                .arg(&score_raw)
-                .arg(&cut_raw)
-                .arg(&kxy_raw)
-                .arg(&sco_raw)
-                .arg(&cnt_raw)
-                .arg(&h_i)
-                .arg(&w_i)
-                .arg(&k_i)
-                .launch(cfg_1d(n_pixels, 256))?;
-        }
+        self.fn_select
+            .launch_builder(&self.stream)
+            .arg(&score_raw)
+            .arg(&cut_raw)
+            .arg(&kxy_raw)
+            .arg(&sco_raw)
+            .arg(&cnt_raw)
+            .arg(&h_i)
+            .arg(&w_i)
+            .arg(&k_i)
+            .launch_cfg(cfg_1d(n_pixels, 256))?;
         // 4. sample 64-D descriptors at the selected keypoints (cap K; the
         //    unused tail samples at (0,0) and is ignored by `finish_topk`).
         let desc_raw = desc_ptr as usize as CUdeviceptr;
@@ -476,31 +503,27 @@ impl XFeatPostproc {
         let hd_i = hd as i32;
         let wd_i = wd as i32;
         let cfg64 = cfg_per_item(k, 64);
-        unsafe {
-            self.stream
-                .launch_builder(&self.fn_sample_descs)
-                .arg(&desc_raw)
-                .arg(&kxy_raw)
-                .arg(&descs_raw)
-                .arg(&hd_i)
-                .arg(&wd_i)
-                .arg(&h_i)
-                .arg(&w_i)
-                .launch(cfg64)?;
-        }
+        self.fn_sample_descs
+            .launch_builder(&self.stream)
+            .arg(&desc_raw)
+            .arg(&kxy_raw)
+            .arg(&descs_raw)
+            .arg(&hd_i)
+            .arg(&wd_i)
+            .arg(&h_i)
+            .arg(&w_i)
+            .launch_cfg(cfg64)?;
         // 5. L2-normalise each descriptor row in place
-        unsafe {
-            self.stream
-                .launch_builder(&self.fn_l2_norm)
-                .arg(&descs_raw)
-                .arg(&k_i)
-                .launch(cfg64)?;
-        }
+        self.fn_l2_norm
+            .launch_builder(&self.stream)
+            .arg(&descs_raw)
+            .arg(&k_i)
+            .launch_cfg(cfg64)?;
 
-        // 6. async D2H of the host-side results (count + scores + xy) into the
-        //    REUSED PINNED buffers — pinned host memory makes cudaMemcpyAsync
-        //    truly asynchronous (pageable would block here), so the host thread
-        //    is free until the pipeline's single per-frame sync.
+        // 6. async D2H of the count scalar (the ONLY host transfer) into the
+        //    reused pinned buffer — pinned host memory makes cudaMemcpyAsync
+        //    truly asynchronous, so the host thread is free until the sync.
+        //    Keypoints/descs/scores stay on device (downloaded only on demand).
         let vstream = vrt::Stream::from_cuda_stream(self.stream.clone());
         unsafe {
             vstream.memcpy_d2h_raw(
@@ -508,48 +531,35 @@ impl XFeatPostproc {
                 cnt_raw as usize as *const _,
                 std::mem::size_of::<i32>(),
             )?;
-            vstream.memcpy_d2h_raw(
-                self.scores_pin.as_mut_ptr() as *mut u8,
-                sco_raw as usize as *const _,
-                k * std::mem::size_of::<f32>(),
-            )?;
-            vstream.memcpy_d2h_raw(
-                self.kpts_pin.as_mut_ptr() as *mut u8,
-                kxy_raw as usize as *const _,
-                k * 2 * std::mem::size_of::<f32>(),
-            )?;
         }
 
         Ok(TopkBufs {
             kpts_dev,
             descs_dev,
+            scores_dev,
             top_k: k,
         })
     }
 
     /// Assemble the final [`XFeatResult`] from [`TopkBufs`] **after the stream
-    /// has been synced** (the async D2H into the pinned buffers is then done).
+    /// has been synced** (the async count D2H is then done).
     ///
-    /// The device buffers have capacity `top_k`; the valid keypoint count is
-    /// read here from the pinned count and the pinned scores/xy are copied out
-    /// (the pinned buffers are reused next frame).  Consumers must use
-    /// `result.scores.len()` as the keypoint count.
+    /// All buffers stay on device; only the keypoint `count` is read here (from
+    /// the pinned scalar). Consumers use `result.count` (or `result.len()`).
     pub fn finish_topk(&self, bufs: TopkBufs) -> XFeatResult {
         let count = (self.count_pin.as_slice()[0].max(0) as usize).min(bufs.top_k);
-        let scores = self.scores_pin.as_slice()[..count].to_vec();
-        let kpts_cpu = self.kpts_pin.as_slice()[..count * 2].to_vec();
         XFeatResult {
             kpts: bufs.kpts_dev,
             descs: bufs.descs_dev,
-            scores,
-            kpts_cpu,
+            scores: bufs.scores_dev,
+            count,
         }
     }
 
     /// Synchronous one-shot: [`launch_topk`] + a single sync + [`finish_topk`].
     ///
-    /// For non-pipeline callers (`XFeat::extract`); the pipeline path uses the
-    /// async `launch_topk`/`finish_topk` pair so the postproc adds no extra sync.
+    /// The convenience used by `XFeat::run`; callers that overlap work can instead
+    /// drive `launch_topk` / sync / `finish_topk` themselves.
     ///
     /// [`launch_topk`]: XFeatPostproc::launch_topk
     /// [`finish_topk`]: XFeatPostproc::finish_topk
@@ -596,8 +606,8 @@ impl XFeatPostproc {
         res1: &XFeatResult,
         min_cossim: f32,
     ) -> Result<Vec<(usize, usize)>, XFeatError> {
-        let n0 = res0.scores.len();
-        let n1 = res1.scores.len();
+        let n0 = res0.count;
+        let n1 = res1.count;
         if n0 == 0 || n1 == 0 {
             return Ok(Vec::new());
         }
@@ -633,28 +643,24 @@ impl XFeatPostproc {
 
         // One tiled argmax kernel, both directions (sim only needed for 1→2).
         // Block size must match MATCH_BLOCK in the kernel source.
-        unsafe {
-            self.stream
-                .launch_builder(&self.fn_match_argmax)
-                .arg(&d0_raw)
-                .arg(&d1_raw)
-                .arg(&m12_raw)
-                .arg(&s12_raw)
-                .arg(&n0_i)
-                .arg(&n1_i)
-                .launch(vrt::cuda::cfg_1d(n0, 128))?;
-        }
-        unsafe {
-            self.stream
-                .launch_builder(&self.fn_match_argmax)
-                .arg(&d1_raw)
-                .arg(&d0_raw)
-                .arg(&m21_raw)
-                .arg(&null_sim)
-                .arg(&n1_i)
-                .arg(&n0_i)
-                .launch(vrt::cuda::cfg_1d(n1, 128))?;
-        }
+        self.fn_match_argmax
+            .launch_builder(&self.stream)
+            .arg(&d0_raw)
+            .arg(&d1_raw)
+            .arg(&m12_raw)
+            .arg(&s12_raw)
+            .arg(&n0_i)
+            .arg(&n1_i)
+            .launch_cfg(cfg_1d(n0, 128))?;
+        self.fn_match_argmax
+            .launch_builder(&self.stream)
+            .arg(&d1_raw)
+            .arg(&d0_raw)
+            .arg(&m21_raw)
+            .arg(&null_sim)
+            .arg(&n1_i)
+            .arg(&n0_i)
+            .launch_cfg(cfg_1d(n1, 128))?;
 
         self.stream.synchronize()?;
         let match12: Vec<i32> = self.stream.clone_dtoh(&match12_dev)?;
@@ -767,14 +773,14 @@ mod gpu_tests {
             let r0 = XFeatResult {
                 kpts: stream.clone_htod(&vec![0.0f32; n0 * 2]).unwrap(),
                 descs: stream.clone_htod(&h0).unwrap(),
-                scores: vec![1.0; n0],
-                kpts_cpu: Vec::new(),
+                scores: stream.clone_htod(&vec![1.0f32; n0]).unwrap(),
+                count: n0,
             };
             let r1 = XFeatResult {
                 kpts: stream.clone_htod(&vec![0.0f32; n1 * 2]).unwrap(),
                 descs: stream.clone_htod(&h1).unwrap(),
-                scores: vec![1.0; n1],
-                kpts_cpu: Vec::new(),
+                scores: stream.clone_htod(&vec![1.0f32; n1]).unwrap(),
+                count: n1,
             };
 
             // Warm-up (first launch pays module/alloc setup), then timed run.
@@ -817,16 +823,16 @@ mod gpu_tests {
         let sr: CUdeviceptr = s12.device_ptr(stream.as_ref()).0;
         let n_i = n as i32;
 
-        let launch = || unsafe {
-            stream
-                .launch_builder(&pp.fn_match_argmax)
+        let launch = || {
+            pp.fn_match_argmax
+                .launch_builder(&stream)
                 .arg(&d0r)
                 .arg(&d1r)
                 .arg(&mr)
                 .arg(&sr)
                 .arg(&n_i)
                 .arg(&n_i)
-                .launch(vrt::cuda::cfg_1d(n, 128))
+                .launch_cfg(vrt::cuda::cfg_1d(n, 128))
                 .unwrap();
         };
 
@@ -885,11 +891,12 @@ mod gpu_compact_tests {
         let res = pp.process_topk_sample(desc_ptr, &score_dev, h, w).unwrap();
 
         // Exactly the top-2 keypoints, in any order: pair (score, x, y) and sort.
-        assert_eq!(res.scores.len(), 2);
-        let mut got: Vec<(i32, u32, u32)> = res
-            .scores
+        assert_eq!(res.count, 2);
+        let scores = res.scores_to_host(&stream).unwrap();
+        let kpts = res.kpts_to_host(&stream).unwrap();
+        let mut got: Vec<(i32, u32, u32)> = scores
             .iter()
-            .zip(res.kpts_cpu.chunks_exact(2))
+            .zip(kpts.chunks_exact(2))
             .map(|(s, xy)| ((s * 1000.0) as i32, xy[0] as u32, xy[1] as u32))
             .collect();
         got.sort_by(|a, b| b.0.cmp(&a.0));
@@ -904,7 +911,7 @@ mod gpu_compact_tests {
         // Descriptors (count rows of the capacity-K buffer) must be L2-normalized
         // samples of the constant map.
         let descs: Vec<f32> = stream.clone_dtoh(&res.descs).unwrap();
-        for row in descs.chunks_exact(64).take(res.scores.len()) {
+        for row in descs.chunks_exact(64).take(res.count) {
             let norm: f32 = row.iter().map(|v| v * v).sum::<f32>().sqrt();
             assert!(
                 (norm - 1.0).abs() < 1e-4,

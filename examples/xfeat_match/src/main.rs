@@ -20,10 +20,12 @@
 
 use std::sync::Arc;
 
-use image::{Rgb, RgbImage};
+use kornia_image::{Image, ImageSize, InterpolationMode};
+use kornia_imgproc::resize::resize_fast_rgb;
+use kornia_io::functional::read_image_any_rgb8;
+use kornia_io::png::write_image_png_rgb8;
 use vrt::logger::Severity;
-use vrt::{CudaStream, DType, Engine, Logger, Runtime, VrtTensor};
-use vrt_preproc::Preprocessor;
+use vrt::{CudaStream, Engine, Logger, Runtime};
 use vrt_xfeat::{XFeat, XFeatParams, XFeatResult};
 
 const MODEL_W: u32 = 640; // multiple of 32 (XFeat downsamples ×8)
@@ -68,22 +70,21 @@ fn main() -> Result<(), vrt::BoxError> {
     let engine = Engine::from_file(runtime, &engine_path)?;
     let params = XFeatParams::new(TOP_K, THRESHOLD, MODEL_H as usize, MODEL_W as usize);
 
-    // One shared stream for XFeat + the preprocessor (one sync per extract).
+    // One shared stream for XFeat (one sync per extract). XFeat letterboxes internally.
     let stream = vrt::Stream::new_standalone()?.cuda_stream().clone();
-    let mut xfeat = XFeat::with_stream(Arc::clone(&engine), stream.clone(), params)?;
-    let mut preproc = Preprocessor::new(stream.clone(), MODEL_W, MODEL_H, MODEL_W, MODEL_H)?;
+    let mut xfeat = XFeat::new(Arc::clone(&engine), stream.clone(), params)?;
 
     // Extract features from both images (resized to the model size for viz parity).
-    let (map_res, map_img) = extract(&mut xfeat, &mut preproc, &stream, map_path)?;
-    let (query_res, query_img) = extract(&mut xfeat, &mut preproc, &stream, query_path)?;
+    let (map_res, map_img) = extract(&mut xfeat, &stream, map_path)?;
+    let (query_res, query_img) = extract(&mut xfeat, &stream, query_path)?;
 
     // Match: mutual nearest-neighbour on the L2-normalised descriptors.
     let matches = xfeat
         .postproc()
         .match_mutual_nn_gpu(&map_res, &query_res, MIN_COSSIM)?;
 
-    println!("map:   {} keypoints", map_res.scores.len());
-    println!("query: {} keypoints", query_res.scores.len());
+    println!("map:   {} keypoints", map_res.len());
+    println!("query: {} keypoints", query_res.len());
     println!(
         "matches (mutual-NN, cossim ≥ {MIN_COSSIM}): {}",
         matches.len()
@@ -97,8 +98,16 @@ fn main() -> Result<(), vrt::BoxError> {
         }
     );
 
+    // Keypoints live on the GPU — download both sets to host for drawing.
+    let map_kpts = map_res.kpts_to_host(&stream)?;
+    let query_kpts = query_res.kpts_to_host(&stream)?;
     save_match_viz(
-        &map_img, &query_img, &map_res, &query_res, &matches, out_path,
+        &map_img,
+        &query_img,
+        &map_kpts,
+        &query_kpts,
+        &matches,
+        out_path,
     )?;
     println!("saved {out_path}");
     Ok(())
@@ -108,32 +117,23 @@ fn main() -> Result<(), vrt::BoxError> {
 /// alongside the resized RGB image (model-space coords align with it).
 fn extract(
     xfeat: &mut XFeat,
-    preproc: &mut Preprocessor,
     stream: &Arc<CudaStream>,
     path: &str,
-) -> Result<(XFeatResult, RgbImage), vrt::BoxError> {
-    let img = image::open(path)?.to_rgb8();
-    let resized = image::imageops::resize(
-        &img,
-        MODEL_W,
-        MODEL_H,
-        image::imageops::FilterType::Triangle,
-    );
-
-    // RGB → RGBA (the preprocessor samples an RGBA pitch-linear surface).
-    let mut rgba = Vec::with_capacity((MODEL_W * MODEL_H * 4) as usize);
-    for px in resized.pixels() {
-        rgba.extend_from_slice(&[px[0], px[1], px[2], 255]);
-    }
-
-    // H2D + letterbox (identity here: src == dst == model size) into a CHW tensor.
-    let tensor = VrtTensor::alloc(
-        stream,
-        [1, 3, MODEL_H as usize, MODEL_W as usize],
-        DType::F32,
+) -> Result<(XFeatResult, Image<u8, 3>), vrt::BoxError> {
+    let src = read_image_any_rgb8(path)?;
+    let mut resized = Image::<u8, 3>::from_size_val(
+        ImageSize {
+            width: MODEL_W as usize,
+            height: MODEL_H as usize,
+        },
+        0,
     )?;
-    let _guard = preproc.process(&rgba, MODEL_W * 4, tensor.as_mut_ptr() as *mut f32)?;
-    let result = xfeat.extract(&tensor)?; // syncs internally
+    resize_fast_rgb(&src, &mut resized, InterpolationMode::Bilinear)?;
+
+    // Upload to device, then hand XFeat the device image. The source is already
+    // model-sized, so XFeat's internal letterbox is the identity.
+    let dev = Image(resized.0.to_cuda(stream)?);
+    let result = xfeat.run(&dev)?; // letterbox + backbone + sync
     Ok((result, resized))
 }
 
@@ -141,48 +141,74 @@ fn extract(
 
 /// Side-by-side map | query with green lines between matched keypoints.
 fn save_match_viz(
-    map_img: &RgbImage,
-    query_img: &RgbImage,
-    map_res: &XFeatResult,
-    query_res: &XFeatResult,
+    map_img: &Image<u8, 3>,
+    query_img: &Image<u8, 3>,
+    map_kpts: &[f32],
+    query_kpts: &[f32],
     matches: &[(usize, usize)],
     out_path: &str,
 ) -> Result<(), vrt::BoxError> {
-    let (w, h) = (MODEL_W, MODEL_H);
-    let mut canvas = RgbImage::new(w * 2, h);
+    let (w, h) = (MODEL_W as usize, MODEL_H as usize);
+    let cw = w * 2;
+    let (mp, qp) = (map_img.as_slice(), query_img.as_slice());
+
+    // RGB canvas: map on the left half, query on the right.
+    let mut canvas = vec![0u8; cw * h * 3];
     for y in 0..h {
         for x in 0..w {
-            canvas.put_pixel(x, y, *map_img.get_pixel(x, y));
-            canvas.put_pixel(x + w, y, *query_img.get_pixel(x, y));
+            let s = (y * w + x) * 3;
+            let l = (y * cw + x) * 3;
+            let r = (y * cw + (x + w)) * 3;
+            canvas[l..l + 3].copy_from_slice(&mp[s..s + 3]);
+            canvas[r..r + 3].copy_from_slice(&qp[s..s + 3]);
         }
     }
 
     for &(mi, qi) in matches {
-        let (mx, my) = (map_res.kpts_cpu[mi * 2], map_res.kpts_cpu[mi * 2 + 1]);
-        let (qx, qy) = (query_res.kpts_cpu[qi * 2], query_res.kpts_cpu[qi * 2 + 1]);
+        let (mx, my) = (map_kpts[mi * 2], map_kpts[mi * 2 + 1]);
+        let (qx, qy) = (query_kpts[qi * 2], query_kpts[qi * 2 + 1]);
         draw_line(
             &mut canvas,
+            cw,
+            h,
             mx as i32,
             my as i32,
             qx as i32 + w as i32,
             qy as i32,
-            Rgb([40, 220, 40]),
+            [40, 220, 40],
         );
     }
 
-    canvas.save(out_path)?;
+    let out = Image::<u8, 3>::new(
+        ImageSize {
+            width: cw,
+            height: h,
+        },
+        canvas,
+    )?;
+    write_image_png_rgb8(out_path, &out)?;
     Ok(())
 }
 
-/// Bresenham line, clipped to the canvas.
-fn draw_line(img: &mut RgbImage, x0: i32, y0: i32, x1: i32, y1: i32, color: Rgb<u8>) {
-    let (w, h) = (img.width() as i32, img.height() as i32);
+/// Bresenham line over an interleaved RGB byte buffer (`w`×`h`), clipped.
+fn draw_line(
+    buf: &mut [u8],
+    w: usize,
+    h: usize,
+    x0: i32,
+    y0: i32,
+    x1: i32,
+    y1: i32,
+    color: [u8; 3],
+) {
+    let (iw, ih) = (w as i32, h as i32);
     let (dx, dy) = ((x1 - x0).abs(), -(y1 - y0).abs());
     let (sx, sy) = (if x0 < x1 { 1 } else { -1 }, if y0 < y1 { 1 } else { -1 });
     let (mut x, mut y, mut err) = (x0, y0, dx + dy);
     loop {
-        if x >= 0 && x < w && y >= 0 && y < h {
-            img.put_pixel(x as u32, y as u32, color);
+        if x >= 0 && x < iw && y >= 0 && y < ih {
+            let p = (y as usize * w + x as usize) * 3;
+            buf[p..p + 3].copy_from_slice(&color);
         }
         if x == x1 && y == y1 {
             break;

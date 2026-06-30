@@ -4,11 +4,12 @@ use std::sync::Arc;
 
 use crate::{
     buffer::{DeviceBuffer, Stream},
+    dtype::DType,
     engine::{DataType, Engine, TensorMode},
     error::{last_trt_error, Result, TrtError},
-    tensor::{DType, MemKind, VrtTensor},
 };
 use cudarc::driver::{CudaContext, CudaStream};
+use std::ffi::c_void;
 use trt_sys::*;
 
 /// Map an engine I/O [`DataType`] to a tensor [`DType`].
@@ -55,6 +56,41 @@ impl OutputTensor {
             .chunks_exact(2)
             .map(|b| f16::from_le_bytes([b[0], b[1]]).to_f32())
             .collect()
+    }
+}
+
+/// Borrowed device-side view of a TRT output: device pointer + resolved
+/// shape/dtype/byte-length.
+///
+/// Aliases Session-owned output memory and is valid only until the next `run_*`
+/// call or `Session` drop. Decode reads it **on-device** (kornia has no
+/// borrowed-device-tensor constructor and the session reuses these buffers, so
+/// outputs stay raw device views rather than owned kornia tensors).
+pub struct OutputView {
+    ptr: *mut c_void,
+    shape: Vec<usize>,
+    dtype: DType,
+}
+
+// SAFETY: a device pointer is a stable address; the holder serializes access via
+// the per-frame stream sync, exactly as the old borrowed VrtTensor did.
+unsafe impl Send for OutputView {}
+
+impl OutputView {
+    /// Shape as `i64` (TRT / decode convention).
+    pub fn shape_i64(&self) -> Vec<i64> {
+        self.shape.iter().map(|&d| d as i64).collect()
+    }
+    /// Device pointer as `*const f32`, checked against the output dtype — an
+    /// `--fp16`-output engine fails loudly here instead of being misread.
+    pub fn f32_ptr(&self) -> Result<*const f32> {
+        if self.dtype != DType::F32 {
+            return Err(TrtError::Shape(format!(
+                "output is {:?}, not F32",
+                self.dtype
+            )));
+        }
+        Ok(self.ptr as *const f32)
     }
 }
 
@@ -236,7 +272,7 @@ impl Session {
 
     /// Like `run_device_inputs` but leaves outputs in GPU memory.
     ///
-    /// Returns a borrowed [`VrtTensor`] per output tensor: device pointer plus
+    /// Returns a borrowed [`OutputView`] per output tensor: device pointer plus
     /// the resolved shape, dtype, and byte length.  The tensors remain valid
     /// until the next `run_*` call or `Session` drop.
     ///
@@ -249,7 +285,7 @@ impl Session {
     pub unsafe fn run_device_inputs_on_device(
         &mut self,
         device_inputs: &[(&str, *mut std::ffi::c_void, &[i64])],
-    ) -> Result<HashMap<String, VrtTensor>> {
+    ) -> Result<HashMap<String, OutputView>> {
         for (name, dev_ptr, shape) in device_inputs {
             let c_name =
                 CString::new(*name).map_err(|_| TrtError::UnknownTensor((*name).into()))?;
@@ -271,7 +307,7 @@ impl Session {
         self.enqueue_outputs_only()
     }
 
-    fn enqueue_outputs_only(&mut self) -> Result<HashMap<String, VrtTensor>> {
+    fn enqueue_outputs_only(&mut self) -> Result<HashMap<String, OutputView>> {
         for (name, state) in &self.outputs {
             let c_name = CString::new(name.as_str()).unwrap();
             let dev_ptr = state.buf.as_device_ptr(&self.stream);
@@ -287,20 +323,14 @@ impl Session {
             return Err(TrtError::Trt(last_trt_error()));
         }
 
-        let cuda_stream = self.stream.cuda_stream().clone();
         let mut result = HashMap::new();
         for (name, state) in &self.outputs {
-            // SAFETY: borrows a Session-owned output buffer; the validity window
+            // Borrows a Session-owned output buffer; the validity window
             // (until next run_* / Session drop) is the documented caller contract.
-            let view = unsafe {
-                VrtTensor::borrowed(
-                    state.buf.as_device_ptr(&self.stream),
-                    state.shape.iter().map(|&d| d as usize).collect(),
-                    dtype_of(state.dtype),
-                    MemKind::Device,
-                    state.buf.len_bytes,
-                    cuda_stream.clone(),
-                )
+            let view = OutputView {
+                ptr: state.buf.as_device_ptr(&self.stream),
+                shape: state.shape.iter().map(|&d| d as usize).collect(),
+                dtype: dtype_of(state.dtype),
             };
             result.insert(name.clone(), view);
         }
