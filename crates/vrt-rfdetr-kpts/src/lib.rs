@@ -163,9 +163,9 @@ impl RfDetrKpts {
         let max_kp = (slots / num_classes.max(1)).max(1); // 17
         let kp_offset = PERSON_CLASS * max_kp; // person slots start at 17
 
-        let lab = to_f32(labels);
-        let bx = to_f32(dets);
-        let kp = to_f32(kpts);
+        let lab = to_f32(labels)?;
+        let bx = to_f32(dets)?;
+        let kp = to_f32(kpts)?;
         let (sw, sh) = (img.width() as f32, img.height() as f32);
 
         let mut out = Vec::new();
@@ -199,6 +199,14 @@ impl RfDetrKpts {
                 } else {
                     vis
                 };
+                // A huge precision logit overflows exp() → det=inf → sigma=NaN →
+                // conf=NaN, which would poison downstream confidence-weighted
+                // smoothing / bone learning. Clamp to a valid [0,1] confidence.
+                let conf = if conf.is_finite() {
+                    conf.clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
                 *kpt = [kp[o] * sw, kp[o + 1] * sh, conf];
             }
             out.push(PersonPose {
@@ -217,10 +225,14 @@ fn sigmoid(x: f32) -> f32 {
 }
 
 /// Host `OutputTensor` → `Vec<f32>` (engine I/O may be fp32 or, with `--fp16`, fp16).
-fn to_f32(t: &OutputTensor) -> Vec<f32> {
+///
+/// Errors on any other dtype rather than returning an empty vec — a silent
+/// empty would turn into an out-of-bounds panic in the decode loop with no clue
+/// to the real cause (an unexpected output binding dtype).
+fn to_f32(t: &OutputTensor) -> Result<Vec<f32>, BoxError> {
     match t.dtype {
-        DataType::Float32 => t.as_f32().to_vec(),
-        DataType::Float16 => t.as_f32_from_f16(),
-        _ => Vec::new(),
+        DataType::Float32 => Ok(t.as_f32().to_vec()),
+        DataType::Float16 => Ok(t.as_f32_from_f16()),
+        other => Err(format!("rfdetr-kpts: unsupported output dtype {other:?}").into()),
     }
 }
