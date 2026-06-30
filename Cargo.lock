@@ -1770,6 +1770,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "rfdetr_bench"
+version = "0.1.0"
+dependencies = [
+ "kornia-image",
+ "kornia-imgproc",
+ "kornia-io",
+ "vision-rt",
+ "vrt-hub",
+ "vrt-rfdetr",
+]
+
+[[package]]
 name = "ring"
 version = "0.17.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2399,6 +2411,17 @@ dependencies = [
  "hf-hub",
  "sha2",
  "thiserror",
+ "vision-rt",
+]
+
+[[package]]
+name = "vrt-rfdetr"
+version = "0.1.0"
+dependencies = [
+ "cudarc",
+ "kornia-image",
+ "kornia-imgproc",
+ "kornia-tensor",
  "vision-rt",
 ]
 

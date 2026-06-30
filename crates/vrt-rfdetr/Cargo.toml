@@ -1,0 +1,17 @@
+[package]
+name = "vrt-rfdetr"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+description = "RF-DETR object detection for vision-rt — NMS-free transformer detector on TensorRT"
+
+[lib]
+name = "vrt_rfdetr"
+
+[dependencies]
+kornia-image  = { workspace = true }
+kornia-tensor = { workspace = true }
+vrt = { path = "../vrt", package = "vision-rt" }
+kornia-imgproc = { workspace = true }
+cudarc         = { workspace = true }

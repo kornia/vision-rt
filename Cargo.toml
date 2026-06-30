@@ -5,9 +5,11 @@ members = [
     "crates/vrt",
     "crates/vrt-xfeat",
     "crates/vrt-track",
+    "crates/vrt-rfdetr",
     "crates/vrt-hub",
     "examples/xfeat_match",
     "examples/xfeat_bench",
+    "examples/rfdetr_bench",
 ]
 
 [workspace.dependencies]
