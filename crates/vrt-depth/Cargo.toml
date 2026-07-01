@@ -1,0 +1,16 @@
+[package]
+name = "vrt-depth"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+description = "Monocular depth refinement (lingbot-depth) on TensorRT for vision-rt — RGB + raw depth → refined depth"
+
+[lib]
+name = "vrt_depth"
+
+[dependencies]
+kornia-image  = { workspace = true }
+kornia-tensor = { workspace = true }
+kornia-imgproc = { workspace = true }
+vrt = { path = "../vrt", package = "vision-rt" }

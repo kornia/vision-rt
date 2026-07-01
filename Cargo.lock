@@ -380,6 +380,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "depth_bench"
+version = "0.1.0"
+dependencies = [
+ "kornia-image",
+ "kornia-tensor",
+ "vision-rt",
+ "vrt-depth",
+]
+
+[[package]]
 name = "digest"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2425,6 +2435,16 @@ dependencies = [
  "log",
  "thiserror",
  "trt-sys",
+]
+
+[[package]]
+name = "vrt-depth"
+version = "0.1.0"
+dependencies = [
+ "kornia-image",
+ "kornia-imgproc",
+ "kornia-tensor",
+ "vision-rt",
 ]
 
 [[package]]

@@ -1,0 +1,11 @@
+[package]
+name = "depth_bench"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+vrt = { path = "../../crates/vrt", package = "vision-rt" }
+vrt-depth     = { path = "../../crates/vrt-depth" }
+kornia-image  = { workspace = true }
+kornia-tensor = { workspace = true }

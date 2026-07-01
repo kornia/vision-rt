@@ -9,12 +9,14 @@ members = [
     "crates/vrt-rfdetr-kpts",
     "crates/vrt-reid",
     "crates/vrt-lift",
+    "crates/vrt-depth",
     "crates/vrt-hub",
     "examples/xfeat_match",
     "examples/xfeat_bench",
     "examples/rfdetr_bench",
     "examples/rfdetr_kpts_check",
     "examples/track_bench",
+    "examples/depth_bench",
 ]
 
 [workspace.dependencies]
