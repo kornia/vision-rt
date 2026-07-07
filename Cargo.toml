@@ -32,10 +32,10 @@ cudarc = { version = "0.19", default-features = false, features = [
 ] }
 # kornia GPU image/tensor types — `cudarc` feature enables the device backend +
 # custom kernels. Git-pinned to a fixed cuda-preprocess rev (reproducible build).
-kornia-image   = { git = "https://github.com/kornia/kornia-rs", rev = "cc3224266c2c6794f0cdacc0112f24b51c0fa5aa", features = ["cudarc"] }
-kornia-tensor  = { git = "https://github.com/kornia/kornia-rs", rev = "cc3224266c2c6794f0cdacc0112f24b51c0fa5aa", features = ["cudarc"] }
-kornia-imgproc = { git = "https://github.com/kornia/kornia-rs", rev = "cc3224266c2c6794f0cdacc0112f24b51c0fa5aa", features = ["cudarc"] }
-kornia-io      = { git = "https://github.com/kornia/kornia-rs", rev = "cc3224266c2c6794f0cdacc0112f24b51c0fa5aa" }
+kornia-image   = { git = "https://github.com/kornia/kornia-rs", tag = "v0.1.15-rc.4", features = ["cudarc"] }
+kornia-tensor  = { git = "https://github.com/kornia/kornia-rs", tag = "v0.1.15-rc.4", features = ["cudarc"] }
+kornia-imgproc = { git = "https://github.com/kornia/kornia-rs", tag = "v0.1.15-rc.4", features = ["cudarc"] }
+kornia-io      = { git = "https://github.com/kornia/kornia-rs", tag = "v0.1.15-rc.4" }
 
 [workspace.package]
 version = "0.1.0"
