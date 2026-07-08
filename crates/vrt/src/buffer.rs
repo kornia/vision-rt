@@ -90,24 +90,6 @@ impl DeviceBuffer {
         Ok(Self { slice, len_bytes })
     }
 
-    /// Copy host bytes → device on the given stream (asynchronous).
-    pub fn copy_from_host(&mut self, src: &[u8], stream: &Stream) -> Result<()> {
-        assert_eq!(src.len(), self.len_bytes, "host/device size mismatch");
-        stream
-            .inner
-            .memcpy_htod(src, &mut self.slice)
-            .map_err(|e| driver_err(e, "cudaMemcpyH2D"))
-    }
-
-    /// Copy device → host on the given stream (call `stream.sync()` before reading result).
-    pub fn copy_to_host(&self, dst: &mut Vec<u8>, stream: &Stream) -> Result<()> {
-        *dst = stream
-            .inner
-            .clone_dtoh(&self.slice)
-            .map_err(|e| driver_err(e, "cudaMemcpyD2H"))?;
-        Ok(())
-    }
-
     /// Convenience: raw device pointer (no guard held — suitable when TRT manages sync).
     pub fn as_device_ptr(&self, stream: &Stream) -> *mut std::ffi::c_void {
         let (ptr, _guard) = self.slice.device_ptr(stream.inner.as_ref());

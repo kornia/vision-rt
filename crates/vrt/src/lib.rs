@@ -1,18 +1,17 @@
 //! Safe, idiomatic Rust wrapper for TensorRT 10.x.
 //!
 //! # Usage
+//! Load an engine, then run inference through [`ModelSession`] with a device
+//! tensor on a shared CUDA stream (one async enqueue + one sync per call):
 //! ```no_run
-//! use std::sync::Arc;
-//! use vrt::{Logger, Runtime, Engine, Session};
+//! use vrt::{Logger, Runtime, Engine};
 //! use vrt::logger::Severity;
 //!
 //! let logger  = Logger::new(Severity::Warning)?;
 //! let runtime = Runtime::new(logger)?;
 //! let engine  = Engine::from_file(runtime, "model.fp16.engine")?;
-//! let mut session = Session::new(engine)?;
-//!
-//! let input = vec![0.0f32; 3 * 640 * 640];
-//! let outputs = session.run(&[("images", &input)])?;
+//! // let mut session = ModelSession::new(engine, stream)?;
+//! // let out = session.run(&input_tensor)?;   // Tensor<f32,4> device input
 //! # Ok::<(), vrt::error::TrtError>(())
 //! ```
 //!
@@ -46,5 +45,5 @@ pub use error::{Result, TrtError};
 pub use logger::Logger;
 pub use model::{ModelSession, TRTensorMap};
 pub use runtime::Runtime;
-pub use session::{OutputTensor, OutputView, Session};
+pub use session::{OutputView, Session};
 pub use trt_sys::TENSORRT_VERSION;

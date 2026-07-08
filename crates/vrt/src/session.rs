@@ -25,40 +25,6 @@ fn dtype_of(d: DataType) -> DType {
     }
 }
 
-/// Raw output tensor: bytes, dtype, shape.
-#[derive(Debug)]
-pub struct OutputTensor {
-    pub name: String,
-    pub data: Vec<u8>,
-    pub dtype: DataType,
-    pub shape: Vec<i64>,
-}
-
-impl OutputTensor {
-    /// Interpret as f32 slice (panics if dtype != Float32 or data is misaligned).
-    pub fn as_f32(&self) -> &[f32] {
-        assert_eq!(self.dtype, DataType::Float32, "tensor is not f32");
-        let ptr = self.data.as_ptr();
-        // from_raw_parts requires f32 alignment; Vec<u8> only guarantees 1.
-        // The global allocator aligns these sizes in practice — verify anyway.
-        assert!(
-            (ptr as usize).is_multiple_of(std::mem::align_of::<f32>()),
-            "output buffer misaligned for f32 view"
-        );
-        unsafe { std::slice::from_raw_parts(ptr as *const f32, self.data.len() / 4) }
-    }
-
-    /// Convert FP16 output data to f32.
-    pub fn as_f32_from_f16(&self) -> Vec<f32> {
-        assert_eq!(self.dtype, DataType::Float16, "tensor is not f16");
-        use half::f16;
-        self.data
-            .chunks_exact(2)
-            .map(|b| f16::from_le_bytes([b[0], b[1]]).to_f32())
-            .collect()
-    }
-}
-
 /// Borrowed device-side view of a TRT output: device pointer + resolved
 /// shape/dtype/byte-length.
 ///
@@ -110,7 +76,8 @@ pub struct Session {
     ctx: *mut btrt_context_t,
     _engine: Arc<Engine>,
     stream: Stream,
-    inputs: HashMap<String, TensorState>,
+    // Only OUTPUT buffers are session-owned; inputs are the caller's device
+    // pointers, bound per call in `run_device_inputs_on_device`.
     outputs: HashMap<String, TensorState>,
     _not_sync: std::marker::PhantomData<std::cell::UnsafeCell<()>>,
 }
@@ -166,25 +133,27 @@ impl Session {
         }
         let mut guard = CtxGuard(ctx);
 
-        let mut inputs = HashMap::new();
+        // Allocate device buffers for OUTPUT tensors only; inputs are supplied by
+        // the caller as device pointers at run time.
         let mut outputs = HashMap::new();
         for spec in engine.specs() {
+            if spec.mode != TensorMode::Output {
+                continue;
+            }
             let n_elems: i64 = spec.dims.iter().filter(|&&d| d > 0).product::<i64>().max(1);
             let bytes_per_elem = dtype_bytes(spec.dtype);
             let buf = DeviceBuffer::alloc_with_stream(
                 stream.cuda_stream(),
                 n_elems as usize * bytes_per_elem,
             )?;
-            let state = TensorState {
-                buf,
-                shape: spec.dims.clone(),
-                dtype: spec.dtype,
-            };
-            if spec.mode == TensorMode::Input {
-                inputs.insert(spec.name.clone(), state);
-            } else {
-                outputs.insert(spec.name.clone(), state);
-            }
+            outputs.insert(
+                spec.name.clone(),
+                TensorState {
+                    buf,
+                    shape: spec.dims.clone(),
+                    dtype: spec.dtype,
+                },
+            );
         }
 
         guard.0 = std::ptr::null_mut(); // ownership transfers to Session::drop
@@ -192,7 +161,6 @@ impl Session {
             ctx,
             _engine: engine,
             stream,
-            inputs,
             outputs,
             _not_sync: std::marker::PhantomData,
         })
@@ -216,75 +184,23 @@ impl Session {
         Ok(())
     }
 
-    /// Run inference with CPU inputs (H2D copy then enqueue).
-    pub fn run(&mut self, inputs: &[(&str, &[f32])]) -> Result<HashMap<String, OutputTensor>> {
-        for (name, data) in inputs {
-            let c_name =
-                CString::new(*name).map_err(|_| TrtError::UnknownTensor((*name).into()))?;
-            let state = self
-                .inputs
-                .get_mut(*name)
-                .ok_or_else(|| TrtError::UnknownTensor((*name).into()))?;
-            state
-                .buf
-                .copy_from_host(bytemuck_f32_to_u8(data), &self.stream)?;
-            let dev_ptr = state.buf.as_device_ptr(&self.stream);
-            let code =
-                unsafe { btrt_context_set_tensor_address(self.ctx, c_name.as_ptr(), dev_ptr) };
-            if code != 0 {
-                return Err(TrtError::Trt(last_trt_error()));
-            }
-        }
-        self.enqueue_and_collect()
-    }
-
-    /// Run inference with inputs **already in CUDA device memory** — no H2D copy.
+    /// Run inference with inputs **already in CUDA device memory**, leaving the
+    /// outputs in GPU memory — no H2D/D2H copies, no sync.
     ///
-    /// `device_inputs`: `(tensor_name, cuda_device_ptr, shape)`.
-    ///
-    /// # Safety
-    /// Each `*mut c_void` must be a valid CUDA device pointer of the right size,
-    /// alive until this function returns (after stream sync).
-    pub unsafe fn run_device_inputs(
-        &mut self,
-        device_inputs: &[(&str, *mut std::ffi::c_void, &[i64])],
-    ) -> Result<HashMap<String, OutputTensor>> {
-        for (name, dev_ptr, shape) in device_inputs {
-            let c_name =
-                CString::new(*name).map_err(|_| TrtError::UnknownTensor((*name).into()))?;
-            let rc = btrt_context_set_input_shape(
-                self.ctx,
-                c_name.as_ptr(),
-                shape.as_ptr(),
-                shape.len() as i32,
-            );
-            if rc != 0 {
-                return Err(TrtError::Trt(last_trt_error()));
-            }
-            let rc = btrt_context_set_tensor_address(self.ctx, c_name.as_ptr(), *dev_ptr);
-            if rc != 0 {
-                return Err(TrtError::Trt(last_trt_error()));
-            }
-        }
-        self.resize_output_buffers()?;
-        self.enqueue_and_collect()
-    }
-
-    /// Like `run_device_inputs` but leaves outputs in GPU memory.
-    ///
-    /// Returns a borrowed [`OutputView`] per output tensor: device pointer plus
-    /// the resolved shape, dtype, and byte length.  The tensors remain valid
-    /// until the next `run_*` call or `Session` drop.
+    /// `device_inputs`: `(tensor_name, cuda_device_ptr, shape)`. Returns a
+    /// borrowed [`OutputView`] per output tensor: device pointer plus the
+    /// resolved shape, dtype, and byte length. The views remain valid until the
+    /// next `run_*` call or `Session` drop.
     ///
     /// **Caller must call `session.stream().sync()` before reading the outputs.**
     ///
     /// # Safety
-    /// Unlike `run_device_inputs`, this does NOT sync — it enqueues async work
-    /// and returns. The GPU reads the bound input device pointers during the
-    /// caller's later `stream().sync()`, so every input buffer must stay valid
-    /// until that sync (not merely until this call returns). Additionally the
-    /// returned views alias Session-owned device memory — do not outlive the
-    /// Session or hold them across a subsequent `run_*` call.
+    /// This does NOT sync — it enqueues async work and returns. The GPU reads the
+    /// bound input device pointers during the caller's later `stream().sync()`, so
+    /// every input buffer must stay valid until that sync (not merely until this
+    /// call returns). Additionally the returned views alias Session-owned device
+    /// memory — do not outlive the Session or hold them across a subsequent
+    /// `run_*` call.
     pub unsafe fn run_device_inputs_on_device(
         &mut self,
         device_inputs: &[(&str, *mut std::ffi::c_void, &[i64])],
@@ -340,48 +256,6 @@ impl Session {
         Ok(result)
     }
 
-    fn enqueue_and_collect(&mut self) -> Result<HashMap<String, OutputTensor>> {
-        for (name, state) in &self.outputs {
-            let c_name = CString::new(name.as_str()).unwrap();
-            let dev_ptr = state.buf.as_device_ptr(&self.stream);
-            let code =
-                unsafe { btrt_context_set_tensor_address(self.ctx, c_name.as_ptr(), dev_ptr) };
-            if code != 0 {
-                return Err(TrtError::Trt(last_trt_error()));
-            }
-        }
-
-        let code = unsafe { btrt_context_enqueue_v3(self.ctx, self.stream.as_raw()) };
-        if code != 0 {
-            return Err(TrtError::Trt(last_trt_error()));
-        }
-
-        let mut raw_outputs: HashMap<String, Vec<u8>> = HashMap::new();
-        for (name, state) in &self.outputs {
-            let mut buf = Vec::new();
-            state.buf.copy_to_host(&mut buf, &self.stream)?;
-            raw_outputs.insert(name.clone(), buf);
-        }
-
-        self.stream.sync()?;
-
-        let mut result = HashMap::new();
-        for (name, data) in raw_outputs {
-            let state = &self.outputs[&name];
-            let shape = self.resolved_output_shape(&name)?;
-            result.insert(
-                name.clone(),
-                OutputTensor {
-                    name,
-                    data,
-                    dtype: state.dtype,
-                    shape,
-                },
-            );
-        }
-        Ok(result)
-    }
-
     fn resolved_output_shape(&self, name: &str) -> Result<Vec<i64>> {
         let c_name = CString::new(name).unwrap();
         let mut dims = [0i64; 8];
@@ -430,8 +304,4 @@ fn dtype_bytes(dtype: DataType) -> usize {
         DataType::Float16 => 2,
         DataType::Int8 | DataType::UInt8 | DataType::Bool => 1,
     }
-}
-
-fn bytemuck_f32_to_u8(s: &[f32]) -> &[u8] {
-    unsafe { std::slice::from_raw_parts(s.as_ptr() as *const u8, s.len() * 4) }
 }
