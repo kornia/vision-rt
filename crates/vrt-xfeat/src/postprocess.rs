@@ -689,65 +689,64 @@ impl XFeatPostproc {
     }
 }
 
-// ── CPU fallback matching ─────────────────────────────────────────────────────
-
-/// CPU mutual nearest-neighbour matching (fallback, O(n²×64)).
-///
-/// Descriptors must be L2-normalised; cosim = dot product.
-pub fn match_mutual_nn(descs0: &[f32], descs1: &[f32], min_cossim: f32) -> Vec<(usize, usize)> {
-    const D: usize = 64;
-    let n0 = descs0.len() / D;
-    let n1 = descs1.len() / D;
-    if n0 == 0 || n1 == 0 {
-        return Vec::new();
-    }
-
-    let mut d1t = vec![0.0f32; D * n1];
-    for j in 0..n1 {
-        for d in 0..D {
-            d1t[d * n1 + j] = descs1[j * D + d];
-        }
-    }
-
-    let mut match12 = vec![0usize; n0];
-    let mut sim12 = vec![f32::NEG_INFINITY; n0];
-    for i in 0..n0 {
-        let d0 = &descs0[i * D..(i + 1) * D];
-        for j in 0..n1 {
-            let mut s = 0.0f32;
-            for d in 0..D {
-                s += d0[d] * d1t[d * n1 + j];
-            }
-            if s > sim12[i] {
-                sim12[i] = s;
-                match12[i] = j;
-            }
-        }
-    }
-
-    let mut match21 = vec![0usize; n1];
-    let mut sim21 = vec![f32::NEG_INFINITY; n1];
-    for j in 0..n1 {
-        let d1 = &descs1[j * D..(j + 1) * D];
-        for i in 0..n0 {
-            let d0 = &descs0[i * D..(i + 1) * D];
-            let s: f32 = d0.iter().zip(d1).map(|(a, b)| a * b).sum();
-            if s > sim21[j] {
-                sim21[j] = s;
-                match21[j] = i;
-            }
-        }
-    }
-
-    (0..n0)
-        .filter(|&i| match21[match12[i]] == i && sim12[i] >= min_cossim)
-        .map(|i| (i, match12[i]))
-        .collect()
-}
-
 #[cfg(test)]
 mod gpu_tests {
     use super::*;
+
+    /// Independent CPU mutual nearest-neighbour reference (O(n²×64)) — the oracle
+    /// the GPU tiled-argmax kernel is validated against. Test-only; the shipped
+    /// crate does matching on the GPU (`XFeatPostproc::match_mutual_nn_gpu`).
+    /// Descriptors must be L2-normalised; cosim = dot product.
+    fn cpu_match_reference(descs0: &[f32], descs1: &[f32], min_cossim: f32) -> Vec<(usize, usize)> {
+        const D: usize = 64;
+        let n0 = descs0.len() / D;
+        let n1 = descs1.len() / D;
+        if n0 == 0 || n1 == 0 {
+            return Vec::new();
+        }
+
+        let mut d1t = vec![0.0f32; D * n1];
+        for j in 0..n1 {
+            for d in 0..D {
+                d1t[d * n1 + j] = descs1[j * D + d];
+            }
+        }
+
+        let mut match12 = vec![0usize; n0];
+        let mut sim12 = vec![f32::NEG_INFINITY; n0];
+        for i in 0..n0 {
+            let d0 = &descs0[i * D..(i + 1) * D];
+            for j in 0..n1 {
+                let mut s = 0.0f32;
+                for d in 0..D {
+                    s += d0[d] * d1t[d * n1 + j];
+                }
+                if s > sim12[i] {
+                    sim12[i] = s;
+                    match12[i] = j;
+                }
+            }
+        }
+
+        let mut match21 = vec![0usize; n1];
+        let mut sim21 = vec![f32::NEG_INFINITY; n1];
+        for j in 0..n1 {
+            let d1 = &descs1[j * D..(j + 1) * D];
+            for i in 0..n0 {
+                let d0 = &descs0[i * D..(i + 1) * D];
+                let s: f32 = d0.iter().zip(d1).map(|(a, b)| a * b).sum();
+                if s > sim21[j] {
+                    sim21[j] = s;
+                    match21[j] = i;
+                }
+            }
+        }
+
+        (0..n0)
+            .filter(|&i| match21[match12[i]] == i && sim12[i] >= min_cossim)
+            .map(|i| (i, match12[i]))
+            .collect()
+    }
 
     /// Deterministic pseudo-random L2-normalized descriptors (LCG, no deps).
     fn random_descs(n: usize, seed: u64) -> Vec<f32> {
@@ -799,7 +798,7 @@ mod gpu_tests {
             let gpu = pp.match_mutual_nn_gpu(&r0, &r1, -1.0).unwrap();
             let gpu_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
-            let cpu = match_mutual_nn(&h0, &h1, -1.0);
+            let cpu = cpu_match_reference(&h0, &h1, -1.0);
 
             let gset: std::collections::HashSet<_> = gpu.iter().copied().collect();
             let cset: std::collections::HashSet<_> = cpu.iter().copied().collect();
