@@ -1,0 +1,104 @@
+//! End-to-end benchmark of the **XFeat detector** (preproc → backbone → GPU
+//! top-K) on a single static device-resident frame — no RTSP / NVMM transport,
+//! no orchestration. Just `XFeat::run` in a tight loop, timed with the wall clock
+//! (`run` syncs internally, so each call is the full per-frame latency).
+//!
+//! Usage:
+//!   cargo run --release -p xfeat_bench -- <model.onnx|engine> <image> [iters]
+
+use std::time::Instant;
+
+use kornia_image::{Image, ImageSize, InterpolationMode};
+use kornia_imgproc::resize::resize_fast_rgb;
+use kornia_io::functional::read_image_any_rgb8;
+use vrt::logger::Severity;
+use vrt::{Engine, Logger, Runtime};
+use vrt_xfeat::{XFeat, XFeatParams};
+
+const SRC_W: u32 = 1280; // camera frame after VIC resize (typical)
+const SRC_H: u32 = 720;
+const MODEL_W: u32 = 1280; // pad32(720) = 736; backbone runs at 1280×736
+const MODEL_H: u32 = 736;
+const TOP_K: usize = 4096;
+const THRESHOLD: f32 = 0.05;
+const WARMUP: usize = 20;
+
+fn main() -> Result<(), vrt::BoxError> {
+    let args: Vec<String> = std::env::args().collect();
+    if args.len() < 3 {
+        eprintln!("Usage: xfeat_bench <model.onnx|engine> <image> [iters]");
+        std::process::exit(1);
+    }
+    let (model_path, image_path) = (&args[1], &args[2]);
+    let iters: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(300);
+
+    let profile = vrt_hub::EngineProfile {
+        input: Some((
+            "image".into(),
+            vec![1, 3, 240, 320],
+            vec![1, 3, 640, 640],
+            vec![1, 3, 1088, 1920],
+        )),
+        fp16: true,
+        workspace_mb: 2048,
+    };
+    let engine_path =
+        vrt_hub::EngineCache::default().resolve("xfeat-backbone", model_path, &profile)?;
+
+    let logger = Logger::new(Severity::Warning)?;
+    let runtime = Runtime::new(logger)?;
+    let engine = Engine::from_file(runtime, &engine_path)?;
+
+    let stream = vrt::Stream::new_standalone()?.cuda_stream().clone();
+    // XFeat owns its letterbox preprocessor (SRC frames → MODEL_W×MODEL_H input).
+    let mut xfeat = XFeat::new(
+        engine,
+        stream.clone(),
+        XFeatParams::new(TOP_K, THRESHOLD, MODEL_H as usize, MODEL_W as usize),
+    )?;
+
+    // Load RGB8, resize to SRC, upload to device once. Reused as the input every iteration.
+    let src = read_image_any_rgb8(image_path)?;
+    let mut resized = Image::<u8, 3>::from_size_val(
+        ImageSize {
+            width: SRC_W as usize,
+            height: SRC_H as usize,
+        },
+        0,
+    )?;
+    resize_fast_rgb(&src, &mut resized, InterpolationMode::Bilinear)?;
+    let img = Image(resized.0.to_cuda(&stream)?); // device-resident Image<u8,3>
+
+    println!("XFeat detector @ {SRC_W}×{SRC_H} → model {MODEL_W}×{MODEL_H}, top_k={TOP_K}");
+    println!("warmup {WARMUP}, measure {iters} iters\n");
+
+    for _ in 0..WARMUP {
+        let _ = xfeat.run(&img)?;
+    } // discard warm-up (TRT/CUDA cache fill)
+
+    let mut lat = Vec::with_capacity(iters);
+    for _ in 0..iters {
+        let t = Instant::now();
+        let res = xfeat.run(&img)?; // letterbox + backbone + top-K + sync
+        lat.push(t.elapsed().as_secs_f64() * 1000.0);
+        let _ = res.len();
+    }
+
+    let m = lat.len() as f64;
+    let mean: f64 = lat.iter().sum::<f64>() / m;
+    let pct = |v: &mut Vec<f64>, p: f64| {
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        v[((v.len() as f64 * p) as usize).min(v.len() - 1)]
+    };
+    println!("── end-to-end latency (ms) ──");
+    println!(
+        "  mean {:.2}   p50 {:.2}   p99 {:.2}   min {:.2}   max {:.2}",
+        mean,
+        pct(&mut lat, 0.50),
+        pct(&mut lat, 0.99),
+        lat.iter().cloned().fold(f64::MAX, f64::min),
+        lat.iter().cloned().fold(0.0, f64::max)
+    );
+    println!("  throughput: {:.1} fps", 1000.0 / mean);
+    Ok(())
+}

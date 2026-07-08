@@ -1,0 +1,14 @@
+[package]
+name = "xfeat_match"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+vrt = { path = "../../crates/vrt" }
+vrt-xfeat      = { path = "../../crates/vrt-xfeat" }
+vrt-hub        = { path = "../../crates/vrt-hub", features = ["builder"] }
+kornia-image   = { workspace = true }
+kornia-imgproc = { workspace = true }
+kornia-io      = { workspace = true }
+env_logger     = "0.11"

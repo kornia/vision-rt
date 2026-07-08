@@ -1,0 +1,35 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/trt-sys",
+    "crates/vrt",
+    "crates/vrt-hub",
+    "crates/vrt-xfeat",
+    "examples/xfeat_match",
+    "examples/xfeat_bench",
+]
+
+[workspace.dependencies]
+# One cudarc across the workspace, matching kornia-rs's cudarc feature set so cargo
+# unifies to a single build (shared CudaStream/CudaSlice types for zero-copy interop).
+cudarc = { version = "0.19", default-features = false, features = [
+  "cuda-version-from-build-system",
+  "driver",
+  "nvrtc",
+  "std",
+  "fallback-dynamic-loading",
+  "fallback-latest",
+] }
+# kornia GPU image/tensor types — `cudarc` feature enables the device backend +
+# custom kernels. Git-pinned to a fixed cuda-preprocess rev (reproducible build).
+kornia-image   = { git = "https://github.com/kornia/kornia-rs", tag = "v0.1.15-rc.4", features = ["cudarc"] }
+kornia-tensor  = { git = "https://github.com/kornia/kornia-rs", tag = "v0.1.15-rc.4", features = ["cudarc"] }
+kornia-imgproc = { git = "https://github.com/kornia/kornia-rs", tag = "v0.1.15-rc.4", features = ["cudarc"] }
+kornia-io      = { git = "https://github.com/kornia/kornia-rs", tag = "v0.1.15-rc.4" }
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/kornia/vision-rt"
+authors = ["Edgar Riba <edgar.riba@gmail.com>", "Kornia AI <contact@kornia.org>"]

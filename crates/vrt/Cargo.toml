@@ -1,0 +1,21 @@
+[package]
+name = "vrt"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+description = "vrt: safe Rust core for real-time TensorRT inference on Jetson (Logger→Runtime→Engine→Session, ModelSession, CUDA helpers)"
+readme = "README.md"
+
+[features]
+default = []
+# In-process ONNX -> engine builder (links libnvonnxparser via trt-sys)
+builder = ["trt-sys/builder"]
+
+[dependencies]
+trt-sys = { path = "../trt-sys" }
+thiserror = "2.0"
+log = "0.4"
+half = "2.4"
+cudarc = { workspace = true }
+kornia-tensor = { workspace = true }

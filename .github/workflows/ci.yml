@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Formatting gate: pure parse, no TensorRT/CUDA needed.
+  fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all --check
+
+  # Hosted x86 runner: no TensorRT/CUDA — trt-sys runs in stub mode
+  # (TRT_STUB=1: committed pregenerated bindings, no native compile/link).
+  check:
+    runs-on: ubuntu-latest
+    env:
+      TRT_STUB: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo check (stub)
+        run: cargo check -p trt-sys -p vrt -p vrt-hub -p vrt-xfeat
+      - name: cargo clippy (stub)
+        run: cargo clippy --all-targets -p trt-sys -p vrt -p vrt-hub -p vrt-xfeat -- -D warnings
+      - name: cargo clippy (builder + hub features)
+        run: cargo clippy -p vrt -p vrt-hub -p vrt-xfeat --features vrt-xfeat/builder,vrt-xfeat/hub -- -D warnings
+
+  # Self-hosted Jetson runner: real TensorRT + CUDA.
+  # Register a runner on the Orin with labels [self-hosted, jetson], then
+  # remove the `if: false` guard.
+  jetson:
+    if: false  # enable once a self-hosted Jetson runner is registered
+    runs-on: [self-hosted, jetson]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build workspace (release)
+        run: cargo build --release -j2
+      - name: CPU unit tests
+        run: cargo test -p vrt-hub
+      - name: GPU tests (kernels vs CPU reference)
+        run: cargo test -p vrt-xfeat --release -- --ignored

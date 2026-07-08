@@ -1,0 +1,25 @@
+[package]
+name = "vrt-hub"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+description = "Model weights distribution + on-device TensorRT engine cache for vision-rt"
+readme = "README.md"
+
+[lib]
+name = "vrt_hub"
+
+[features]
+default = []
+# Download pinned ONNX weights from Hugging Face Hub
+hub = ["dep:hf-hub"]
+# Build engines in-process via nvonnxparser instead of the trtexec subprocess
+builder = ["vrt/builder"]
+
+[dependencies]
+vrt = { path = "../vrt" }
+sha2      = "0.10"
+thiserror = "2.0"
+cudarc = { workspace = true }
+hf-hub = { version = "0.4", optional = true }
