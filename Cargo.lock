@@ -2418,8 +2418,10 @@ name = "vrt-xfeat"
 version = "0.1.0"
 dependencies = [
  "cudarc",
+ "env_logger",
  "kornia-image",
  "kornia-imgproc",
+ "kornia-io",
  "kornia-tensor",
  "thiserror",
  "vrt",
@@ -2805,31 +2807,6 @@ name = "writeable"
 version = "0.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1ffae5123b2d3fc086436f8834ae3ab053a283cfac8fe0a0b8eaae044768a4c4"
-
-[[package]]
-name = "xfeat_bench"
-version = "0.1.0"
-dependencies = [
- "kornia-image",
- "kornia-imgproc",
- "kornia-io",
- "vrt",
- "vrt-hub",
- "vrt-xfeat",
-]
-
-[[package]]
-name = "xfeat_match"
-version = "0.1.0"
-dependencies = [
- "env_logger",
- "kornia-image",
- "kornia-imgproc",
- "kornia-io",
- "vrt",
- "vrt-hub",
- "vrt-xfeat",
-]
 
 [[package]]
 name = "yoke"
