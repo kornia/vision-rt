@@ -36,12 +36,6 @@ max `1x3x1088x1920`. Inputs must be multiples of 32 (use `pad32`).
     --maxShapes=image:1x3x1088x1920 \
     --memPoolSize=workspace:2048
 
-# YOLO (input tensor name: "images", static 640)
-/usr/src/tensorrt/bin/trtexec \
-    --onnx=models/yolo/yolo11n.onnx \
-    --saveEngine=models/yolo/yolo11n_fp16.engine \
-    --fp16 --memPoolSize=workspace:2048
-
 # Timing sanity check on an existing engine
 /usr/src/tensorrt/bin/trtexec --loadEngine=<engine> --shapes=image:1x3x640x640
 ```
