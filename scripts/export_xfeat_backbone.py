@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 """
-Export XFeat backbone as a TRT-compatible ONNX.
+Export the XFeat backbone as a TRT-compatible ONNX.
+
+Model source — XFeat (Potje et al., "XFeat: Accelerated Features for Lightweight
+Image Matching", CVPR 2024): https://github.com/verlab/accelerated_features
+This script imports that repo's `modules.xfeat.XFeat` and its `xfeat.pt` weights;
+all model credit belongs to the original authors.
 
 The full XFeat model uses `nonzero()` in NMS (data-dependent output shape),
 which TRT cannot compile. This script exports only the conv backbone:
@@ -14,9 +19,11 @@ TRT, e.g. in a CUDA kernel or on CPU.  The backbone is the expensive part
 (~2.6 MB weights, all conv/pool); post-processing is cheap.
 
 Usage:
-    cd /home/nvidia/accelerated_features
-    python3 /home/nvidia/trt-rs/scripts/export_xfeat_backbone.py \
-        --out /home/nvidia/trt-rs/models/xfeat/xfeat_backbone.onnx
+    git clone https://github.com/verlab/accelerated_features
+    XFEAT_REPO=$PWD/accelerated_features \
+        python3 scripts/export_xfeat_backbone.py \
+            --weights $PWD/accelerated_features/weights/xfeat.pt \
+            --out models/xfeat/xfeat_backbone.onnx
 """
 
 import argparse
@@ -32,8 +39,11 @@ try:
 except ImportError:
     HAS_ONNXSIM = False
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)) + "/../..")
-sys.path.insert(0, "/home/nvidia/accelerated_features")
+# Point XFEAT_REPO at a checkout of github.com/verlab/accelerated_features so
+# `modules.xfeat` is importable.
+_xfeat_repo = os.environ.get("XFEAT_REPO")
+if _xfeat_repo:
+    sys.path.insert(0, _xfeat_repo)
 
 from modules.xfeat import XFeat
 
@@ -88,11 +98,12 @@ def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument(
         "--weights",
-        default="/home/nvidia/accelerated_features/weights/xfeat.pt",
+        default="weights/xfeat.pt",
+        help="path to upstream xfeat.pt (from verlab/accelerated_features)",
     )
     p.add_argument(
         "--out",
-        default="/home/nvidia/trt-rs/models/xfeat/xfeat_backbone.onnx",
+        default="models/xfeat/xfeat_backbone.onnx",
     )
     p.add_argument("--height", type=int, default=480)
     p.add_argument("--width",  type=int, default=640)

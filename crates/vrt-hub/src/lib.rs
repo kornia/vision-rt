@@ -104,6 +104,9 @@ pub struct ModelSpec {
 /// To add a model: export ONNX (scripts/), upload to the HF repo, add an
 /// entry here with `sha256sum` pins.
 pub static REGISTRY: &[ModelSpec] = &[ModelSpec {
+    // Source: XFeat (Potje et al., CVPR 2024) — https://github.com/verlab/accelerated_features
+    // The .onnx is a backbone-only export of the upstream `xfeat.pt`, produced by
+    // scripts/export_xfeat_backbone.py. Original model credit belongs to the authors.
     name: "xfeat-backbone",
     hf_repo: "kornia/xfeat",
     revision: "main",

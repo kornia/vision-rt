@@ -57,7 +57,10 @@ to `XFeat::new` — see `examples/xfeat_match`.
 
 - **ONNX is the portable artifact** — distributed via Hugging Face Hub with
   sha256 pins (`vrt-hub`), never committed to this repo. XFeat weights live at
-  the `kornia/xfeat` HF repo. If that repo is private/gated, export `HF_TOKEN`.
+  the [`kornia/xfeat`](https://huggingface.co/kornia/xfeat) HF repo (a
+  backbone-only export of **XFeat**, Potje et al. CVPR 2024 —
+  [verlab/accelerated_features](https://github.com/verlab/accelerated_features);
+  all model credit to the original authors). If a repo is private/gated, export `HF_TOKEN`.
 - **Engines are machine-locked** (TRT version + GPU arch) and built
   **on-device** into `~/.cache/vision-rt/engines/…`. First run builds (minutes,
   once); every run after is a cache hit.
