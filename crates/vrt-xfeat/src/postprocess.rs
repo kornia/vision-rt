@@ -455,9 +455,8 @@ impl XFeatPostproc {
     /// **Only one frame may be outstanding at a time.** The keypoint count is
     /// staged through a single reused pinned buffer, so a second `launch_topk`
     /// before the first's `finish_topk` overwrites the first frame's count.
-    /// `process_topk_sample` (and `XFeat::run`) are serial and safe; if you drive
-    /// the split API yourself, sync + `finish_topk` one frame before launching
-    /// the next.
+    /// `XFeat::run` is serial and safe; if you drive the split API yourself, sync
+    /// + `finish_topk` one frame before launching the next.
     ///
     /// [`launch_score_nms`]: XFeatPostproc::launch_score_nms
     /// [`finish_topk`]: XFeatPostproc::finish_topk
@@ -581,46 +580,6 @@ impl XFeatPostproc {
             count,
             scale: (1.0, 1.0), // caller (XFeat::run) stamps the real model→src scale
         }
-    }
-
-    /// Synchronous one-shot: [`launch_topk`] + a single sync + [`finish_topk`].
-    ///
-    /// The convenience used by `XFeat::run`; callers that overlap work can instead
-    /// drive `launch_topk` / sync / `finish_topk` themselves.
-    ///
-    /// [`launch_topk`]: XFeatPostproc::launch_topk
-    /// [`finish_topk`]: XFeatPostproc::finish_topk
-    pub fn process_topk_sample(
-        &mut self,
-        desc_ptr: *const f32,
-        score_dev: &CudaSlice<f32>,
-        h: usize,
-        w: usize,
-    ) -> Result<XFeatResult, XFeatError> {
-        let bufs = self.launch_topk(desc_ptr, score_dev, h, w)?;
-        self.stream.synchronize()?;
-        Ok(self.finish_topk(bufs))
-    }
-
-    /// Run the full post-processing pipeline (NMS → top-K → sample → L2-norm).
-    ///
-    /// * `desc_ptr` — device pointer, shape `(1, 64, H/8, W/8)` CHW FP32
-    /// * `heat_ptr` — device pointer, shape `(1, 1, H, W)` FP32
-    /// * `rel_ptr`  — device pointer, shape `(1, 1, H, W)` FP32
-    /// * `h`, `w`   — backbone input dimensions (multiples of 32)
-    pub fn process(
-        &mut self,
-        desc_ptr: *const f32,
-        heat_ptr: *const f32,
-        rel_ptr: *const f32,
-        h: usize,
-        w: usize,
-    ) -> Result<XFeatResult, XFeatError> {
-        let score_dev: CudaSlice<f32> = unsafe { self.stream.alloc(h * w)? };
-        self.launch_score_nms(heat_ptr, rel_ptr, &score_dev, h, w)?;
-        // launch_score_nms and process_topk_sample's kernels share the stream
-        // (ordered) — no intermediate sync needed; the single sync is inside.
-        self.process_topk_sample(desc_ptr, &score_dev, h, w)
     }
 
     /// GPU mutual nearest-neighbour matching between two `XFeatResult`s.
@@ -916,7 +875,9 @@ mod gpu_compact_tests {
             desc_dev.device_ptr(stream.as_ref()).0 as *const f32
         };
 
-        let res = pp.process_topk_sample(desc_ptr, &score_dev, h, w).unwrap();
+        let bufs = pp.launch_topk(desc_ptr, &score_dev, h, w).unwrap();
+        stream.synchronize().unwrap();
+        let res = pp.finish_topk(bufs);
 
         // Exactly the top-2 keypoints, in any order: pair (score, x, y) and sort.
         assert_eq!(res.count, 2);
