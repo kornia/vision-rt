@@ -346,13 +346,37 @@ impl XFeatResult {
 /// Device buffers carrying one frame's GPU-selected keypoints from the async
 /// launch (`launch_topk`) to the post-sync read (`finish_topk`).
 ///
-/// All buffers have **capacity `top_k`**; the valid keypoint count is read from
-/// the post-processor's reused pinned count buffer (the only D2H) in `finish_topk`.
+/// All device buffers have **capacity `top_k`**; the valid keypoint count is
+/// staged into this frame's **own** pinned buffer (the only D2H) and read in
+/// `finish_topk`. Because the count buffer is per-frame (not shared), multiple
+/// frames may be outstanding on the stream before a single sync.
 pub struct TopkBufs {
-    kpts_dev: CudaSlice<f32>,   // [top_k * 2]
-    descs_dev: CudaSlice<f32>,  // [top_k * 64]
-    scores_dev: CudaSlice<f32>, // [top_k]
+    kpts_dev: CudaSlice<f32>,          // [top_k * 2]
+    descs_dev: CudaSlice<f32>,         // [top_k * 64]
+    scores_dev: CudaSlice<f32>,        // [top_k]
+    count_pin: vrt::PinnedBuffer<i32>, // [1] — this frame's async count D2H target
     top_k: usize,
+}
+
+/// One match's in-flight work from [`XFeatPostproc::submit_match`]: the argmax
+/// arrays' async D2H is enqueued but not synced. After one `stream.synchronize()`,
+/// [`XFeatPostproc::finish_match`] builds the mutual-NN pairs from the pinned host
+/// copies. `inner` is `None` when either input had zero keypoints.
+pub struct MatchPending {
+    inner: Option<MatchInner>,
+    min_cossim: f32,
+}
+
+struct MatchInner {
+    // Device match arrays — kept alive until the caller's sync completes the D2H.
+    _m12_dev: CudaSlice<i32>,
+    _m21_dev: CudaSlice<i32>,
+    _s12_dev: CudaSlice<f32>,
+    // Pinned host targets read in `finish_match` (post-sync).
+    m12: vrt::PinnedBuffer<i32>,
+    m21: vrt::PinnedBuffer<i32>,
+    s12: vrt::PinnedBuffer<f32>,
+    n0: usize,
 }
 
 pub struct XFeatPostproc {
@@ -366,8 +390,6 @@ pub struct XFeatPostproc {
     stream: Arc<CudaStream>,
     top_k: usize,
     threshold: f32,
-    // Pinned host buffer for the count scalar (the only D2H), reused each frame.
-    count_pin: vrt::PinnedBuffer<i32>, // [1]
 }
 
 const TOPK_NBINS: usize = 1024;
@@ -395,8 +417,6 @@ impl XFeatPostproc {
             CudaKernel::compile_many(stream.context(), KERNELS_SRC, &names)?
                 .try_into().unwrap_or_else(|_| unreachable!("compile_many returns names.len() kernels"));
 
-        let count_pin = vrt::PinnedBuffer::<i32>::alloc(1)?;
-
         Ok(Self {
             fn_score_nms,
             fn_sample_descs,
@@ -408,7 +428,6 @@ impl XFeatPostproc {
             stream,
             top_k,
             threshold,
-            count_pin,
         })
     }
 
@@ -452,11 +471,9 @@ impl XFeatPostproc {
     /// The returned [`TopkBufs`] owns the device buffers; the caller syncs the
     /// stream once and then calls [`finish_topk`] to read the count.
     ///
-    /// **Only one frame may be outstanding at a time.** The keypoint count is
-    /// staged through a single reused pinned buffer, so a second `launch_topk`
-    /// before the first's `finish_topk` overwrites the first frame's count.
-    /// `XFeat::run` is serial and safe; if you drive the split API yourself, sync
-    /// + `finish_topk` one frame before launching the next.
+    /// The returned [`TopkBufs`] own **per-frame** buffers (including the pinned
+    /// count target), so several frames may be outstanding on the stream before a
+    /// single sync — submit multiple, sync once, then `finish_topk` each.
     ///
     /// [`launch_score_nms`]: XFeatPostproc::launch_score_nms
     /// [`finish_topk`]: XFeatPostproc::finish_topk
@@ -545,14 +562,16 @@ impl XFeatPostproc {
             .arg(&k_i)
             .launch_cfg(cfg64)?;
 
-        // 6. async D2H of the count scalar (the ONLY host transfer) into the
-        //    reused pinned buffer — pinned host memory makes cudaMemcpyAsync
-        //    truly asynchronous, so the host thread is free until the sync.
+        // 6. async D2H of the count scalar (the ONLY host transfer) into THIS
+        //    frame's pinned buffer — pinned host memory makes cudaMemcpyAsync
+        //    truly asynchronous, so the host thread is free until the sync. A
+        //    per-frame buffer (not shared) lets several frames stay outstanding.
         //    Keypoints/descs/scores stay on device (downloaded only on demand).
+        let mut count_pin = vrt::PinnedBuffer::<i32>::alloc(1)?;
         let vstream = vrt::Stream::from_cuda_stream(self.stream.clone());
         unsafe {
             vstream.memcpy_d2h_raw(
-                self.count_pin.as_mut_ptr() as *mut u8,
+                count_pin.as_mut_ptr() as *mut u8,
                 cnt_raw as usize as *const _,
                 std::mem::size_of::<i32>(),
             )?;
@@ -562,6 +581,7 @@ impl XFeatPostproc {
             kpts_dev,
             descs_dev,
             scores_dev,
+            count_pin,
             top_k: k,
         })
     }
@@ -572,7 +592,7 @@ impl XFeatPostproc {
     /// All buffers stay on device; only the keypoint `count` is read here (from
     /// the pinned scalar). Consumers use `result.count` (or `result.len()`).
     pub fn finish_topk(&self, bufs: TopkBufs) -> XFeatResult {
-        let count = (self.count_pin.as_slice()[0].max(0) as usize).min(bufs.top_k);
+        let count = (bufs.count_pin.as_slice()[0].max(0) as usize).min(bufs.top_k);
         XFeatResult {
             kpts: bufs.kpts_dev,
             descs: bufs.descs_dev,
@@ -582,50 +602,40 @@ impl XFeatPostproc {
         }
     }
 
-    /// GPU mutual nearest-neighbour matching between two `XFeatResult`s.
+    /// Enqueue GPU mutual-NN matching between two `XFeatResult`s — **async, no
+    /// sync**. Launches the tiled-argmax kernels and starts the D2H of the match
+    /// arrays into this call's pinned buffers, returning a [`MatchPending`]. Sync
+    /// the stream once (covering any other work on it), then [`finish_match`].
     ///
     /// Descriptors already live on device — no re-upload.
-    /// Returns pairs `(i, j)` where keypoint `i` from `res0` matches `j` from `res1`.
-    pub fn match_mutual_nn_gpu(
+    ///
+    /// [`finish_match`]: XFeatPostproc::finish_match
+    pub fn submit_match(
         &self,
         res0: &XFeatResult,
         res1: &XFeatResult,
         min_cossim: f32,
-    ) -> Result<Vec<(usize, usize)>, XFeatError> {
-        let n0 = res0.count;
-        let n1 = res1.count;
+    ) -> Result<MatchPending, XFeatError> {
+        use cudarc::driver::DevicePtr;
+        let (n0, n1) = (res0.count, res1.count);
         if n0 == 0 || n1 == 0 {
-            return Ok(Vec::new());
+            return Ok(MatchPending {
+                inner: None,
+                min_cossim,
+            });
         }
 
-        let match12_dev: CudaSlice<i32> = unsafe { self.stream.alloc(n0)? };
-        let match21_dev: CudaSlice<i32> = unsafe { self.stream.alloc(n1)? };
-        let sim12_dev: CudaSlice<f32> = unsafe { self.stream.alloc(n0)? };
+        let m12_dev: CudaSlice<i32> = unsafe { self.stream.alloc(n0)? };
+        let m21_dev: CudaSlice<i32> = unsafe { self.stream.alloc(n1)? };
+        let s12_dev: CudaSlice<f32> = unsafe { self.stream.alloc(n0)? };
 
-        let n0_i = n0 as i32;
-        let n1_i = n1 as i32;
-
-        let d0_raw: CUdeviceptr = {
-            use cudarc::driver::DevicePtr;
-            res0.descs.device_ptr(self.stream.as_ref()).0
-        };
-        let d1_raw: CUdeviceptr = {
-            use cudarc::driver::DevicePtr;
-            res1.descs.device_ptr(self.stream.as_ref()).0
-        };
-        let m12_raw: CUdeviceptr = {
-            use cudarc::driver::DevicePtr;
-            match12_dev.device_ptr(self.stream.as_ref()).0
-        };
-        let m21_raw: CUdeviceptr = {
-            use cudarc::driver::DevicePtr;
-            match21_dev.device_ptr(self.stream.as_ref()).0
-        };
-        let s12_raw: CUdeviceptr = {
-            use cudarc::driver::DevicePtr;
-            sim12_dev.device_ptr(self.stream.as_ref()).0
-        };
+        let d0_raw = res0.descs.device_ptr(self.stream.as_ref()).0;
+        let d1_raw = res1.descs.device_ptr(self.stream.as_ref()).0;
+        let m12_raw = m12_dev.device_ptr(self.stream.as_ref()).0;
+        let m21_raw = m21_dev.device_ptr(self.stream.as_ref()).0;
+        let s12_raw = s12_dev.device_ptr(self.stream.as_ref()).0;
         let null_sim: CUdeviceptr = 0;
+        let (n0_i, n1_i) = (n0 as i32, n1 as i32);
 
         // One tiled argmax kernel, both directions (sim only needed for 1→2).
         // Block size must match MATCH_BLOCK in the kernel source.
@@ -648,20 +658,83 @@ impl XFeatPostproc {
             .arg(&n0_i)
             .launch_cfg(cfg_1d(n1, 128))?;
 
-        self.stream.synchronize()?;
-        let match12: Vec<i32> = self.stream.clone_dtoh(&match12_dev)?;
-        let match21: Vec<i32> = self.stream.clone_dtoh(&match21_dev)?;
-        let sim12: Vec<f32> = self.stream.clone_dtoh(&sim12_dev)?;
+        // Async D2H of the three match arrays into pinned host buffers (no sync).
+        // The device buffers are kept alive in the pending until the caller syncs.
+        let mut m12 = vrt::PinnedBuffer::<i32>::alloc(n0)?;
+        let mut m21 = vrt::PinnedBuffer::<i32>::alloc(n1)?;
+        let mut s12 = vrt::PinnedBuffer::<f32>::alloc(n0)?;
+        let vstream = vrt::Stream::from_cuda_stream(self.stream.clone());
+        unsafe {
+            vstream.memcpy_d2h_raw(
+                m12.as_mut_ptr() as *mut u8,
+                m12_raw as *const _,
+                n0 * std::mem::size_of::<i32>(),
+            )?;
+            vstream.memcpy_d2h_raw(
+                m21.as_mut_ptr() as *mut u8,
+                m21_raw as *const _,
+                n1 * std::mem::size_of::<i32>(),
+            )?;
+            vstream.memcpy_d2h_raw(
+                s12.as_mut_ptr() as *mut u8,
+                s12_raw as *const _,
+                n0 * std::mem::size_of::<f32>(),
+            )?;
+        }
 
-        let pairs = (0..n0)
+        Ok(MatchPending {
+            inner: Some(MatchInner {
+                _m12_dev: m12_dev,
+                _m21_dev: m21_dev,
+                _s12_dev: s12_dev,
+                m12,
+                m21,
+                s12,
+                n0,
+            }),
+            min_cossim,
+        })
+    }
+
+    /// Assemble mutual-NN pairs from a [`submit_match`] **after** the caller has
+    /// synced the stream. Pure host work: returns `(i, j)` where keypoint `i` of
+    /// `res0` and `j` of `res1` are mutual nearest neighbours with cosine ≥ the
+    /// submitted `min_cossim`.
+    ///
+    /// [`submit_match`]: XFeatPostproc::submit_match
+    pub fn finish_match(&self, pending: MatchPending) -> Vec<(usize, usize)> {
+        let Some(inner) = pending.inner else {
+            return Vec::new();
+        };
+        let (m12, m21, s12) = (
+            inner.m12.as_slice(),
+            inner.m21.as_slice(),
+            inner.s12.as_slice(),
+        );
+        (0..inner.n0)
             .filter(|&i| {
-                let j = match12[i] as usize;
-                match21[j] as usize == i && sim12[i] >= min_cossim
+                let j = m12[i] as usize;
+                m21[j] as usize == i && s12[i] >= pending.min_cossim
             })
-            .map(|i| (i, match12[i] as usize))
-            .collect();
+            .map(|i| (i, m12[i] as usize))
+            .collect()
+    }
 
-        Ok(pairs)
+    /// Synchronous one-shot mutual-NN matching: [`submit_match`] + one sync +
+    /// [`finish_match`]. Convenience for the single-pair case; drive the split
+    /// directly to fold matching into a larger continuous submit.
+    ///
+    /// [`submit_match`]: XFeatPostproc::submit_match
+    /// [`finish_match`]: XFeatPostproc::finish_match
+    pub fn match_mutual_nn_gpu(
+        &self,
+        res0: &XFeatResult,
+        res1: &XFeatResult,
+        min_cossim: f32,
+    ) -> Result<Vec<(usize, usize)>, XFeatError> {
+        let pending = self.submit_match(res0, res1, min_cossim)?;
+        self.stream.synchronize()?;
+        Ok(self.finish_match(pending))
     }
 }
 

@@ -9,4 +9,4 @@ pub mod postprocess;
 
 pub use kornia_imgproc::preprocess::Preprocessor;
 pub use model::{XFeat, XFeatParams, XFeatPending};
-pub use postprocess::{TopkBufs, XFeatError, XFeatPostproc, XFeatResult};
+pub use postprocess::{MatchPending, TopkBufs, XFeatError, XFeatPostproc, XFeatResult};

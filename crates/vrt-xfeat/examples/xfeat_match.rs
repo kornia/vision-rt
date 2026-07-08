@@ -25,7 +25,7 @@ use kornia_io::functional::read_image_any_rgb8;
 use kornia_io::png::write_image_png_rgb8;
 use vrt::logger::Severity;
 use vrt::{CudaStream, Engine, Logger, Runtime};
-use vrt_xfeat::{XFeat, XFeatParams, XFeatResult};
+use vrt_xfeat::{XFeat, XFeatParams};
 
 const TOP_K: usize = 2048;
 const THRESHOLD: f32 = 0.05;
@@ -67,18 +67,30 @@ fn main() -> Result<(), vrt::BoxError> {
     let engine = Engine::from_file(runtime, &engine_path)?;
     let params = XFeatParams::new(TOP_K, THRESHOLD);
 
-    // One shared stream for XFeat (one sync per extract). XFeat letterboxes internally.
+    // One shared CUDA stream. Two XFeat instances (separate buffers, same engine
+    // + stream) so both extractions can be outstanding under ONE sync.
     let stream = vrt::Stream::new_standalone()?.cuda_stream().clone();
-    let mut xfeat = XFeat::new(Arc::clone(&engine), stream.clone(), params)?;
+    let mut xf_map = XFeat::new(Arc::clone(&engine), stream.clone(), params.clone())?;
+    let mut xf_query = XFeat::new(Arc::clone(&engine), stream.clone(), params)?;
 
-    // Extract features from both images (resized to the model size for viz parity).
-    let (map_res, map_img) = extract(&mut xfeat, &stream, map_path)?;
-    let (query_res, query_img) = extract(&mut xfeat, &stream, query_path)?;
+    // Load both frames to device (native resolution).
+    let (map_dev, map_img) = load(&stream, map_path)?;
+    let (query_dev, query_img) = load(&stream, query_path)?;
 
-    // Match: mutual nearest-neighbour on the L2-normalised descriptors.
-    let matches = xfeat
+    // Continuous flow: submit BOTH extractions async on the shared stream, then a
+    // SINGLE synchronize() covers both; keypoints come back in source pixels.
+    let map_pending = xf_map.submit(&map_dev)?;
+    let query_pending = xf_query.submit(&query_dev)?;
+    stream.synchronize()?;
+    let map_res = xf_map.finish(map_pending);
+    let query_res = xf_query.finish(query_pending);
+
+    // Match on the same stream, also async: submit → one sync → finish.
+    let match_pending = xf_map
         .postproc()
-        .match_mutual_nn_gpu(&map_res, &query_res, MIN_COSSIM)?;
+        .submit_match(&map_res, &query_res, MIN_COSSIM)?;
+    stream.synchronize()?;
+    let matches = xf_map.postproc().finish_match(match_pending);
 
     println!("map:   {} keypoints", map_res.len());
     println!("query: {} keypoints", query_res.len());
@@ -110,18 +122,16 @@ fn main() -> Result<(), vrt::BoxError> {
     Ok(())
 }
 
-/// Load `path` at native resolution, run XFeat, and return the result alongside
-/// the source RGB image. XFeat resizes to its floor-32 model dims internally and
-/// returns keypoints in **source pixels**, so they align with the returned image.
-fn extract(
-    xfeat: &mut XFeat,
+/// Load `path` at native resolution: return the device `Image` (backbone input)
+/// and the host `Image` (for drawing). XFeat resizes to floor-32 internally and
+/// returns keypoints in source pixels, so they align with the host image.
+fn load(
     stream: &Arc<CudaStream>,
     path: &str,
-) -> Result<(XFeatResult, Image<u8, 3>), vrt::BoxError> {
+) -> Result<(Image<u8, 3>, Image<u8, 3>), vrt::BoxError> {
     let src = read_image_any_rgb8(path)?; // Rgb8 (derefs to Image<u8,3>)
     let dev = Image(src.0.to_cuda(stream)?); // device Image<u8,3>
-    let result = xfeat.run(&dev)?; // resize→backbone→top-K→sync (kpts in src pixels)
-    Ok((result, src.0)) // host image for drawing (kpts already in its pixel space)
+    Ok((dev, src.0))
 }
 
 // ── Visualization ─────────────────────────────────────────────────────────────
