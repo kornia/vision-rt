@@ -19,7 +19,7 @@ model crates (rfdetr, rfdetr-kpts, track, lift, reid, depth) live in the private
 | Crate | Role |
 |-------|------|
 | `crates/trt-sys` | Raw FFI: pure-C shim over TensorRT C++ (bindgen never sees C++ headers) |
-| `crates/vrt` | Safe core: Logger→Runtime→Engine→Session Arc chain, `ModelSession`, `Intrinsics`, `stamp`, `cuda` launch helpers |
+| `crates/vrt` | Safe core: Logger→Runtime→Engine→Session Arc chain, `ModelSession`, `cuda` launch helpers |
 | `crates/vrt-hub` | Model weights (HF Hub, sha256-pinned) + on-device engine cache |
 | `crates/vrt-xfeat` | XFeat keypoints: backbone + GPU NMS/top-K/descriptor sampling/mutual-NN |
 | `examples/` | `xfeat_match`, `xfeat_bench` |
@@ -31,9 +31,8 @@ CUDA stream** with the rest of the app: `run()` = enqueue all GPU work async →
 ONE `cudaStreamSynchronize` → CPU post-process. `ModelSession` wraps the
 Session and takes a kornia `Tensor<f32,4>` device input. `XFeat` offers
 convenience constructors (`from_hub`/`from_onnx`/`from_engine_file`) over the
-`vrt-hub` weight-fetch + engine-cache; provenance travels via `stamp`
-(`FrameMeta`/`Stamped`). No `Pipeline`/`Operator` framework — composition is just
-calling methods in a loop.
+`vrt-hub` weight-fetch + engine-cache. No `Pipeline`/`Operator` framework —
+composition is just calling methods in a loop.
 
 ## Hard constraints
 

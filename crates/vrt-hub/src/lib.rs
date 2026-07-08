@@ -79,7 +79,7 @@ pub struct ModelFile {
 /// GPU `sm` (compute capability); it is downloaded only when both match the
 /// local box, otherwise the engine is built on-device from the ONNX instead.
 pub struct EngineArtifact {
-    pub filename: &'static str,    // e.g. "xfeat_backbone-trt10.3.0.30-sm87-fp16.engine"
+    pub filename: &'static str, // e.g. "xfeat_backbone-trt10.3.0.30-sm87-fp16.engine"
     pub sha256: &'static str,
     pub trt_version: &'static str, // must equal `vrt::TENSORRT_VERSION`, e.g. "10.3.0.30"
     pub sm: &'static str,          // GPU compute capability, e.g. "87"

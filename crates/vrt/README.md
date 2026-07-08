@@ -6,8 +6,8 @@ Safe Rust core for real-time TensorRT inference on Jetson. The base of the
 - `Logger → Runtime → Engine → Session` as an `Arc` chain; `ModelSession` takes a
   kornia `Tensor<f32,4>` device input and runs one async enqueue + a single
   `cudaStreamSynchronize` per call.
-- `Intrinsics` (project/unproject), `stamp` (`Clock`/`FrameMeta`/`Stamped`
-  provenance), and `cuda` launch-config helpers.
+- `cuda` launch-config helpers (`cfg_1d`/`cfg_2d`/`cfg_per_item`), `buffer`
+  (`PinnedBuffer`/`Stream`), and typed `engine`/`session` access.
 - `builder` feature: in-process ONNX→engine builder via `trt-sys`'s nvonnxparser
   shim.
 

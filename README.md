@@ -16,7 +16,7 @@ per-model crates (`vrt-xfeat`, more to come) over a shared safe core.
 | Crate (package) | Path | Role |
 |---|---|---|
 | `trt-sys` | `crates/trt-sys` | Raw FFI: pure-C shim over the TensorRT C++ API (bindgen), optional in-process engine builder (`builder` feature) |
-| `vrt` | `crates/vrt` | Safe core: `Logger→Runtime→Engine→Session`, `ModelSession` inference, `Intrinsics`, `stamp` (FrameMeta/Stamped/Clock), `cuda` launch helpers |
+| `vrt` | `crates/vrt` | Safe core: `Logger→Runtime→Engine→Session`, `ModelSession` inference, `cuda` launch helpers |
 | `vrt-hub` | `crates/vrt-hub` | Model weights (Hugging Face Hub, sha256-pinned) + on-device engine cache |
 | `vrt-xfeat` | `crates/vrt-xfeat` | XFeat keypoints: TRT backbone + GPU NMS / top-K / descriptor sampling / mutual-NN matching |
 
