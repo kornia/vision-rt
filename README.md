@@ -67,10 +67,12 @@ to `XFeat::new` — see `examples/xfeat_match`.
 
 ## Examples
 
+Examples live inside the `vrt-xfeat` crate (`crates/vrt-xfeat/examples/`):
+
 ```bash
 # .onnx → engine built once on device, then feature-matched across two images
-cargo run --release -p xfeat_match -- xfeat_backbone.onnx map.jpg query.jpg out.png
-cargo run --release -p xfeat_bench -- xfeat_backbone.onnx image.jpg 100
+cargo run --release -p vrt-xfeat --example xfeat_match -- xfeat_backbone.onnx map.jpg query.jpg out.png
+cargo run --release -p vrt-xfeat --example xfeat_bench -- xfeat_backbone.onnx image.jpg 100
 ```
 
 Set MAXN power mode before benchmarking: `sudo nvpmodel -m 2 && sudo jetson_clocks`.

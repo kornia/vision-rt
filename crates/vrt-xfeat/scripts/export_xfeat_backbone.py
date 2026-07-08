@@ -18,10 +18,10 @@ Post-processing (TopK keypoint selection + descriptor lookup) is done outside
 TRT, e.g. in a CUDA kernel or on CPU.  The backbone is the expensive part
 (~2.6 MB weights, all conv/pool); post-processing is cheap.
 
-Usage:
+Usage (run from the repo root):
     git clone https://github.com/verlab/accelerated_features
     XFEAT_REPO=$PWD/accelerated_features \
-        python3 scripts/export_xfeat_backbone.py \
+        python3 crates/vrt-xfeat/scripts/export_xfeat_backbone.py \
             --weights $PWD/accelerated_features/weights/xfeat.pt \
             --out models/xfeat/xfeat_backbone.onnx
 """

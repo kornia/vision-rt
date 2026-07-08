@@ -106,7 +106,7 @@ pub struct ModelSpec {
 pub static REGISTRY: &[ModelSpec] = &[ModelSpec {
     // Source: XFeat (Potje et al., CVPR 2024) — https://github.com/verlab/accelerated_features
     // The .onnx is a backbone-only export of the upstream `xfeat.pt`, produced by
-    // scripts/export_xfeat_backbone.py. Original model credit belongs to the authors.
+    // crates/vrt-xfeat/scripts/export_xfeat_backbone.py. Model credit is the authors'.
     name: "xfeat-backbone",
     hf_repo: "kornia/xfeat",
     revision: "main",

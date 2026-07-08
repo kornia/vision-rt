@@ -26,3 +26,9 @@ vrt = { path = "../vrt" }
 vrt-hub = { path = "../vrt-hub", optional = true }
 kornia-imgproc = { workspace = true }
 thiserror   = "2.0"
+
+# Examples (crates/vrt-xfeat/examples/) build/cache engines via vrt-hub's builder.
+[dev-dependencies]
+vrt-hub    = { path = "../vrt-hub", features = ["builder"] }
+kornia-io  = { workspace = true }
+env_logger = "0.11"

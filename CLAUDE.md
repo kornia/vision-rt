@@ -21,8 +21,7 @@ model crates (rfdetr, rfdetr-kpts, track, lift, reid, depth) live in the private
 | `crates/trt-sys` | Raw FFI: pure-C shim over TensorRT C++ (bindgen never sees C++ headers) |
 | `crates/vrt` | Safe core: Logger→Runtime→Engine→Session Arc chain, `ModelSession`, `cuda` launch helpers |
 | `crates/vrt-hub` | Model weights (HF Hub, sha256-pinned) + on-device engine cache |
-| `crates/vrt-xfeat` | XFeat keypoints: backbone + GPU NMS/top-K/descriptor sampling/mutual-NN |
-| `examples/` | `xfeat_match`, `xfeat_bench` |
+| `crates/vrt-xfeat` | XFeat keypoints: backbone + GPU NMS/top-K/descriptor sampling/mutual-NN. Crate-local `examples/` (`xfeat_match`, `xfeat_bench`) + `scripts/export_xfeat_backbone.py` |
 
 ## Architecture in one paragraph
 

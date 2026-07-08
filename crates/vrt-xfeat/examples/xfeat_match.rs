@@ -191,6 +191,7 @@ fn save_match_viz(
 }
 
 /// Bresenham line over an interleaved RGB byte buffer (`w`×`h`), clipped.
+#[allow(clippy::too_many_arguments)]
 fn draw_line(
     buf: &mut [u8],
     w: usize,

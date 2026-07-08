@@ -5,8 +5,6 @@ members = [
     "crates/vrt",
     "crates/vrt-hub",
     "crates/vrt-xfeat",
-    "examples/xfeat_match",
-    "examples/xfeat_bench",
 ]
 
 [workspace.dependencies]
