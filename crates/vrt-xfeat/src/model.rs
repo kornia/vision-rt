@@ -126,12 +126,18 @@ impl XFeat {
         Self::from_engine_file(engine_path, stream, params)
     }
 
-    /// Pull the pinned XFeat backbone weights from Hugging Face (`kornia/xfeat`),
-    /// build/cache the engine on-device, and construct. Network is needed only on
-    /// the first run (weights + engine are then cached); for a private/gated HF
-    /// repo set `HF_TOKEN` in the environment. Requires feature `hub`.
+    /// Construct from Hugging Face (`kornia/xfeat`). Requires feature `hub`.
+    ///
+    /// Prefers a **prebuilt engine** when the registry lists one matching this
+    /// box's TensorRT version + GPU arch (skips the on-device build entirely);
+    /// otherwise pulls the pinned ONNX and builds/caches the engine locally.
+    /// Network is needed only on the first run (artifacts are then cached). For a
+    /// private/gated HF repo set `HF_TOKEN` in the environment.
     #[cfg(feature = "hub")]
     pub fn from_hub(stream: Arc<CudaStream>, params: XFeatParams) -> Result<Self, BoxError> {
+        if let Some(engine) = vrt_hub::ModelHub::get_engine("xfeat-backbone")? {
+            return Self::from_engine_file(engine, stream, params);
+        }
         let onnx = vrt_hub::ModelHub::get("xfeat-backbone")?;
         Self::from_onnx(onnx, stream, params)
     }

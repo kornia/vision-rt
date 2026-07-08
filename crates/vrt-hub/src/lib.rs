@@ -3,8 +3,11 @@
 //! ## The shipping model
 //! - **ONNX weights** are the portable artifact, hosted on Hugging Face Hub
 //!   and pinned by sha256 — never committed to the repo (feature `hub`).
-//! - **Engines** are machine-locked (TRT version + GPU arch) and are built
-//!   **on-device** from ONNX into a versioned cache, never distributed.
+//! - **Engines** are machine-locked (TRT version + GPU arch). They are normally
+//!   built **on-device** from ONNX into a versioned cache. A registry MAY also
+//!   list prebuilt engines for exact-match environments; [`ModelHub::get_engine`]
+//!   downloads one only when its `trt_version` + `sm` match the local box, so a
+//!   mismatched engine is never fetched — it falls back to an on-device build.
 //!
 //! ```no_run
 //! use vrt_hub::{ModelHub, EngineCache, EngineProfile};
@@ -71,15 +74,29 @@ pub struct ModelFile {
     pub sha256: &'static str,
 }
 
+/// An OPTIONAL prebuilt TensorRT engine, guarded by the exact environment it was
+/// serialized for. An engine only deserializes on a matching `trt_version` +
+/// GPU `sm` (compute capability); it is downloaded only when both match the
+/// local box, otherwise the engine is built on-device from the ONNX instead.
+pub struct EngineArtifact {
+    pub filename: &'static str,    // e.g. "xfeat_backbone-trt10.3.0.30-sm87-fp16.engine"
+    pub sha256: &'static str,
+    pub trt_version: &'static str, // must equal `vrt::TENSORRT_VERSION`, e.g. "10.3.0.30"
+    pub sm: &'static str,          // GPU compute capability, e.g. "87"
+}
+
 /// A distributable model: where it lives on the Hub and what it contains.
 ///
 /// `files[0]` is the entry-point .onnx; the rest are sidecars (e.g.
 /// `.onnx.data` external weights) that must land in the same directory.
+/// `engines` are optional prebuilt engines for exact-match environments (a
+/// convenience that skips the on-device build); empty = always build from ONNX.
 pub struct ModelSpec {
     pub name: &'static str,
     pub hf_repo: &'static str,
     pub revision: &'static str,
     pub files: &'static [ModelFile],
+    pub engines: &'static [EngineArtifact],
 }
 
 /// Static registry of known models.
@@ -100,6 +117,12 @@ pub static REGISTRY: &[ModelSpec] = &[ModelSpec {
             sha256: "d4498528d37bf7c737cce9c135f9b0340d828bab7dc808339e50553ac8c1b7d9",
         },
     ],
+    engines: &[EngineArtifact {
+        filename: "xfeat_backbone-trt10.3.0.30-sm87-fp16.engine",
+        sha256: "2190ad0e8daf7356708f91a2c18b89fa481082646c79b25fab91f5af6a912e6d",
+        trt_version: "10.3.0.30",
+        sm: "87",
+    }],
 }];
 
 /// Look up a model spec by name.
@@ -150,6 +173,48 @@ impl ModelHub {
     #[cfg(not(feature = "hub"))]
     pub fn get(name: &str) -> Result<PathBuf, HubError> {
         Err(HubError::HubFeatureDisabled(name.into()))
+    }
+
+    /// Try to fetch a prebuilt engine matching THIS box (feature `hub`).
+    ///
+    /// Returns `Ok(Some(path))` only when the registry lists an engine whose
+    /// `trt_version` + `sm` equal the local TensorRT version and GPU compute
+    /// capability — the sole configuration on which a serialized engine will
+    /// deserialize. Otherwise `Ok(None)`: the caller should build from the ONNX.
+    /// The downloaded engine is verified against its sha256 pin.
+    #[cfg(feature = "hub")]
+    pub fn get_engine(name: &str) -> Result<Option<PathBuf>, HubError> {
+        let spec = spec(name).ok_or_else(|| HubError::UnknownModel(name.into()))?;
+        if spec.engines.is_empty() {
+            return Ok(None);
+        }
+        let (local_trt, local_sm) = (vrt::TENSORRT_VERSION, compute_capability()?);
+        let art = match spec
+            .engines
+            .iter()
+            .find(|e| e.trt_version == local_trt && e.sm == local_sm)
+        {
+            Some(a) => a,
+            None => return Ok(None), // no prebuilt for this env → build from ONNX
+        };
+
+        let api = hf_hub::api::sync::Api::new()?;
+        let repo = api.repo(hf_hub::Repo::with_revision(
+            spec.hf_repo.to_string(),
+            hf_hub::RepoType::Model,
+            spec.revision.to_string(),
+        ));
+        let path = repo.get(art.filename)?;
+        if let Err(e) = verify_sha256(&path, art.sha256) {
+            let _ = fs::remove_file(&path);
+            return Err(e);
+        }
+        Ok(Some(path))
+    }
+
+    #[cfg(not(feature = "hub"))]
+    pub fn get_engine(_name: &str) -> Result<Option<PathBuf>, HubError> {
+        Ok(None)
     }
 }
 
