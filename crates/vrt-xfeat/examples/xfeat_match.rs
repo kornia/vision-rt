@@ -20,16 +20,13 @@
 
 use std::sync::Arc;
 
-use kornia_image::{Image, ImageSize, InterpolationMode};
-use kornia_imgproc::resize::resize_fast_rgb;
+use kornia_image::{Image, ImageSize};
 use kornia_io::functional::read_image_any_rgb8;
 use kornia_io::png::write_image_png_rgb8;
 use vrt::logger::Severity;
 use vrt::{CudaStream, Engine, Logger, Runtime};
 use vrt_xfeat::{XFeat, XFeatParams, XFeatResult};
 
-const MODEL_W: u32 = 640; // multiple of 32 (XFeat downsamples ×8)
-const MODEL_H: u32 = 640;
 const TOP_K: usize = 2048;
 const THRESHOLD: f32 = 0.05;
 const MIN_COSSIM: f32 = 0.82; // descriptor cosine-similarity gate
@@ -68,7 +65,7 @@ fn main() -> Result<(), vrt::BoxError> {
     let logger = Logger::new(Severity::Warning)?;
     let runtime = Runtime::new(logger)?;
     let engine = Engine::from_file(runtime, &engine_path)?;
-    let params = XFeatParams::new(TOP_K, THRESHOLD, MODEL_H as usize, MODEL_W as usize);
+    let params = XFeatParams::new(TOP_K, THRESHOLD);
 
     // One shared stream for XFeat (one sync per extract). XFeat letterboxes internally.
     let stream = vrt::Stream::new_standalone()?.cuda_stream().clone();
@@ -113,28 +110,18 @@ fn main() -> Result<(), vrt::BoxError> {
     Ok(())
 }
 
-/// Load `path`, resize to the model size, run XFeat, and return the result
-/// alongside the resized RGB image (model-space coords align with it).
+/// Load `path` at native resolution, run XFeat, and return the result alongside
+/// the source RGB image. XFeat resizes to its floor-32 model dims internally and
+/// returns keypoints in **source pixels**, so they align with the returned image.
 fn extract(
     xfeat: &mut XFeat,
     stream: &Arc<CudaStream>,
     path: &str,
 ) -> Result<(XFeatResult, Image<u8, 3>), vrt::BoxError> {
-    let src = read_image_any_rgb8(path)?;
-    let mut resized = Image::<u8, 3>::from_size_val(
-        ImageSize {
-            width: MODEL_W as usize,
-            height: MODEL_H as usize,
-        },
-        0,
-    )?;
-    resize_fast_rgb(&src, &mut resized, InterpolationMode::Bilinear)?;
-
-    // Upload to device, then hand XFeat the device image. The source is already
-    // model-sized, so XFeat's internal letterbox is the identity.
-    let dev = Image(resized.0.to_cuda(stream)?);
-    let result = xfeat.run(&dev)?; // letterbox + backbone + sync
-    Ok((result, resized))
+    let src = read_image_any_rgb8(path)?; // Rgb8 (derefs to Image<u8,3>)
+    let dev = Image(src.0.to_cuda(stream)?); // device Image<u8,3>
+    let result = xfeat.run(&dev)?; // resize→backbone→top-K→sync (kpts in src pixels)
+    Ok((result, src.0)) // host image for drawing (kpts already in its pixel space)
 }
 
 // ── Visualization ─────────────────────────────────────────────────────────────
@@ -148,19 +135,27 @@ fn save_match_viz(
     matches: &[(usize, usize)],
     out_path: &str,
 ) -> Result<(), vrt::BoxError> {
-    let (w, h) = (MODEL_W as usize, MODEL_H as usize);
-    let cw = w * 2;
+    // Images may differ in size (native resolutions): map left, query right,
+    // canvas = (map_w + query_w) × max(heights).
+    let (mw, mh) = (map_img.width(), map_img.height());
+    let (qw, qh) = (query_img.width(), query_img.height());
+    let cw = mw + qw;
+    let ch = mh.max(qh);
     let (mp, qp) = (map_img.as_slice(), query_img.as_slice());
 
-    // RGB canvas: map on the left half, query on the right.
-    let mut canvas = vec![0u8; cw * h * 3];
-    for y in 0..h {
-        for x in 0..w {
-            let s = (y * w + x) * 3;
-            let l = (y * cw + x) * 3;
-            let r = (y * cw + (x + w)) * 3;
-            canvas[l..l + 3].copy_from_slice(&mp[s..s + 3]);
-            canvas[r..r + 3].copy_from_slice(&qp[s..s + 3]);
+    let mut canvas = vec![0u8; cw * ch * 3];
+    for y in 0..mh {
+        for x in 0..mw {
+            let s = (y * mw + x) * 3;
+            let d = (y * cw + x) * 3;
+            canvas[d..d + 3].copy_from_slice(&mp[s..s + 3]);
+        }
+    }
+    for y in 0..qh {
+        for x in 0..qw {
+            let s = (y * qw + x) * 3;
+            let d = (y * cw + (x + mw)) * 3;
+            canvas[d..d + 3].copy_from_slice(&qp[s..s + 3]);
         }
     }
 
@@ -170,10 +165,10 @@ fn save_match_viz(
         draw_line(
             &mut canvas,
             cw,
-            h,
+            ch,
             mx as i32,
             my as i32,
-            qx as i32 + w as i32,
+            qx as i32 + mw as i32,
             qy as i32,
             [40, 220, 40],
         );
@@ -182,7 +177,7 @@ fn save_match_viz(
     let out = Image::<u8, 3>::new(
         ImageSize {
             width: cw,
-            height: h,
+            height: ch,
         },
         canvas,
     )?;

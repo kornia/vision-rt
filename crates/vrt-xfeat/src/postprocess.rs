@@ -41,6 +41,8 @@ pub enum XFeatError {
     MissingOutput(&'static str),
     #[error(transparent)]
     Preproc(#[from] kornia_imgproc::preprocess::PreprocessError),
+    #[error("input image {0}x{1} too small — each side must be ≥ 32px")]
+    InputTooSmall(usize, usize),
 }
 
 // ── Kernel source ─────────────────────────────────────────────────────────────
@@ -287,7 +289,8 @@ extern "C" __global__ void xfeat_topk_select(
 /// coordinates or scores on the host downloads them explicitly with
 /// [`kpts_to_host`](Self::kpts_to_host) / [`scores_to_host`](Self::scores_to_host).
 pub struct XFeatResult {
-    /// Pixel-space (x, y) coordinates on device, capacity [top_k × 2].
+    /// Device (x, y) coordinates in **model space** (the floor-32 backbone input),
+    /// capacity [top_k × 2]. Multiply by [`scale`](Self::scale) for original pixels.
     pub kpts: CudaSlice<f32>,
     /// L2-normalised 64-D descriptors on device, capacity [top_k × 64].
     pub descs: CudaSlice<f32>,
@@ -295,6 +298,10 @@ pub struct XFeatResult {
     pub scores: CudaSlice<f32>,
     /// Number of valid keypoints (≤ top_k) — bounds any access to the buffers.
     pub count: usize,
+    /// Per-axis model→original scale `(rw, rh)` = `(src_w/model_w, src_h/model_h)`
+    /// (matches upstream XFeat's `mkpts * [rw, rh]`). `(1.0, 1.0)` if unset.
+    /// Applied to `kpts` on host readout; descriptors/matching are unaffected.
+    pub scale: (f32, f32),
 }
 
 impl XFeatResult {
@@ -307,13 +314,22 @@ impl XFeatResult {
     }
 
     /// Download the valid keypoints to host: interleaved `[x0,y0,x1,y1,…]`,
-    /// length `count × 2`. Call only when you actually need pixel coordinates on
-    /// the CPU (e.g. drawing) — descriptor matching stays on device.
+    /// length `count × 2`, in **original image pixels** ([`scale`](Self::scale)
+    /// applied). Call only when you actually need coordinates on the CPU (e.g.
+    /// drawing) — descriptor matching stays on device.
     pub fn kpts_to_host(
         &self,
         stream: &Arc<CudaStream>,
     ) -> Result<Vec<f32>, cudarc::driver::DriverError> {
-        stream.clone_dtoh(&self.kpts.slice(0..self.count * 2))
+        let mut xy = stream.clone_dtoh(&self.kpts.slice(0..self.count * 2))?;
+        let (sx, sy) = self.scale;
+        if (sx, sy) != (1.0, 1.0) {
+            for p in xy.chunks_exact_mut(2) {
+                p[0] *= sx;
+                p[1] *= sy;
+            }
+        }
+        Ok(xy)
     }
 
     /// Download the valid scores to host (length `count`).
@@ -563,6 +579,7 @@ impl XFeatPostproc {
             descs: bufs.descs_dev,
             scores: bufs.scores_dev,
             count,
+            scale: (1.0, 1.0), // caller (XFeat::run) stamps the real model→src scale
         }
     }
 
@@ -784,12 +801,14 @@ mod gpu_tests {
                 descs: stream.clone_htod(&h0).unwrap(),
                 scores: stream.clone_htod(&vec![1.0f32; n0]).unwrap(),
                 count: n0,
+                scale: (1.0, 1.0),
             };
             let r1 = XFeatResult {
                 kpts: stream.clone_htod(&vec![0.0f32; n1 * 2]).unwrap(),
                 descs: stream.clone_htod(&h1).unwrap(),
                 scores: stream.clone_htod(&vec![1.0f32; n1]).unwrap(),
                 count: n1,
+                scale: (1.0, 1.0),
             };
 
             // Warm-up (first launch pays module/alloc setup), then timed run.

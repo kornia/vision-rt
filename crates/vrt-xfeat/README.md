@@ -1,8 +1,9 @@
 # vrt-xfeat
 
-XFeat keypoints + descriptors on Jetson: GPU letterbox preprocessing → TensorRT
-backbone → GPU post-processing (NMS, top-K selection, descriptor sampling,
-mutual-NN matching). Part of the
+XFeat keypoints + descriptors on Jetson: GPU resize/normalize (upstream XFeat's
+floor-of-32 stretch) → TensorRT backbone → GPU post-processing (NMS, top-K
+selection, descriptor sampling, mutual-NN matching). Keypoints are returned in
+original-image pixels. Part of the
 [`vision-rt`](https://github.com/kornia/vision-rt) workspace.
 
 `XFeat` is a single `Image<u8,3> → XFeatResult` algorithm sharing one CUDA stream

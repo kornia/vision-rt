@@ -10,32 +10,42 @@ description: Use when working on XFeat pre/post-processing, keypoints, descripto
 XFeat is a plain `Image<u8,3> → XFeatResult` type (no pipeline/operator
 framework). Device data crosses boundaries as **kornia** types + TRT views:
 
-- **Input**: a kornia `Image<u8,3>` (device). `XFeat` owns a kornia
-  `Preprocessor::letterbox` that writes a reused `Tensor<f32,4>` `[1,3,H,W]`
-  (the backbone input).
+- **Input**: a kornia `Image<u8,3>` (device), **any resolution**. `XFeat` owns a
+  kornia `Preprocessor::stretch` and resizes each frame to its own floor-of-32
+  dims `mh,mw = (H/32)*32, (W/32)*32` into a reused `Tensor<f32,4>` `[1,3,mh,mw]`
+  (reallocated only when the size changes).
 - **Backbone I/O**: `ModelSession::run(&Tensor<f32,4>) -> TRTensorMap`; outputs
   read by name via `TRTensorMap::get("descriptors"|"heatmap"|"reliability")` →
   `OutputView::f32_ptr()` (dtype-checked device pointer, valid until the next
   `run`). See `crates/vrt-xfeat/src/model.rs`.
-- **Result**: `XFeatResult` holds device `kpts`/`descs`/`scores` + a host
-  `count`; `kpts_to_host`/`scores_to_host` do explicit D2H.
+- **Submit/finish**: `run` = `submit` (async enqueue, returns `XFeatPending`) +
+  one `stream.synchronize()` + `finish`. Split them to share one sync across
+  several models on the same stream.
+- **Result**: `XFeatResult` holds device `kpts`/`descs`/`scores` + host `count`
+  + a `scale (rw,rh)`; `kpts_to_host` applies the scale (returns original pixels),
+  `scores_to_host` is a plain D2H.
 
 ## Coordinate spaces — the #1 source of bugs
 
-1. **Frame space** — source image pixels (any resolution the caller hands in).
-2. **Model space** — letterboxed/padded backbone input (H,W multiples of 32).
-   **XFeat keypoints come out in THIS space.**
+This mirrors upstream XFeat exactly (`preprocess_tensor`):
 
-The caller maps model→frame if it needs source coords. In `examples/xfeat_match`
-the source is pre-resized to the model size, so the internal letterbox is the
-identity and kpts already align with the drawn image — don't assume that in
-general; account for the letterbox scale + pad offset when mapping back.
+1. **Original space** — the source image pixels the caller passes in.
+2. **Model space** — the floor-of-32 resized backbone input. Keypoints are
+   produced HERE on device (`XFeatResult.kpts`).
 
-## Preprocessing (kornia `Preprocessor::letterbox`)
+`XFeatResult.scale = (rw, rh) = (W/mw, H/mh)` maps model→original. `kpts_to_host`
+applies it, so host keypoints are in **original pixels** (upstream's
+`mkpts * [rw, rh]`). The resize is anisotropic but sub-32px, so aspect is
+effectively preserved without any padding — no letterbox, no pad offset.
+Descriptor matching uses descriptors only, so device `kpts` staying in model
+space doesn't affect it.
 
-- Output: CHW FP32 `[1,3,H,W]`, values **/255 → [0,1]** (no mean/std).
-- H and W must be multiples of 32 — XFeat downsamples ×8 and the TRT shape
-  profile assumes it. `XFeatParams { top_k, threshold, h, w }` sets H/W.
+## Preprocessing (kornia `Preprocessor::stretch`)
+
+- Output: CHW FP32 `[1,3,mh,mw]`, values **/255 → [0,1]** (no mean/std),
+  anisotropic resize to floor-of-32 (matches XFeat's `F.interpolate`).
+- XFeat downsamples ×8, so mh,mw are forced to multiples of 32. `XFeatParams` is
+  just `{ top_k, threshold }` — the input size is per-frame, not configured.
 
 ## XFeat backbone outputs (TRT engine, FP32 on device)
 

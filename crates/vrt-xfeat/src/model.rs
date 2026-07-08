@@ -11,71 +11,87 @@ use vrt::{BoxError, CudaStream, Engine, ModelSession};
 // ── Params ────────────────────────────────────────────────────────────────────
 
 /// Configuration for the XFeat feature extractor.
+///
+/// The backbone input size is NOT configured here — matching upstream XFeat, each
+/// frame is resized to its own floor-of-32 dimensions (see [`XFeat::run`]).
 #[derive(Debug, Clone)]
 pub struct XFeatParams {
     /// Maximum keypoints returned per frame.
     pub top_k: usize,
     /// Minimum NMS score for a keypoint candidate to be kept.
     pub threshold: f32,
-    /// Model input height — must be a multiple of 32.
-    pub h: usize,
-    /// Model input width  — must be a multiple of 32.
-    pub w: usize,
 }
 
 impl XFeatParams {
-    pub fn new(top_k: usize, threshold: f32, h: usize, w: usize) -> Self {
-        Self {
-            top_k,
-            threshold,
-            h,
-            w,
-        }
+    pub fn new(top_k: usize, threshold: f32) -> Self {
+        Self { top_k, threshold }
     }
 }
 
 // ── Model ─────────────────────────────────────────────────────────────────────
 
-/// XFeat feature extractor: GPU letterbox + TRT backbone + GPU post-processing.
+/// XFeat feature extractor: GPU resize/normalize + TRT backbone + GPU post-processing.
 ///
-/// A single `Image<u8, 3> → XFeatResult` algorithm: it owns its [`Preprocessor`]
-/// (letterbox/normalize to the model's input size), so callers hand it a camera
-/// or image surface of any resolution directly. Run it with [`run`](Self::run).
+/// A single `Image<u8, 3> → XFeatResult` algorithm: it owns a kornia
+/// [`Preprocessor`] in **stretch** mode and, matching upstream XFeat, resizes each
+/// frame to its own floor-of-32 dimensions (`(H/32)*32 × (W/32)*32`), then rescales
+/// keypoints back to original pixels. Callers hand it an image of any resolution.
+///
+/// Preprocess, TRT backbone, and post-processing (incl. matching) all run on the
+/// one CUDA `stream` shared at construction — a single async submit per frame with
+/// one `synchronize()` in [`run`](Self::run).
 pub struct XFeat {
     model: ModelSession,
     preproc: Preprocessor,
     postproc: XFeatPostproc,
-    score_dev: CudaSlice<f32>, // pre-allocated h×w NMS score buffer
-    /// Model input tensor (`[1,3,h,w]` CHW FP32 device), written by `preproc.run`, reused.
+    /// The one shared stream (== the backbone session's stream); used to (re)alloc
+    /// the per-frame buffers so they are stream-ordered with all other GPU work.
+    stream: Arc<CudaStream>,
+    /// NMS score buffer, sized to the current model dims; reallocated on size change.
+    score_dev: CudaSlice<f32>,
+    /// Model input tensor `[1,3,mh,mw]` CHW FP32 device, written by `preproc.run`.
     input: Tensor<f32, 4>,
-    h: usize,
-    w: usize,
+    /// Model dims `(mh, mw)` the buffers are currently sized for.
+    cur: (usize, usize),
+}
+
+/// Minimum model dimension (a multiple of 32) the reused buffers are seeded with
+/// in [`XFeat::new`]; the first frame reallocates them to its real floor-32 size.
+const SEED_DIM: usize = 32;
+
+/// One frame's in-flight XFeat work from [`XFeat::submit`]: the device top-K
+/// buffers plus the model→original keypoint scale. The GPU work is enqueued but
+/// not yet synced — after one `stream.synchronize()` call [`XFeat::finish`] to
+/// read it. Enables one shared sync across several models on the same stream.
+pub struct XFeatPending {
+    bufs: TopkBufs,
+    scale: (f32, f32),
 }
 
 impl XFeat {
     /// Build an extractor sharing `stream` with the rest of the application
-    /// (one CUDA stream so a single sync per frame covers all its GPU work).
+    /// (one CUDA stream so a single sync per frame covers all its GPU work,
+    /// including matching via [`XFeatPostproc::match_mutual_nn_gpu`]).
     pub fn new(
         engine: Arc<Engine>,
         stream: Arc<CudaStream>,
         params: XFeatParams,
     ) -> Result<Self, BoxError> {
         let model = ModelSession::new(Arc::clone(&engine), Arc::clone(&stream))?;
-        let (h, w) = (params.h, params.w);
-        let preproc = Preprocessor::letterbox(stream.clone())?;
+        let preproc = Preprocessor::stretch(stream.clone())?;
         let postproc = XFeatPostproc::new(stream.clone(), params.top_k, params.threshold)?;
-        let score_dev: CudaSlice<f32> = unsafe { stream.alloc(h * w)? };
-        // The preprocessor writes the letterboxed frame here; the backbone reads it.
-        let input = zeros_cuda::<f32, 4>([1, 3, h, w], &stream)?;
-
+        // Seed the reused buffers at a minimal valid size so they're always live
+        // (no Option/unwrap); the first frame reallocates them to its floor-32 size.
+        let input = zeros_cuda::<f32, 4>([1, 3, SEED_DIM, SEED_DIM], &stream)?;
+        let score_dev = stream.alloc_zeros::<f32>(SEED_DIM * SEED_DIM)?;
         Ok(XFeat {
             model,
             preproc,
             postproc,
+            stream,
             score_dev,
             input,
-            h,
-            w,
+            cur: (SEED_DIM, SEED_DIM),
         })
     }
 
@@ -147,11 +163,29 @@ impl XFeat {
         &self.postproc
     }
 
-    /// Submit one frame's async GPU work — preprocess → backbone → NMS → top-K —
-    /// and return the device [`TopkBufs`]. The texture is held in `self` until the
-    /// caller syncs and reads with `XFeatPostproc::finish_topk`. [`run`](Self::run)
-    /// wraps this with the sync + read.
-    fn submit(&mut self, img: &Image<u8, 3>) -> Result<TopkBufs, XFeatError> {
+    /// Submit one frame's async GPU work — resize/normalize → backbone → NMS →
+    /// top-K — all enqueued on the shared stream with **no sync**, returning an
+    /// [`XFeatPending`]. Sync the stream once (covering any other models submitted
+    /// onto it), then call [`finish`](Self::finish). [`run`](Self::run) wraps
+    /// submit + sync + finish for the single-model case.
+    pub fn submit(&mut self, img: &Image<u8, 3>) -> Result<XFeatPending, XFeatError> {
+        // Upstream XFeat: resize to floor-of-32 dims, keypoints scaled back by (rw,rh).
+        let (sw, sh) = (img.width(), img.height());
+        let (mw, mh) = ((sw / 32) * 32, (sh / 32) * 32);
+        if mw == 0 || mh == 0 {
+            return Err(XFeatError::InputTooSmall(sw, sh));
+        }
+        let (rw, rh) = (sw as f32 / mw as f32, sh as f32 / mh as f32);
+
+        // (Re)allocate the reused buffers on the shared stream when the frame's
+        // model size changes — stream-ordered so they're valid in submit order.
+        if self.cur != (mh, mw) {
+            self.input = zeros_cuda::<f32, 4>([1, 3, mh, mw], &self.stream)?;
+            self.score_dev = self.stream.alloc_zeros::<f32>(mh * mw)?;
+            self.cur = (mh, mw);
+        }
+
+        // Preprocess (stretch resize + /255) into the reused input, then backbone.
         self.preproc.run(img, &mut self.input)?;
         let out = self.model.run(&self.input)?;
         let desc_ptr = out
@@ -167,20 +201,33 @@ impl XFeat {
             .ok_or(XFeatError::MissingOutput("reliability"))?
             .f32_ptr()?;
         self.postproc
-            .launch_score_nms(heat_ptr, rel_ptr, &self.score_dev, self.h, self.w)?;
-        let topk = self
+            .launch_score_nms(heat_ptr, rel_ptr, &self.score_dev, mh, mw)?;
+        let bufs = self
             .postproc
-            .launch_topk(desc_ptr, &self.score_dev, self.h, self.w)?;
-        Ok(topk)
+            .launch_topk(desc_ptr, &self.score_dev, mh, mw)?;
+        Ok(XFeatPending {
+            bufs,
+            scale: (rw, rh),
+        })
     }
 
-    /// Synchronous one-shot inference on an image (was `extract`).
+    /// Assemble the [`XFeatResult`] from a [`submit`](Self::submit) **after** the
+    /// caller has synced the shared stream. Reads the keypoint count and stamps
+    /// the model→original scale (so `kpts_to_host` yields original-image pixels).
+    pub fn finish(&self, pending: XFeatPending) -> XFeatResult {
+        let mut res = self.postproc.finish_topk(pending.bufs);
+        res.scale = pending.scale;
+        res
+    }
+
+    /// Synchronous one-shot inference on a device image of any resolution.
     ///
-    /// [`submit`](Self::submit) + one stream sync + read. Letterboxes `img` into
-    /// the model input; `img` must be device-resident RGBA (any resolution).
+    /// [`submit`](Self::submit) + one `stream.synchronize()` + read. The frame is
+    /// resized to its floor-of-32 model dims; the returned keypoints carry the
+    /// model→original `scale`, so `XFeatResult::kpts_to_host` yields original pixels.
     pub fn run(&mut self, img: &Image<u8, 3>) -> Result<XFeatResult, XFeatError> {
-        let bufs = self.submit(img)?;
-        self.postproc.stream().synchronize()?;
-        Ok(self.postproc.finish_topk(bufs))
+        let pending = self.submit(img)?;
+        self.stream.synchronize()?;
+        Ok(self.finish(pending))
     }
 }
