@@ -12,9 +12,8 @@ Package `vrt` (core) + `vrt-*` / `trt-sys` satellites. Short crate names — cod
 uses `use vrt::`, `use vrt_xfeat::`, `use trt_sys::`. Errors: per-crate
 `thiserror` enums; `vrt::BoxError` for algorithm constructors that aggregate kinds.
 
-This repo is the **open-source xfeat chain** under the kornia org (step 1). Other
-model crates (rfdetr, rfdetr-kpts, track, lift, reid, depth) live in the private
-`edgarriba/vision-rt` and land here in later steps.
+This repo is being open-sourced under the kornia org incrementally, one model
+crate per PR.
 
 | Crate | Role |
 |-------|------|

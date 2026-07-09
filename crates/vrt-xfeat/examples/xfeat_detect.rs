@@ -63,8 +63,8 @@ fn main() -> Result<(), vrt::BoxError> {
     let mut result = xfeat.alloc_result()?;
     xfeat.submit(&dev, &mut result)?; // async: returns immediately
     stream.synchronize()?; // the caller owns the one sync
-    let kpts = result.kpts_to_host(&stream)?;
-    let scores = result.scores_to_host(&stream)?;
+    let kpts = result.kpts_to_host()?;
+    let scores = result.scores_to_host()?;
 
     let top = scores.iter().cloned().fold(f32::MIN, f32::max);
     println!(

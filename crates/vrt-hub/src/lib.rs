@@ -103,30 +103,50 @@ pub struct ModelSpec {
 ///
 /// To add a model: export ONNX (scripts/), upload to the HF repo, add an
 /// entry here with `sha256sum` pins.
-pub static REGISTRY: &[ModelSpec] = &[ModelSpec {
-    // Source: XFeat (Potje et al., CVPR 2024) — https://github.com/verlab/accelerated_features
-    // The .onnx is a backbone-only export of the upstream `xfeat.pt`, produced by
-    // crates/vrt-xfeat/scripts/export_xfeat_backbone.py. Model credit is the authors'.
-    name: "xfeat-backbone",
-    hf_repo: "kornia/xfeat",
-    revision: "main",
-    files: &[
-        ModelFile {
-            filename: "xfeat_backbone.onnx",
-            sha256: "86d7d549b380405f208933efb5202e1584d9762f3a72e06e7ed81ca1436972e0",
-        },
-        ModelFile {
-            filename: "xfeat_backbone.onnx.data",
-            sha256: "d4498528d37bf7c737cce9c135f9b0340d828bab7dc808339e50553ac8c1b7d9",
-        },
-    ],
-    engines: &[EngineArtifact {
-        filename: "xfeat_backbone-trt10.3.0.30-sm87-fp16.engine",
-        sha256: "2190ad0e8daf7356708f91a2c18b89fa481082646c79b25fab91f5af6a912e6d",
-        trt_version: "10.3.0.30",
-        sm: "87",
-    }],
-}];
+pub static REGISTRY: &[ModelSpec] = &[
+    ModelSpec {
+        // Source: XFeat (Potje et al., CVPR 2024) — https://github.com/verlab/accelerated_features
+        // The .onnx is a backbone-only export of the upstream `xfeat.pt`, produced by
+        // crates/vrt-xfeat/scripts/export_xfeat_backbone.py. Model credit is the authors'.
+        name: "xfeat-backbone",
+        hf_repo: "kornia/xfeat",
+        revision: "main",
+        files: &[
+            ModelFile {
+                filename: "xfeat_backbone.onnx",
+                sha256: "86d7d549b380405f208933efb5202e1584d9762f3a72e06e7ed81ca1436972e0",
+            },
+            ModelFile {
+                filename: "xfeat_backbone.onnx.data",
+                sha256: "d4498528d37bf7c737cce9c135f9b0340d828bab7dc808339e50553ac8c1b7d9",
+            },
+        ],
+        engines: &[EngineArtifact {
+            filename: "xfeat_backbone-trt10.3.0.30-sm87-fp16.engine",
+            sha256: "2190ad0e8daf7356708f91a2c18b89fa481082646c79b25fab91f5af6a912e6d",
+            trt_version: "10.3.0.30",
+            sm: "87",
+        }],
+    },
+    ModelSpec {
+        // RF-DETR (NMS-free transformer detector). Fixed-resolution official export
+        // (input [1,3,512,512]) + a prebuilt engine for this Orin config (trt+sm
+        // guarded; other boxes build from the ONNX on-device).
+        name: "rfdetr",
+        hf_repo: "kornia/rfdetr",
+        revision: "main",
+        files: &[ModelFile {
+            filename: "rf-detr-small.onnx",
+            sha256: "0e0817f4cafa479ccba17662a142092932b0b10c98947e7cf60f3badd0f5c219",
+        }],
+        engines: &[EngineArtifact {
+            filename: "rf-detr-small-trt10.3.0.30-sm87-fp16.engine",
+            sha256: "0caa4fa8c1852d22ed044e6a4d8c87f7695538ed38a555b7a41eb15ef0833181",
+            trt_version: "10.3.0.30",
+            sm: "87",
+        }],
+    },
+];
 
 /// Look up a model spec by name.
 pub fn spec(name: &str) -> Option<&'static ModelSpec> {
@@ -219,6 +239,19 @@ impl ModelHub {
     pub fn get_engine(_name: &str) -> Result<Option<PathBuf>, HubError> {
         Ok(None)
     }
+}
+
+/// Resolve a registry model to a usable engine path (feature `hub`): a matching
+/// prebuilt engine if the registry lists one for this box's TRT+SM, otherwise the
+/// pinned ONNX downloaded and built/cached on-device. This is the one call behind
+/// each model crate's `from_hub` constructor.
+#[cfg(feature = "hub")]
+pub fn resolve_engine(name: &str, profile: &EngineProfile) -> Result<String, HubError> {
+    if let Some(engine) = ModelHub::get_engine(name)? {
+        return Ok(engine.to_string_lossy().into_owned());
+    }
+    let onnx = ModelHub::get(name)?;
+    EngineCache::default().resolve(name, &onnx.to_string_lossy(), profile)
 }
 
 /// Verify a file against an expected sha256 hex digest.

@@ -1,0 +1,34 @@
+[package]
+name = "vrt-rfdetr"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+description = "RF-DETR object detection for vision-rt — NMS-free transformer detector on TensorRT"
+readme = "README.md"
+
+[lib]
+name = "vrt_rfdetr"
+
+[features]
+default = []
+# Auto-pull the pinned RF-DETR ONNX from Hugging Face (kornia/rfdetr) via vrt-hub.
+# Engine is built on first run via the trtexec subprocess unless `builder` is on.
+hub = ["dep:vrt-hub", "vrt-hub/hub"]
+# Build the engine in-process via nvonnxparser instead of the trtexec subprocess.
+builder = ["dep:vrt-hub", "vrt-hub/builder"]
+
+[dependencies]
+kornia-image  = { workspace = true }
+kornia-tensor = { workspace = true }
+cudarc      = { workspace = true }
+vrt = { path = "../vrt" }
+vrt-hub = { path = "../vrt-hub", optional = true }
+kornia-imgproc = { workspace = true }
+thiserror   = "2.0"
+
+# Example (crates/vrt-rfdetr/examples/) builds/caches the engine via vrt-hub.
+[dev-dependencies]
+vrt-hub    = { path = "../vrt-hub", features = ["builder"] }
+kornia-io  = { workspace = true }
+env_logger = "0.11"

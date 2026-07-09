@@ -2414,6 +2414,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "vrt-rfdetr"
+version = "0.1.0"
+dependencies = [
+ "cudarc",
+ "env_logger",
+ "kornia-image",
+ "kornia-imgproc",
+ "kornia-io",
+ "kornia-tensor",
+ "thiserror",
+ "vrt",
+ "vrt-hub",
+]
+
+[[package]]
 name = "vrt-xfeat"
 version = "0.1.0"
 dependencies = [

@@ -5,6 +5,7 @@ members = [
     "crates/vrt",
     "crates/vrt-hub",
     "crates/vrt-xfeat",
+    "crates/vrt-rfdetr",
 ]
 
 [workspace.dependencies]

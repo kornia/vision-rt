@@ -238,6 +238,8 @@ pub struct XFeatResult {
     pub scores: CudaSlice<f32>,
     /// Pinned host target for the count scalar (the only D2H), written by `submit`.
     count_pin: vrt::PinnedBuffer<i32>,
+    /// The stream these buffers live on (used for the readout D2H).
+    stream: Arc<CudaStream>,
     top_k: usize,
     /// Model→original scale `(rw, rh)`, stamped by [`XFeat::submit`].
     scale: (f32, f32),
@@ -251,6 +253,7 @@ impl XFeatResult {
             descs: unsafe { stream.alloc::<f32>(top_k * 64)? },
             scores: stream.alloc_zeros::<f32>(top_k)?,
             count_pin: vrt::PinnedBuffer::<i32>::alloc(1)?,
+            stream: stream.clone(),
             top_k,
             scale: (1.0, 1.0),
         })
@@ -276,12 +279,9 @@ impl XFeatResult {
     /// Download the valid keypoints to host: interleaved `[x0,y0,x1,y1,…]`,
     /// length `count × 2`, in **original image pixels** ([`scale`](Self::scale)
     /// applied). Call after the stream sync.
-    pub fn kpts_to_host(
-        &self,
-        stream: &Arc<CudaStream>,
-    ) -> Result<Vec<f32>, cudarc::driver::DriverError> {
+    pub fn kpts_to_host(&self) -> Result<Vec<f32>, cudarc::driver::DriverError> {
         let n = self.count();
-        let mut xy = stream.clone_dtoh(&self.kpts.slice(0..n * 2))?;
+        let mut xy = self.stream.clone_dtoh(&self.kpts.slice(0..n * 2))?;
         let (sx, sy) = self.scale;
         if (sx, sy) != (1.0, 1.0) {
             for p in xy.chunks_exact_mut(2) {
@@ -293,12 +293,9 @@ impl XFeatResult {
     }
 
     /// Download the valid scores to host (length `count`). Call after the sync.
-    pub fn scores_to_host(
-        &self,
-        stream: &Arc<CudaStream>,
-    ) -> Result<Vec<f32>, cudarc::driver::DriverError> {
+    pub fn scores_to_host(&self) -> Result<Vec<f32>, cudarc::driver::DriverError> {
         let n = self.count();
-        stream.clone_dtoh(&self.scores.slice(0..n))
+        self.stream.clone_dtoh(&self.scores.slice(0..n))
     }
 
     /// Mutable pinned-count pointer (for the async count D2H in `launch_topk`).
@@ -535,8 +532,8 @@ mod gpu_compact_tests {
 
         // Exactly the top-2 keypoints, in any order: pair (score, x, y) and sort.
         assert_eq!(res.count(), 2);
-        let scores = res.scores_to_host(&stream).unwrap();
-        let kpts = res.kpts_to_host(&stream).unwrap();
+        let scores = res.scores_to_host().unwrap();
+        let kpts = res.kpts_to_host().unwrap();
         let mut got: Vec<(i32, u32, u32)> = scores
             .iter()
             .zip(kpts.chunks_exact(2))
