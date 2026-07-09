@@ -1,7 +1,10 @@
 # vrt-hub
 
 Model-weight distribution + on-device TensorRT engine cache for the
-[`vision-rt`](https://github.com/kornia/vision-rt) workspace.
+[`vision-rt`](https://github.com/kornia/vision-rt) workspace. Portable ONNX comes
+from Hugging Face; the machine-locked `.engine` is built and cached **on the
+Jetson itself** (keyed by TRT version + GPU arch), so nothing engine-shaped is
+ever copied between boards.
 
 - **`ModelHub`** (feature `hub`): downloads pinned ONNX weights from Hugging Face
   Hub into the standard HF cache and verifies every file against its sha256 pin.

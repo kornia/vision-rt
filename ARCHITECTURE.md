@@ -1,10 +1,12 @@
 # Architecture
 
-`vision-rt` is a set of **plain Rust libraries** for real-time vision on Jetson —
-no orchestration framework. You construct a type, then call methods in a loop.
-The design borrows its async shape from NVIDIA **VPI**: a *payload* holds
-pre-compiled state, *caller-owned buffers* are filled by `submit`, one
-`stream.sync()` completes the work, then you read.
+`vision-rt` is a set of **plain Rust libraries** for real-time vision on **Jetson
+Orin** (aarch64, SM87) — no orchestration framework. You construct a type, then
+call methods in a loop. The design borrows its async shape from NVIDIA **VPI**: a
+*payload* holds pre-compiled state, *caller-owned buffers* are filled by `submit`,
+one `stream.sync()` completes the work, then you read. Every design choice below —
+the single stream, the on-device engine cache, the machine-locked artifacts —
+follows from targeting one board family rather than a portable runtime.
 
 ## Crate stack
 
