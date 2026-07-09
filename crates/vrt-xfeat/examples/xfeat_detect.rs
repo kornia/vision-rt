@@ -1,7 +1,8 @@
 //! Single-image XFeat detection — extract keypoints from one image and draw them.
 //!
-//! The simplest end-to-end use of the extractor: `Image → XFeat::run → keypoints`
-//! (no matching). Keypoints come back in original-image pixels; this draws a green
+//! The simplest end-to-end use of the extractor, showing the **async** API:
+//! `alloc_result` → `submit` (no sync) → `stream.synchronize()` → read (no
+//! matching). Keypoints come back in original-image pixels; this draws a green
 //! dot at each and writes a PNG.
 //!
 //! Usage:
@@ -56,8 +57,12 @@ fn main() -> Result<(), vrt::BoxError> {
     let dev = Image(src.0.to_cuda(&stream)?); // device Image<u8,3>
     let host = src.0; // host Image<u8,3>
 
-    // One submit + sync; keypoints returned in original-image pixels.
-    let result = xfeat.run(&dev)?;
+    // Async flow (the only shape the lib exposes): allocate a caller-owned output,
+    // submit the frame (enqueues resize→backbone→top-K on the stream, NO sync),
+    // then explicitly sync once and read. Keypoints come back in original pixels.
+    let mut result = xfeat.alloc_result()?;
+    xfeat.submit(&dev, &mut result)?; // async: returns immediately
+    stream.synchronize()?; // the caller owns the one sync
     let kpts = result.kpts_to_host(&stream)?;
     let scores = result.scores_to_host(&stream)?;
 

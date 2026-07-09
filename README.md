@@ -38,19 +38,21 @@ use std::sync::Arc;
 use vrt_xfeat::{XFeat, XFeatParams};
 
 let stream = vrt::Stream::new_standalone()?.cuda_stream().clone();
-let params = XFeatParams::new(/*top_k*/ 2048, /*threshold*/ 0.05, /*h*/ 640, /*w*/ 640);
+let params = XFeatParams::new(/*top_k*/ 2048, /*threshold*/ 0.05);
 
 // A) Auto-pull weights from Hugging Face (kornia/xfeat) + build/cache the engine.
 //    Feature `hub`. First run needs network; later runs are cache hits.
 let mut xfeat = XFeat::from_hub(stream.clone(), params.clone())?;
-
 // B) Build from a local ONNX (feature `hub` → trtexec, or `builder` → in-process):
-let mut xfeat = XFeat::from_onnx("xfeat_backbone.onnx", stream.clone(), params.clone())?;
-
+//    let mut xfeat = XFeat::from_onnx("xfeat_backbone.onnx", stream.clone(), params)?;
 // C) Load a prebuilt .engine (no feature needed):
-let mut xfeat = XFeat::from_engine_file("xfeat.engine", stream.clone(), params.clone())?;
+//    let mut xfeat = XFeat::from_engine_file("xfeat.engine", stream.clone(), params)?;
 
-let result = xfeat.run(&image)?; // one sync per frame → keypoints + descriptors
+// Fully async — the library never syncs for you (VPI-style):
+let mut res = xfeat.alloc_result()?;   // caller-owned output, reuse across frames
+xfeat.submit(&image, &mut res)?;       // enqueue (resize→backbone→top-K), no sync
+stream.synchronize()?;                  // the caller owns the one sync per frame
+let kpts = res.kpts_to_host(&stream)?;  // keypoints in original-image pixels
 ```
 
 Or drive the whole `Logger→Runtime→Engine` chain yourself and pass an `Engine`

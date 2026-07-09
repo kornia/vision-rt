@@ -37,9 +37,9 @@ impl XFeatParams {
 /// frame to its own floor-of-32 dimensions (`(H/32)*32 × (W/32)*32`), then rescales
 /// keypoints back to original pixels. Callers hand it an image of any resolution.
 ///
-/// Preprocess, TRT backbone, and post-processing (incl. matching) all run on the
-/// one CUDA `stream` shared at construction — a single async submit per frame with
-/// one `synchronize()` in [`run`](Self::run).
+/// Preprocess, TRT backbone, and post-processing all enqueue on the one CUDA
+/// `stream` shared at construction — [`submit`](Self::submit) is fully async (no
+/// sync); the caller owns the `stream.synchronize()`, then reads the result.
 pub struct XFeat {
     model: ModelSession,
     preproc: Preprocessor,
@@ -202,18 +202,5 @@ impl XFeat {
             .launch_topk(desc_ptr, &self.score_dev, mh, mw, out)?;
         out.set_scale((rw, rh));
         Ok(())
-    }
-
-    /// Synchronous one-shot inference on a device image of any resolution.
-    ///
-    /// Allocates a fresh [`XFeatResult`] + [`submit`](Self::submit) + one
-    /// `stream.synchronize()`. For a hot loop, reuse a result via `alloc_result` +
-    /// `submit` + your own sync. Keypoints carry the model→original `scale`, so
-    /// `XFeatResult::kpts_to_host` yields original-image pixels.
-    pub fn run(&mut self, img: &Image<u8, 3>) -> Result<XFeatResult, XFeatError> {
-        let mut res = XFeatResult::alloc(&self.stream, self.top_k)?;
-        self.submit(img, &mut res)?;
-        self.stream.synchronize()?;
-        Ok(res)
     }
 }

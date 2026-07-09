@@ -7,8 +7,8 @@ original-image pixels. Mutual-NN matching is a separate [`Matcher`] (module
 `matching`), so extraction and matching are decoupled but share one CUDA stream.
 Part of the [`vision-rt`](https://github.com/kornia/vision-rt) workspace.
 
-`XFeat` is a single `Image<u8,3> → XFeatResult` algorithm sharing one CUDA stream
-(one sync per frame). Construct it whichever way fits:
+`XFeat` is a single `Image<u8,3> → XFeatResult` algorithm on one shared CUDA
+stream. Construct it whichever way fits:
 
 - `XFeat::from_hub(stream, params)` — feature `hub`: pull pinned weights from
   Hugging Face (`kornia/xfeat`), build/cache the engine on-device, construct.
@@ -18,9 +18,18 @@ Part of the [`vision-rt`](https://github.com/kornia/vision-rt) workspace.
   `.engine`.
 - `XFeat::new(engine, stream, params)` — pass an `Engine` you already own.
 
-Match two results with `Matcher::new(stream)` → `submit_match`/`finish_match`
-(async, one shared sync) or `match_mutual_nn_gpu` (sync one-shot). The
-post-processing + match CUDA kernels are NVRTC-JIT-compiled at runtime.
+The API is **fully async — the library never syncs for you** (VPI-style):
+
+```rust
+let mut res = xfeat.alloc_result()?;      // caller-owned output, reused
+xfeat.submit(&image, &mut res)?;          // enqueue, returns immediately
+stream.synchronize()?;                     // the caller owns the one sync
+let kpts = res.kpts_to_host(&stream)?;     // original-image pixels
+```
+
+Match two results with `Matcher::new(stream)` → `submit_match(&a.descs, a.count(),
+&b.descs, b.count(), cossim, &mut MatchResult)` → `stream.synchronize()` →
+`MatchResult::pairs()`. All CUDA kernels are NVRTC-JIT-compiled at runtime.
 
 ## Model & credits
 

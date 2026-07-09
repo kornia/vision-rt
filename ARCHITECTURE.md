@@ -21,13 +21,13 @@ vrt-xfeat    XFeat: preprocess → backbone → postprocess (+ matching submodul
 
 ## The one-stream / one-sync model
 
-Everything for a frame runs on **one shared `CudaStream`**. `run()` = enqueue all
-GPU work **async** → a single `cudaStreamSynchronize` → read. There are **no
-hidden syncs** in the hot path: the backbone (`Session::run_device_inputs_on_device`),
-preprocessing (kornia `Preprocessor`), and post-processing kernels all enqueue and
-return; the count/keypoints reach the host via **async pinned D2H** that completes
-at the caller's sync. The only `synchronize()` calls are the explicit ones the
-caller controls.
+Everything for a frame runs on **one shared `CudaStream`**. The **library never
+syncs for you** — `submit` enqueues all GPU work **async** and returns; the caller
+issues the single `cudaStreamSynchronize`, then reads. There are **no hidden
+syncs**: the backbone (`Session::run_device_inputs_on_device`), preprocessing
+(kornia `Preprocessor`), and post-processing kernels all enqueue and return; the
+count/keypoints reach the host via **async pinned D2H** that completes at the
+caller's sync. Every `synchronize()` is explicit, in the caller's code.
 
 ## VPI-style API (payload + caller-owned output)
 
@@ -35,12 +35,13 @@ caller controls.
 |------|------|-------|
 | Payload (created once) | `XFeat`, `Matcher` | own kernels + scratch, reused every frame |
 | Output buffer (caller-owned) | `XFeatResult`, `MatchResult` | pre-allocated (`alloc`/`alloc_result`), reused |
-| Submit (async) | `xfeat.submit(&img, &mut result)` | writes into `result`, no sync |
-| Sync | `stream.sync()` | one call covers all submitted work |
+| Submit (async) | `xfeat.submit(&img, &mut result)` | writes into `result`, **no sync** |
+| Sync | `stream.synchronize()` | caller-issued; one call covers all submitted work |
 | Read | `result.count()`, `result.kpts_to_host()`, `m.pairs()` | valid after the sync |
 
-`run()` is a convenience = alloc + submit + sync. Holding several result buffers
-lets **multiple frames stay outstanding** under one sync (see `xfeat_match`).
+There is **no sync convenience** (`run`/`match_mutual_nn_gpu` were removed): the
+caller always owns the sync. Holding several result buffers lets **multiple frames
+stay outstanding** under one sync (see `xfeat_match`).
 
 ## XFeat data flow (`vrt-xfeat`)
 
@@ -76,5 +77,5 @@ keys) and warns if it's outside the tested 10.3.x range.
 Per-crate `thiserror` enums (`TrtError`, `HubError`, `XFeatError`); `vrt::BoxError`
 for constructors that aggregate. `Session` is `Send` but not `Sync` (one per
 thread from a shared `Arc<Engine>`). Device pointers from TRT outputs are borrowed
-`OutputView`s valid until the next `run` or the session drops — the single
-per-frame sync serialises access.
+`OutputView`s valid until the next inference call or the session drops — the
+single per-frame sync serialises access.

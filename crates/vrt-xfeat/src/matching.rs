@@ -242,24 +242,6 @@ impl Matcher {
         }
         Ok(())
     }
-
-    /// Synchronous one-shot: alloc + [`submit_match`] + one sync + `pairs`.
-    /// Convenience; drive the split with a reused [`MatchResult`] for a hot loop.
-    ///
-    /// [`submit_match`]: Matcher::submit_match
-    pub fn match_mutual_nn_gpu(
-        &self,
-        descs0: &CudaSlice<f32>,
-        n0: usize,
-        descs1: &CudaSlice<f32>,
-        n1: usize,
-        min_cossim: f32,
-    ) -> Result<Vec<(usize, usize)>, XFeatError> {
-        let mut out = MatchResult::alloc(&self.stream, n0.max(n1).max(1))?;
-        self.submit_match(descs0, n0, descs1, n1, min_cossim, &mut out)?;
-        self.stream.synchronize()?;
-        Ok(out.pairs())
-    }
 }
 
 #[cfg(test)]
@@ -352,10 +334,16 @@ mod tests {
             let h1 = random_descs(n1, 7);
             let d0 = stream.clone_htod(&h0).unwrap();
             let d1 = stream.clone_htod(&h1).unwrap();
+            let mut out = matcher.alloc_result(n0.max(n1)).unwrap();
 
-            let _ = matcher.match_mutual_nn_gpu(&d0, n0, &d1, n1, -1.0).unwrap(); // warm-up
+            let run = |out: &mut MatchResult| {
+                matcher.submit_match(&d0, n0, &d1, n1, -1.0, out).unwrap();
+                stream.synchronize().unwrap();
+                out.pairs()
+            };
+            let _ = run(&mut out); // warm-up
             let t0 = std::time::Instant::now();
-            let gpu = matcher.match_mutual_nn_gpu(&d0, n0, &d1, n1, -1.0).unwrap();
+            let gpu = run(&mut out);
             let gpu_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
             let cpu = cpu_match_reference(&h0, &h1, -1.0);
