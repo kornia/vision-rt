@@ -158,11 +158,6 @@ impl XFeat {
         Self::from_onnx(onnx, stream, params)
     }
 
-    /// Access the postproc (e.g. to call `match_mutual_nn_gpu` between two results).
-    pub fn postproc(&self) -> &XFeatPostproc {
-        &self.postproc
-    }
-
     /// Submit one frame's async GPU work — resize/normalize → backbone → NMS →
     /// top-K — all enqueued on the shared stream with **no sync**, returning an
     /// [`XFeatPending`]. Sync the stream once (covering any other models submitted

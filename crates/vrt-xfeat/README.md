@@ -2,9 +2,10 @@
 
 XFeat keypoints + descriptors on Jetson: GPU resize/normalize (upstream XFeat's
 floor-of-32 stretch) → TensorRT backbone → GPU post-processing (NMS, top-K
-selection, descriptor sampling, mutual-NN matching). Keypoints are returned in
-original-image pixels. Part of the
-[`vision-rt`](https://github.com/kornia/vision-rt) workspace.
+selection, descriptor sampling, L2-norm). Keypoints are returned in
+original-image pixels. Mutual-NN matching is a separate [`Matcher`] (module
+`matching`), so extraction and matching are decoupled but share one CUDA stream.
+Part of the [`vision-rt`](https://github.com/kornia/vision-rt) workspace.
 
 `XFeat` is a single `Image<u8,3> → XFeatResult` algorithm sharing one CUDA stream
 (one sync per frame). Construct it whichever way fits:
@@ -17,7 +18,9 @@ original-image pixels. Part of the
   `.engine`.
 - `XFeat::new(engine, stream, params)` — pass an `Engine` you already own.
 
-The post-processing CUDA kernels are NVRTC-JIT-compiled at runtime.
+Match two results with `Matcher::new(stream)` → `submit_match`/`finish_match`
+(async, one shared sync) or `match_mutual_nn_gpu` (sync one-shot). The
+post-processing + match CUDA kernels are NVRTC-JIT-compiled at runtime.
 
 ## Model & credits
 

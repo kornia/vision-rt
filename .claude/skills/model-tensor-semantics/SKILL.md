@@ -76,10 +76,12 @@ sync; `run()` does the single `stream.synchronize()` then `finish_topk` to
 assemble `XFeatResult`. Device buffers are **capacity `top_k`**; the valid count
 is `scores.len()` — bound all device-buffer access by it.
 
-Matching: `match_mutual_nn_gpu` — cosine similarity (valid because descriptors
+Matching lives in a **separate** `matching::Matcher` (module `crates/vrt-xfeat/src/matching.rs`),
+decoupled from postproc but sharing the stream. Cosine similarity (descriptors
 are L2-normalized, so dot = cosine), mutual nearest-neighbor via two calls of one
 tiled argmax kernel (`xfeat_match_argmax`, one thread per query, candidates tiled
-through shared memory), with a min-similarity cutoff. CPU fallback: `match_mutual_nn`.
+through shared memory), min-similarity cutoff. Async `submit_match`/`finish_match`
+or sync one-shot `match_mutual_nn_gpu`.
 
 ## When validating XFeat changes
 
