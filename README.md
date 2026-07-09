@@ -1,13 +1,26 @@
 # vision-rt
 
-Real-time neural-vision libraries for NVIDIA Jetson — TensorRT inference + GPU
-pre/post-processing as plain Rust types. No orchestration framework: threading
-and messaging are the application's job. GPU image/tensor types come from
-[`kornia-rs`](https://github.com/kornia/kornia-rs); each model is its own crate
-over a shared safe core.
+**Real-time neural-vision libraries for NVIDIA Jetson Orin, written in Rust.**
 
-**Target:** Jetson Orin (aarch64), JetPack 6.x, TensorRT 10.3.x, CUDA 12.6.
+TensorRT inference + GPU pre/post-processing as plain Rust types — no
+orchestration framework: threading and messaging are the application's job. GPU
+image/tensor types come from [`kornia-rs`](https://github.com/kornia/kornia-rs);
+each model is its own crate over a shared safe core.
+
+**Target:** Jetson Orin (aarch64, SM87), JetPack 6.x, TensorRT 10.3.x, CUDA 12.6.
 **Internals:** see [ARCHITECTURE.md](ARCHITECTURE.md).
+
+### Built for Jetson, not ported to it
+
+- **One CUDA stream, one sync per frame** — the async, VPI-style API is shaped
+  for Orin's unified-memory GPU: enqueue everything, sync once, read. No hidden
+  syncs, no host round-trips mid-pipeline.
+- **Engines are machine-locked & built on-device** — a `.engine` is tied to the
+  exact TensorRT version + GPU arch (SM87), so `vrt-hub` builds and caches it on
+  the Jetson itself (or pulls a prebuilt engine only when TRT+SM match). Portable
+  ONNX in, board-specific engine out.
+- **Benchmarked at MAXN** — timing discipline assumes `nvpmodel -m 2 +
+  jetson_clocks`; numbers are honest Orin numbers, not desktop extrapolations.
 
 ## Workspace
 
