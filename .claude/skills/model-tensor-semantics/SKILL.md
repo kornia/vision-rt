@@ -18,12 +18,13 @@ framework). Device data crosses boundaries as **kornia** types + TRT views:
   read by name via `TRTensorMap::get("descriptors"|"heatmap"|"reliability")` →
   `OutputView::f32_ptr()` (dtype-checked device pointer, valid until the next
   `run`). See `crates/vrt-xfeat/src/model.rs`.
-- **Submit/finish**: `run` = `submit` (async enqueue, returns `XFeatPending`) +
-  one `stream.synchronize()` + `finish`. Split them to share one sync across
-  several models on the same stream.
-- **Result**: `XFeatResult` holds device `kpts`/`descs`/`scores` + host `count`
-  + a `scale (rw,rh)`; `kpts_to_host` applies the scale (returns original pixels),
-  `scores_to_host` is a plain D2H.
+- **VPI-style submit** (caller-owned output): pre-allocate an `XFeatResult` with
+  `XFeat::alloc_result()`, then `xfeat.submit(&img, &mut result)` (async, no sync)
+  → `stream.sync()` → read. `run()` = alloc + submit + sync convenience. Hold
+  several results to keep multiple frames outstanding under one sync.
+- **Result**: `XFeatResult` (device `kpts`/`descs`/`scores`, capacity `top_k`) —
+  `count()` reads the pinned scalar (post-sync), `kpts_to_host` applies the
+  `scale (rw,rh)` (returns original pixels), `scores_to_host` is a plain D2H.
 
 ## Coordinate spaces — the #1 source of bugs
 
@@ -80,7 +81,8 @@ Matching lives in a **separate** `matching::Matcher` (module `crates/vrt-xfeat/s
 decoupled from postproc but sharing the stream. Cosine similarity (descriptors
 are L2-normalized, so dot = cosine), mutual nearest-neighbor via two calls of one
 tiled argmax kernel (`xfeat_match_argmax`, one thread per query, candidates tiled
-through shared memory), min-similarity cutoff. Async `submit_match`/`finish_match`
+through shared memory), min-similarity cutoff. VPI-style: `submit_match(descs0,
+n0, descs1, n1, cossim, &mut MatchResult)` (async) → sync → `MatchResult::pairs()`,
 or sync one-shot `match_mutual_nn_gpu`.
 
 ## When validating XFeat changes
