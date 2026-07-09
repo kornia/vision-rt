@@ -8,7 +8,7 @@ use crate::{
     engine::{DataType, Engine, TensorMode},
     error::{last_trt_error, Result, TrtError},
 };
-use cudarc::driver::{CudaContext, CudaStream};
+use cudarc::driver::CudaStream;
 use std::ffi::c_void;
 use trt_sys::*;
 
@@ -85,34 +85,12 @@ pub struct Session {
 unsafe impl Send for Session {}
 
 impl Session {
-    /// The CUDA stream this session enqueues work on.
-    pub fn stream(&self) -> &Stream {
-        &self.stream
-    }
-
-    /// Create a session that shares `cuda_stream` with other pipeline stages.
+    /// Create a session that shares `cuda_stream` with the rest of the app.
     ///
     /// All device-buffer allocations and TRT enqueue calls use the provided
-    /// stream instead of creating a private one.  The caller is responsible
-    /// for syncing the stream (the [`Pipeline`](crate::Pipeline) does this).
+    /// stream; the caller owns syncing it.
     pub fn with_stream(engine: Arc<Engine>, cuda_stream: Arc<CudaStream>) -> Result<Self> {
         Self::init(engine, Stream::from_cuda_stream(cuda_stream))
-    }
-
-    /// Create a new inference session for the given engine (private stream).
-    pub fn new(engine: Arc<Engine>) -> Result<Self> {
-        // Retain the primary CUDA context (same context TRT uses internally).
-        let cuda_ctx = CudaContext::new(0).map_err(|e| TrtError::Cuda {
-            code: e.0 as i32,
-            msg: "CudaContext",
-        })?;
-        // Single-stream usage — drop cudarc's cross-stream event tracking overhead.
-        // SAFETY: all session buffers live on this one stream; none crosses streams.
-        unsafe {
-            cuda_ctx.disable_event_tracking();
-        }
-        let stream = Stream::new(&cuda_ctx)?;
-        Self::init(engine, stream)
     }
 
     fn init(engine: Arc<Engine>, stream: Stream) -> Result<Self> {
@@ -140,11 +118,9 @@ impl Session {
             if spec.mode != TensorMode::Output {
                 continue;
             }
-            let n_elems: i64 = spec.dims.iter().filter(|&&d| d > 0).product::<i64>().max(1);
-            let bytes_per_elem = dtype_bytes(spec.dtype);
             let buf = DeviceBuffer::alloc_with_stream(
                 stream.cuda_stream(),
-                n_elems as usize * bytes_per_elem,
+                buf_bytes(&spec.dims, spec.dtype),
             )?;
             outputs.insert(
                 spec.name.clone(),
@@ -166,24 +142,6 @@ impl Session {
         })
     }
 
-    /// Set the runtime shape for a dynamic-shape input (call before `run`).
-    pub fn set_input_shape(&mut self, name: &str, shape: &[i64]) -> Result<()> {
-        let c_name = CString::new(name).map_err(|_| TrtError::UnknownTensor(name.into()))?;
-        let code = unsafe {
-            btrt_context_set_input_shape(
-                self.ctx,
-                c_name.as_ptr(),
-                shape.as_ptr(),
-                shape.len() as i32,
-            )
-        };
-        if code != 0 {
-            return Err(TrtError::Trt(last_trt_error()));
-        }
-        self.resize_output_buffers()?;
-        Ok(())
-    }
-
     /// Run inference with inputs **already in CUDA device memory**, leaving the
     /// outputs in GPU memory — no H2D/D2H copies, no sync.
     ///
@@ -192,11 +150,11 @@ impl Session {
     /// resolved shape, dtype, and byte length. The views remain valid until the
     /// next `run_*` call or `Session` drop.
     ///
-    /// **Caller must call `session.stream().sync()` before reading the outputs.**
+    /// **Caller must sync the shared stream before reading the outputs.**
     ///
     /// # Safety
     /// This does NOT sync — it enqueues async work and returns. The GPU reads the
-    /// bound input device pointers during the caller's later `stream().sync()`, so
+    /// bound input device pointers during the caller's later stream sync, so
     /// every input buffer must stay valid until that sync (not merely until this
     /// call returns). Additionally the returned views alias Session-owned device
     /// memory — do not outlive the Session or hold them across a subsequent
@@ -274,8 +232,7 @@ impl Session {
         for name in names {
             let shape = self.resolved_output_shape(&name)?;
             let dtype = self.outputs[&name].dtype;
-            let n: i64 = shape.iter().filter(|&&d| d > 0).product::<i64>().max(1);
-            let new_len = n as usize * dtype_bytes(dtype);
+            let new_len = buf_bytes(&shape, dtype);
             if self.outputs[&name].buf.len_bytes != new_len {
                 self.outputs.get_mut(&name).unwrap().buf =
                     DeviceBuffer::alloc_with_stream(self.stream.cuda_stream(), new_len)?;
@@ -304,4 +261,10 @@ fn dtype_bytes(dtype: DataType) -> usize {
         DataType::Float16 => 2,
         DataType::Int8 | DataType::UInt8 | DataType::Bool => 1,
     }
+}
+
+/// Byte size of a tensor: product of positive dims (dynamic `-1`/`0` → 1) × dtype.
+fn buf_bytes(dims: &[i64], dtype: DataType) -> usize {
+    let n: i64 = dims.iter().filter(|&&d| d > 0).product::<i64>().max(1);
+    n as usize * dtype_bytes(dtype)
 }

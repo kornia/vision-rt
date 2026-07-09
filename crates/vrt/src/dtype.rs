@@ -12,14 +12,3 @@ pub enum DType {
     U8,
     I32,
 }
-
-impl DType {
-    /// Width of one element in bytes.
-    pub fn byte_size(self) -> usize {
-        match self {
-            DType::F32 | DType::I32 => 4,
-            DType::F16 => 2,
-            DType::U8 => 1,
-        }
-    }
-}

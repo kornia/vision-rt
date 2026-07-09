@@ -134,8 +134,8 @@ impl Stream {
 
     /// Wrap an existing `Arc<CudaStream>` without creating a new CUDA stream.
     ///
-    /// Used by [`Session::with_stream`](crate::Session::with_stream) and
-    /// [`Pipeline`](crate::Pipeline) to share one stream across all stages.
+    /// Used by [`Session::with_stream`](crate::Session::with_stream) to share one
+    /// stream across the whole per-frame pipeline.
     pub fn from_cuda_stream(inner: Arc<CudaStream>) -> Self {
         Self { inner }
     }

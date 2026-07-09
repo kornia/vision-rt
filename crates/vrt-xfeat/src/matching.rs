@@ -155,11 +155,6 @@ impl Matcher {
         })
     }
 
-    /// The shared CUDA stream this matcher enqueues on.
-    pub fn stream(&self) -> &Arc<CudaStream> {
-        &self.stream
-    }
-
     /// Allocate a reusable match output for this matcher's stream.
     pub fn alloc_result(&self, cap: usize) -> Result<MatchResult, XFeatError> {
         MatchResult::alloc(&self.stream, cap)

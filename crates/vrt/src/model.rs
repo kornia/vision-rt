@@ -22,7 +22,6 @@ use cudarc::driver::CudaStream;
 use kornia_tensor::Tensor;
 use std::collections::HashMap;
 
-use crate::buffer::Stream;
 use crate::engine::Engine;
 use crate::error::{Result, TrtError};
 use crate::session::{OutputView, Session};
@@ -49,32 +48,14 @@ impl TRTensorMap {
 pub struct ModelSession {
     session: Session,
     inputs: Vec<String>,
-    outputs: Vec<String>,
 }
 
 impl ModelSession {
     /// Bind an engine to a shared pipeline stream.
     pub fn new(engine: Arc<Engine>, stream: Arc<CudaStream>) -> Result<Self> {
         let inputs = engine.input_names();
-        let outputs = engine.output_names();
         let session = Session::with_stream(engine, stream)?;
-        Ok(Self {
-            session,
-            inputs,
-            outputs,
-        })
-    }
-
-    /// Output tensor names, in engine order.
-    pub fn output_names(&self) -> &[String] {
-        &self.outputs
-    }
-
-    pub fn stream(&self) -> &Stream {
-        self.session.stream()
-    }
-    pub fn cuda_stream(&self) -> Arc<CudaStream> {
-        self.session.stream().cuda_stream().clone()
+        Ok(Self { session, inputs })
     }
 
     /// Run inference on a single device input, returning the device outputs.

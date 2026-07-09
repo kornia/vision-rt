@@ -273,11 +273,6 @@ impl XFeatResult {
         self.count() == 0
     }
 
-    /// Model→original keypoint scale `(rw, rh)` stamped for the last submit.
-    pub fn scale(&self) -> (f32, f32) {
-        self.scale
-    }
-
     /// Download the valid keypoints to host: interleaved `[x0,y0,x1,y1,…]`,
     /// length `count × 2`, in **original image pixels** ([`scale`](Self::scale)
     /// applied). Call after the stream sync.
@@ -333,11 +328,6 @@ pub struct XFeatPostproc {
 const TOPK_NBINS: usize = 1024;
 
 impl XFeatPostproc {
-    /// The CUDA stream used for all GPU work.
-    pub fn stream(&self) -> &Arc<CudaStream> {
-        &self.stream
-    }
-
     /// Compile all CUDA kernels and return a ready post-processor. The keypoint
     /// cap comes from the output [`XFeatResult`]'s capacity, not from here.
     pub fn new(stream: Arc<CudaStream>, threshold: f32) -> Result<Self, XFeatError> {

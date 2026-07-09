@@ -86,24 +86,6 @@ impl Engine {
     pub fn inputs(&self) -> impl Iterator<Item = &TensorSpec> {
         self.specs.iter().filter(|s| s.mode == TensorMode::Input)
     }
-    /// The single input's static `[N, C, H, W]` dims as `usize`.
-    ///
-    /// Errors if the engine has no input, the input isn't 4-D, or any dim is
-    /// non-positive (dynamic `-1` or zero). The image models call this to size
-    /// their reused CHW input tensor instead of re-deriving it each.
-    pub fn static_input_nchw(&self) -> Result<[usize; 4]> {
-        let d = &self
-            .inputs()
-            .next()
-            .ok_or_else(|| TrtError::Trt("engine has no input".into()))?
-            .dims;
-        if d.len() != 4 || d.iter().any(|&x| x <= 0) {
-            return Err(TrtError::Trt(format!(
-                "input must be static [N,3,H,W], got {d:?}"
-            )));
-        }
-        Ok([d[0] as usize, d[1] as usize, d[2] as usize, d[3] as usize])
-    }
     pub fn outputs(&self) -> impl Iterator<Item = &TensorSpec> {
         self.specs.iter().filter(|s| s.mode == TensorMode::Output)
     }
