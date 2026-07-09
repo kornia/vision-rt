@@ -146,6 +146,18 @@ pub static REGISTRY: &[ModelSpec] = &[
             sm: "87",
         }],
     },
+    ModelSpec {
+        // RF-DETR Keypoint (human pose): box + 17 COCO keypoints. Fixed-resolution
+        // export (input [1,3,576,576]); ONNX only — engines built on-device.
+        name: "rfdetr-kpts",
+        hf_repo: "kornia/rfdetr-kpts",
+        revision: "main",
+        files: &[ModelFile {
+            filename: "rfdetr-keypoint-preview-folded.onnx",
+            sha256: "d969cac0266cbbd335bc818ea186d6f91ad7d5730002b40d8287651abc95b406",
+        }],
+        engines: &[],
+    },
 ];
 
 /// Look up a model spec by name.
