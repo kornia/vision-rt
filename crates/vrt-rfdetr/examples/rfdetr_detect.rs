@@ -6,8 +6,6 @@
 
 use kornia_image::Image;
 use kornia_io::functional::read_image_any_rgb8;
-use vrt::logger::Severity;
-use vrt::{Engine, Logger, Runtime};
 use vrt_rfdetr::RfDetr;
 
 fn main() -> Result<(), vrt::BoxError> {
@@ -27,12 +25,8 @@ fn main() -> Result<(), vrt::BoxError> {
     };
     let engine_path = vrt_hub::EngineCache::default().resolve("rfdetr", model_path, &profile)?;
 
-    let logger = Logger::new(Severity::Warning)?;
-    let runtime = Runtime::new(logger)?;
-    let engine = Engine::from_file(runtime, &engine_path)?;
-
     let stream = vrt::Stream::new_standalone()?.cuda_stream().clone();
-    let mut det = RfDetr::new(engine, stream.clone(), conf)?;
+    let mut det = RfDetr::from_engine_file(&engine_path, stream.clone(), conf)?;
 
     let src = read_image_any_rgb8(image_path)?; // Rgb8 (derefs to Image<u8,3>)
     let dev = Image(src.0.to_cuda(&stream)?);
@@ -41,7 +35,7 @@ fn main() -> Result<(), vrt::BoxError> {
     let mut out = det.alloc_result()?;
     det.submit(&dev, &mut out)?;
     stream.synchronize()?;
-    let dets = out.detections(&stream)?;
+    let dets = out.detections()?;
 
     println!(
         "{}x{} → {} detections (conf ≥ {conf}, {} queries)",

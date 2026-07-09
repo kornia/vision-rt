@@ -3,9 +3,9 @@
 //! [`RfDetr`] is a single `Image<u8,3> → Vec<Detection>` detector. RF-DETR is a
 //! transformer set-predictor: a fixed set of query boxes + class logits, and it
 //! is **NMS-free** (no duplicate suppression). The pipeline is zero-copy and
-//! all-GPU: a stretch-resize kernel (kornia `Preprocessor` in `Stretch` mode —
-//! the export is no-pad, RGB `[0,1]`), the TRT backbone, and a decode kernel;
-//! only the surviving detections (typically a handful) reach the host.
+//! all-GPU: a stretch-resize kernel (kornia `Preprocessor` in `Stretch` mode +
+//! ImageNet mean/std — this export has no baked-in normalization), the TRT
+//! backbone, and a decode kernel; only the surviving detections reach the host.
 //!
 //! Model: the fixed-resolution official export (`rfdetr-small`) — input
 //! `[1,3,512,512]`, outputs `pred_boxes [1,300,4]` (cxcywh, normalized) +
@@ -38,8 +38,6 @@ pub enum RfDetrError {
     Preproc(#[from] kornia_imgproc::preprocess::PreprocessError),
     #[error("engine output '{0}' missing")]
     MissingOutput(String),
-    #[error("unexpected output shape: {0}")]
-    BadShape(String),
 }
 
 /// A detected object in original-image coordinate space.
@@ -101,6 +99,7 @@ extern "C" __global__ void rfdetr_decode(
 pub struct DetectResult {
     dets: CudaSlice<f32>, // [q*6] x1,y1,x2,y2,class,score
     count_pin: vrt::PinnedBuffer<i32>,
+    stream: Arc<CudaStream>, // the stream these buffers live on (for the readout D2H)
     q: usize,
 }
 
@@ -110,6 +109,7 @@ impl DetectResult {
         Ok(Self {
             dets: unsafe { stream.alloc::<f32>(q * 6)? },
             count_pin: vrt::PinnedBuffer::<i32>::alloc(1)?,
+            stream: stream.clone(),
             q,
         })
     }
@@ -121,15 +121,12 @@ impl DetectResult {
 
     /// Download the surviving detections to host (original-image pixels). Call
     /// after the stream sync that follows [`RfDetr::submit`].
-    pub fn detections(
-        &self,
-        stream: &Arc<CudaStream>,
-    ) -> Result<Vec<Detection>, cudarc::driver::DriverError> {
+    pub fn detections(&self) -> Result<Vec<Detection>, cudarc::driver::DriverError> {
         let n = self.count();
         if n == 0 {
             return Ok(Vec::new());
         }
-        let flat = stream.clone_dtoh(&self.dets.slice(0..n * 6))?;
+        let flat = self.stream.clone_dtoh(&self.dets.slice(0..n * 6))?;
         Ok(flat
             .chunks_exact(6)
             .map(|d| Detection {
@@ -138,10 +135,6 @@ impl DetectResult {
                 bbox: [d[0], d[1], d[2], d[3]],
             })
             .collect())
-    }
-
-    fn count_pin_mut(&mut self) -> *mut i32 {
-        self.count_pin.as_mut_ptr()
     }
 }
 
@@ -154,7 +147,8 @@ pub struct RfDetr {
     input: Tensor<f32, 4>, // [1,3,mh,mw] CHW f32 device, reused
     decode: CudaKernel,
     conf: f32,
-    q: usize,
+    q: usize, // query slots (fixed by engine)
+    c: usize, // class-logit channels (fixed by engine)
     box_name: String,
     logit_name: String,
 }
@@ -163,8 +157,9 @@ impl RfDetr {
     /// Build a detector sharing `stream` with the rest of the application.
     ///
     /// The input size is read from the engine's static `[1,3,H,W]` input, so any
-    /// fixed-resolution RF-DETR export works. Outputs are bound by name: the one
-    /// containing "box" is the boxes tensor, "logit" the class logits.
+    /// fixed-resolution RF-DETR export works. The two outputs are identified by
+    /// **shape** (naming-agnostic): `[1,Q,4]` is boxes (cxcywh), `[1,Q,C]` the
+    /// class logits — validated here once, so `submit` needs no per-frame checks.
     pub fn new(engine: Arc<Engine>, stream: Arc<CudaStream>, conf: f32) -> Result<Self, BoxError> {
         let inp = engine
             .inputs()
@@ -176,24 +171,25 @@ impl RfDetr {
         }
         let (mh, mw) = (d[2] as usize, d[3] as usize);
 
-        let outs = engine.output_names();
-        let box_name = outs
-            .iter()
-            .find(|n| n.contains("box"))
-            .cloned()
-            .ok_or("rfdetr: no boxes output (name containing 'box')")?;
-        let logit_name = outs
-            .iter()
-            .find(|n| n.contains("logit"))
-            .cloned()
-            .ok_or("rfdetr: no logits output (name containing 'logit')")?;
-        // Query count from the static logits spec [1, Q, C].
-        let q = engine
-            .outputs()
-            .find(|s| s.name == logit_name)
-            .and_then(|s| s.dims.get(1).copied())
-            .filter(|&q| q > 0)
-            .ok_or("rfdetr: dynamic/unknown query count unsupported")? as usize;
+        // Classify the two outputs by shape (a name-substring match would misfire
+        // on an export whose class output happens to contain "box").
+        let (mut box_name, mut logit_name, mut q, mut c) = (None, None, 0usize, 0usize);
+        for s in engine.outputs() {
+            match s.dims.as_slice() {
+                [1, _, 4] => box_name = Some(s.name.clone()),
+                [1, nq, nc] if *nc > 4 => {
+                    logit_name = Some(s.name.clone());
+                    q = *nq as usize;
+                    c = *nc as usize;
+                }
+                _ => {}
+            }
+        }
+        let box_name = box_name.ok_or("rfdetr: no boxes output [1,Q,4]")?;
+        let logit_name = logit_name.ok_or("rfdetr: no logits output [1,Q,C]")?;
+        if q == 0 {
+            return Err("rfdetr: dynamic/unknown query count unsupported".into());
+        }
 
         // RF-DETR: anisotropic stretch to the model size + ImageNet normalization
         // (this export has no baked-in mean/std — it starts straight with Conv).
@@ -213,6 +209,7 @@ impl RfDetr {
             decode,
             conf,
             q,
+            c,
             box_name,
             logit_name,
         })
@@ -252,34 +249,23 @@ impl RfDetr {
         self.preproc.run(img, &mut self.input)?;
         let tmap = self.model.run(&self.input)?;
 
-        let bview = tmap
+        // Outputs are identified + shape-validated in `new`; fetch by name and
+        // trust the (static) shapes. f32_ptr() still guards against a non-F32
+        // (e.g. fp16-output) binding.
+        let b_raw = tmap
             .get(&self.box_name)
-            .ok_or_else(|| RfDetrError::MissingOutput(self.box_name.clone()))?;
-        let lview = tmap
+            .ok_or_else(|| RfDetrError::MissingOutput(self.box_name.clone()))?
+            .f32_ptr()? as usize as CUdeviceptr;
+        let l_raw = tmap
             .get(&self.logit_name)
-            .ok_or_else(|| RfDetrError::MissingOutput(self.logit_name.clone()))?;
-        let lshape = lview.shape_i64(); // [1, Q, C]
-        if lshape.len() != 3 {
-            return Err(RfDetrError::BadShape(format!(
-                "expected rank-3 logits [1,Q,C], got {lshape:?}"
-            )));
-        }
-        let (q, c) = (lshape[1] as usize, lshape[2] as usize);
-        let bshape = bview.shape_i64();
-        if bshape != [1, q as i64, 4] {
-            return Err(RfDetrError::BadShape(format!(
-                "box tensor {bshape:?} != [1, {q}, 4]"
-            )));
-        }
-        // f32_ptr() rejects a non-F32 (e.g. fp16-output) binding loudly.
-        let b_raw = bview.f32_ptr()? as usize as CUdeviceptr;
-        let l_raw = lview.f32_ptr()? as usize as CUdeviceptr;
+            .ok_or_else(|| RfDetrError::MissingOutput(self.logit_name.clone()))?
+            .f32_ptr()? as usize as CUdeviceptr;
 
         // Per-frame device count (atomic, zeroed); dets go into the caller's buffer.
         let count_dev: CudaSlice<i32> = self.stream.alloc_zeros(1)?;
         let dets_raw = out.dets.device_ptr(self.stream.as_ref()).0;
         let cnt_raw = count_dev.device_ptr(self.stream.as_ref()).0;
-        let (qi, ci) = (q as i32, c as i32);
+        let (qi, ci) = (self.q as i32, self.c as i32);
         let conf = self.conf;
         let (sw, sh) = (img.width() as f32, img.height() as f32);
         self.decode
@@ -293,10 +279,10 @@ impl RfDetr {
             .arg(&sh)
             .arg(&dets_raw)
             .arg(&cnt_raw)
-            .launch_cfg(cfg_1d(q, 256))?;
+            .launch_cfg(cfg_1d(self.q, 256))?;
 
         // Async D2H of the count into the caller's pinned buffer (no sync).
-        let cnt_pin = out.count_pin_mut();
+        let cnt_pin = out.count_pin.as_mut_ptr();
         let vstream = vrt::Stream::from_cuda_stream(self.stream.clone());
         unsafe {
             vstream.memcpy_d2h_raw(

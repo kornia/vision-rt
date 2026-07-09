@@ -24,7 +24,7 @@ The API is **fully async — the library never syncs for you** (VPI-style):
 let mut res = xfeat.alloc_result()?;      // caller-owned output, reused
 xfeat.submit(&image, &mut res)?;          // enqueue, returns immediately
 stream.synchronize()?;                     // the caller owns the one sync
-let kpts = res.kpts_to_host(&stream)?;     // original-image pixels
+let kpts = res.kpts_to_host()?;     // original-image pixels
 ```
 
 Match two results with `Matcher::new(stream)` → `submit_match(&a.descs, a.count(),
