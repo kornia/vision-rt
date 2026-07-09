@@ -21,6 +21,8 @@ crate per PR.
 | `crates/vrt` | Safe core: Logger→Runtime→Engine→Session Arc chain, `ModelSession`, `cuda` launch helpers |
 | `crates/vrt-hub` | Model weights (HF Hub, sha256-pinned) + on-device engine cache |
 | `crates/vrt-xfeat` | XFeat keypoints: backbone + GPU NMS/top-K/descriptor sampling/mutual-NN. Crate-local `examples/` (`xfeat_match`, `xfeat_bench`) + `scripts/export_xfeat_backbone.py` |
+| `crates/vrt-rfdetr` | RF-DETR object detector (NMS-free) + on-device GPU decode |
+| `crates/vrt-rfdetr-kpts` | RF-DETR human pose: box + 17 COCO keypoints + confidence (CPU decode) |
 
 ## Architecture in one paragraph
 

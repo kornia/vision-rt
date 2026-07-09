@@ -18,6 +18,7 @@ over a shared safe core.
 | `vrt-hub` | Model weights (HF Hub, sha256-pinned) + on-device engine cache |
 | `vrt-xfeat` | XFeat keypoints + descriptors + GPU mutual-NN matching |
 | `vrt-rfdetr` | RF-DETR object detector (NMS-free) + GPU decode |
+| `vrt-rfdetr-kpts` | RF-DETR human pose: box + 17 COCO keypoints |
 
 ## Usage
 
