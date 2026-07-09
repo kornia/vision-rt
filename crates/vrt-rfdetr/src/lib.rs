@@ -256,6 +256,11 @@ impl RfDetr {
     /// first run; for a private/gated HF repo set `HF_TOKEN`. Requires feature `hub`.
     #[cfg(feature = "hub")]
     pub fn from_hub(stream: Arc<CudaStream>, conf: f32) -> Result<Self, BoxError> {
+        // Prefer a prebuilt engine matching this box's TRT+SM (skips the on-device
+        // build, which is slow for the transformer); otherwise pull the ONNX.
+        if let Some(engine) = vrt_hub::ModelHub::get_engine("rfdetr")? {
+            return Self::from_engine_file(engine, stream, conf);
+        }
         let onnx = vrt_hub::ModelHub::get("rfdetr")?;
         Self::from_onnx(onnx, stream, conf)
     }

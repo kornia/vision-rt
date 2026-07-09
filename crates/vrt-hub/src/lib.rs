@@ -130,7 +130,8 @@ pub static REGISTRY: &[ModelSpec] = &[
     },
     ModelSpec {
         // RF-DETR (NMS-free transformer detector). Fixed-resolution official export
-        // (input [1,3,512,512]); ONNX only — engines are built on-device.
+        // (input [1,3,512,512]) + a prebuilt engine for this Orin config (trt+sm
+        // guarded; other boxes build from the ONNX on-device).
         name: "rfdetr",
         hf_repo: "kornia/rfdetr",
         revision: "main",
@@ -138,7 +139,12 @@ pub static REGISTRY: &[ModelSpec] = &[
             filename: "rf-detr-small.onnx",
             sha256: "0e0817f4cafa479ccba17662a142092932b0b10c98947e7cf60f3badd0f5c219",
         }],
-        engines: &[],
+        engines: &[EngineArtifact {
+            filename: "rf-detr-small-trt10.3.0.30-sm87-fp16.engine",
+            sha256: "0caa4fa8c1852d22ed044e6a4d8c87f7695538ed38a555b7a41eb15ef0833181",
+            trt_version: "10.3.0.30",
+            sm: "87",
+        }],
     },
 ];
 
