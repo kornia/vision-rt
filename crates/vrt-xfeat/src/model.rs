@@ -1,6 +1,6 @@
 //! `XFeat` — GPU preprocessing + TRT backbone + GPU post-processing.
 
-use crate::postprocess::{TopkBufs, XFeatError, XFeatPostproc, XFeatResult};
+use crate::postprocess::{XFeatError, XFeatPostproc, XFeatResult};
 use cudarc::driver::CudaSlice;
 use kornia_image::Image;
 use kornia_imgproc::preprocess::Preprocessor;
@@ -53,25 +53,18 @@ pub struct XFeat {
     input: Tensor<f32, 4>,
     /// Model dims `(mh, mw)` the buffers are currently sized for.
     cur: (usize, usize),
+    /// Keypoint capacity for results allocated by [`run`](Self::run).
+    top_k: usize,
 }
 
 /// Minimum model dimension (a multiple of 32) the reused buffers are seeded with
 /// in [`XFeat::new`]; the first frame reallocates them to its real floor-32 size.
 const SEED_DIM: usize = 32;
 
-/// One frame's in-flight XFeat work from [`XFeat::submit`]: the device top-K
-/// buffers plus the model→original keypoint scale. The GPU work is enqueued but
-/// not yet synced — after one `stream.synchronize()` call [`XFeat::finish`] to
-/// read it. Enables one shared sync across several models on the same stream.
-pub struct XFeatPending {
-    bufs: TopkBufs,
-    scale: (f32, f32),
-}
-
 impl XFeat {
     /// Build an extractor sharing `stream` with the rest of the application
     /// (one CUDA stream so a single sync per frame covers all its GPU work,
-    /// including matching via [`XFeatPostproc::match_mutual_nn_gpu`]).
+    /// including matching via a `matching::Matcher` on the same stream).
     pub fn new(
         engine: Arc<Engine>,
         stream: Arc<CudaStream>,
@@ -79,7 +72,7 @@ impl XFeat {
     ) -> Result<Self, BoxError> {
         let model = ModelSession::new(Arc::clone(&engine), Arc::clone(&stream))?;
         let preproc = Preprocessor::stretch(stream.clone())?;
-        let postproc = XFeatPostproc::new(stream.clone(), params.top_k, params.threshold)?;
+        let postproc = XFeatPostproc::new(stream.clone(), params.threshold)?;
         // Seed the reused buffers at a minimal valid size so they're always live
         // (no Option/unwrap); the first frame reallocates them to its floor-32 size.
         let input = zeros_cuda::<f32, 4>([1, 3, SEED_DIM, SEED_DIM], &stream)?;
@@ -92,7 +85,14 @@ impl XFeat {
             score_dev,
             input,
             cur: (SEED_DIM, SEED_DIM),
+            top_k: params.top_k,
         })
+    }
+
+    /// Allocate an output buffer sized for this extractor's `top_k`, to reuse
+    /// across [`submit`](Self::submit) calls (VPI-style caller-owned output).
+    pub fn alloc_result(&self) -> Result<XFeatResult, BoxError> {
+        Ok(XFeatResult::alloc(&self.stream, self.top_k)?)
     }
 
     /// Construct from a prebuilt TensorRT `.engine` file (machine-locked to this
@@ -159,11 +159,12 @@ impl XFeat {
     }
 
     /// Submit one frame's async GPU work — resize/normalize → backbone → NMS →
-    /// top-K — all enqueued on the shared stream with **no sync**, returning an
-    /// [`XFeatPending`]. Sync the stream once (covering any other models submitted
-    /// onto it), then call [`finish`](Self::finish). [`run`](Self::run) wraps
-    /// submit + sync + finish for the single-model case.
-    pub fn submit(&mut self, img: &Image<u8, 3>) -> Result<XFeatPending, XFeatError> {
+    /// top-K — into the caller-owned `out`, all enqueued on the shared stream with
+    /// **no sync** (VPI-style). Sync the stream once (covering any other work on
+    /// it), then read `out` (its `count()`/`kpts_to_host` are valid after the
+    /// sync). Reuse one `out` per frame, or hold several to keep multiple frames
+    /// outstanding. [`run`](Self::run) wraps alloc + submit + sync.
+    pub fn submit(&mut self, img: &Image<u8, 3>, out: &mut XFeatResult) -> Result<(), XFeatError> {
         // Upstream XFeat: resize to floor-of-32 dims, keypoints scaled back by (rw,rh).
         let (sw, sh) = (img.width(), img.height());
         let (mw, mh) = ((sw / 32) * 32, (sh / 32) * 32);
@@ -182,47 +183,37 @@ impl XFeat {
 
         // Preprocess (stretch resize + /255) into the reused input, then backbone.
         self.preproc.run(img, &mut self.input)?;
-        let out = self.model.run(&self.input)?;
-        let desc_ptr = out
+        let tmap = self.model.run(&self.input)?;
+        let desc_ptr = tmap
             .get("descriptors")
             .ok_or(XFeatError::MissingOutput("descriptors"))?
             .f32_ptr()?;
-        let heat_ptr = out
+        let heat_ptr = tmap
             .get("heatmap")
             .ok_or(XFeatError::MissingOutput("heatmap"))?
             .f32_ptr()?;
-        let rel_ptr = out
+        let rel_ptr = tmap
             .get("reliability")
             .ok_or(XFeatError::MissingOutput("reliability"))?
             .f32_ptr()?;
         self.postproc
             .launch_score_nms(heat_ptr, rel_ptr, &self.score_dev, mh, mw)?;
-        let bufs = self
-            .postproc
-            .launch_topk(desc_ptr, &self.score_dev, mh, mw)?;
-        Ok(XFeatPending {
-            bufs,
-            scale: (rw, rh),
-        })
-    }
-
-    /// Assemble the [`XFeatResult`] from a [`submit`](Self::submit) **after** the
-    /// caller has synced the shared stream. Reads the keypoint count and stamps
-    /// the model→original scale (so `kpts_to_host` yields original-image pixels).
-    pub fn finish(&self, pending: XFeatPending) -> XFeatResult {
-        let mut res = self.postproc.finish_topk(pending.bufs);
-        res.scale = pending.scale;
-        res
+        self.postproc
+            .launch_topk(desc_ptr, &self.score_dev, mh, mw, out)?;
+        out.set_scale((rw, rh));
+        Ok(())
     }
 
     /// Synchronous one-shot inference on a device image of any resolution.
     ///
-    /// [`submit`](Self::submit) + one `stream.synchronize()` + read. The frame is
-    /// resized to its floor-of-32 model dims; the returned keypoints carry the
-    /// model→original `scale`, so `XFeatResult::kpts_to_host` yields original pixels.
+    /// Allocates a fresh [`XFeatResult`] + [`submit`](Self::submit) + one
+    /// `stream.synchronize()`. For a hot loop, reuse a result via `alloc_result` +
+    /// `submit` + your own sync. Keypoints carry the model→original `scale`, so
+    /// `XFeatResult::kpts_to_host` yields original-image pixels.
     pub fn run(&mut self, img: &Image<u8, 3>) -> Result<XFeatResult, XFeatError> {
-        let pending = self.submit(img)?;
+        let mut res = XFeatResult::alloc(&self.stream, self.top_k)?;
+        self.submit(img, &mut res)?;
         self.stream.synchronize()?;
-        Ok(self.finish(pending))
+        Ok(res)
     }
 }

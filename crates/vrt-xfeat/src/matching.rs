@@ -1,13 +1,11 @@
 //! GPU mutual nearest-neighbour descriptor matching — decoupled from the XFeat
 //! extractor's post-processing.
 //!
-//! [`Matcher`] owns the single `xfeat_match_argmax` kernel and matches two
-//! [`XFeatResult`]s whose L2-normalised descriptors already live on device (no
-//! re-upload). Cosine similarity = dot product (valid because descriptors are
-//! unit-norm). Async by default: [`submit_match`](Matcher::submit_match) enqueues
-//! the kernels + the D2H of the match arrays into pinned buffers with **no sync**;
-//! [`finish_match`](Matcher::finish_match) builds the pairs on the host after the
-//! caller syncs the shared stream.
+//! [`Matcher`] owns the single `xfeat_match_argmax` kernel and matches two sets of
+//! L2-normalised descriptors already on device (no re-upload). Cosine similarity =
+//! dot product (unit-norm descriptors). VPI-style, caller-owned output: allocate a
+//! [`MatchResult`] once, `submit_match` writes into it (**async, no sync**), sync
+//! the shared stream, then read [`MatchResult::pairs`].
 
 use cudarc::driver::sys::CUdeviceptr;
 use cudarc::driver::{CudaSlice, CudaStream, DevicePtr};
@@ -16,7 +14,7 @@ use std::sync::Arc;
 
 use vrt::cuda::cfg_1d;
 
-use crate::postprocess::{XFeatError, XFeatResult};
+use crate::postprocess::XFeatError;
 
 const MATCH_SRC: &str = r#"
 /* xfeat_match_argmax — argmax dot-product search: Q[t] → nearest in R.
@@ -78,31 +76,68 @@ extern "C" __global__ void xfeat_match_argmax(
 }
 "#;
 
-/// One match's in-flight work from [`Matcher::submit_match`]: the argmax arrays'
-/// async D2H is enqueued but not synced. After one `stream.synchronize()`,
-/// [`Matcher::finish_match`] builds the mutual-NN pairs from the pinned host
-/// copies. `inner` is `None` when either input had zero keypoints.
-pub struct MatchPending {
-    inner: Option<MatchInner>,
-    min_cossim: f32,
-}
-
-struct MatchInner {
-    // Device match arrays — kept alive until the caller's sync completes the D2H.
-    _m12_dev: CudaSlice<i32>,
-    _m21_dev: CudaSlice<i32>,
-    _s12_dev: CudaSlice<f32>,
-    // Pinned host targets read in `finish_match` (post-sync).
+/// Caller-owned mutual-NN match output (VPI-style), allocated once and reused.
+///
+/// Capacity `cap` must be ≥ both descriptor counts of any pair matched into it
+/// (allocate with the extractor's `top_k`). [`Matcher::submit_match`] writes the
+/// argmax arrays here (async); after the stream sync, [`pairs`](Self::pairs)
+/// builds the `(i, j)` list on the host.
+pub struct MatchResult {
+    // Device match arrays (capacity `cap`) — written by the kernels, copied to pinned.
+    m12_dev: CudaSlice<i32>,
+    m21_dev: CudaSlice<i32>,
+    s12_dev: CudaSlice<f32>,
+    // Pinned host targets read in `pairs()` (post-sync).
     m12: vrt::PinnedBuffer<i32>,
     m21: vrt::PinnedBuffer<i32>,
     s12: vrt::PinnedBuffer<f32>,
+    cap: usize,
     n0: usize,
+    min_cossim: f32,
+}
+
+impl MatchResult {
+    /// Pre-allocate a match output of capacity `cap` (use the extractor's `top_k`).
+    pub fn alloc(stream: &Arc<CudaStream>, cap: usize) -> Result<Self, XFeatError> {
+        Ok(Self {
+            m12_dev: unsafe { stream.alloc::<i32>(cap)? },
+            m21_dev: unsafe { stream.alloc::<i32>(cap)? },
+            s12_dev: unsafe { stream.alloc::<f32>(cap)? },
+            m12: vrt::PinnedBuffer::<i32>::alloc(cap)?,
+            m21: vrt::PinnedBuffer::<i32>::alloc(cap)?,
+            s12: vrt::PinnedBuffer::<f32>::alloc(cap)?,
+            cap,
+            n0: 0,
+            min_cossim: 0.0,
+        })
+    }
+
+    /// Build mutual-NN pairs `(i, j)` from the last [`Matcher::submit_match`],
+    /// **after** the stream sync. `i` indexes set 0, `j` set 1; both are mutual
+    /// nearest neighbours with cosine ≥ the submitted `min_cossim`.
+    pub fn pairs(&self) -> Vec<(usize, usize)> {
+        if self.n0 == 0 {
+            return Vec::new();
+        }
+        let (m12, m21, s12) = (
+            self.m12.as_slice(),
+            self.m21.as_slice(),
+            self.s12.as_slice(),
+        );
+        (0..self.n0)
+            .filter(|&i| {
+                let j = m12[i] as usize;
+                m21[j] as usize == i && s12[i] >= self.min_cossim
+            })
+            .map(|i| (i, m12[i] as usize))
+            .collect()
+    }
 }
 
 /// GPU mutual nearest-neighbour matcher: owns the argmax kernel + shared stream.
 ///
-/// Construct once (share the same CUDA stream as the extractor for a single
-/// end-to-end sync), then match any pair of [`XFeatResult`]s.
+/// Construct once (share the extractor's CUDA stream for one end-to-end sync),
+/// then match any two device descriptor sets.
 pub struct Matcher {
     fn_match_argmax: CudaKernel,
     stream: Arc<CudaStream>,
@@ -125,38 +160,43 @@ impl Matcher {
         &self.stream
     }
 
-    /// Enqueue mutual-NN matching between two results — **async, no sync**.
-    /// Launches the tiled-argmax kernels and starts the D2H of the match arrays
-    /// into this call's pinned buffers, returning a [`MatchPending`]. Sync the
-    /// stream once, then [`finish_match`](Self::finish_match).
+    /// Allocate a reusable match output for this matcher's stream.
+    pub fn alloc_result(&self, cap: usize) -> Result<MatchResult, XFeatError> {
+        MatchResult::alloc(&self.stream, cap)
+    }
+
+    /// Enqueue mutual-NN matching of two device descriptor sets into `out` —
+    /// **async, no sync**. `descs*` are `[n* × 64]` L2-normalised device buffers
+    /// (e.g. `XFeatResult::descs` with `count`); `out.cap` must be ≥ `n0` and
+    /// `n1`. Sync the stream, then read [`MatchResult::pairs`].
     pub fn submit_match(
         &self,
-        res0: &XFeatResult,
-        res1: &XFeatResult,
+        descs0: &CudaSlice<f32>,
+        n0: usize,
+        descs1: &CudaSlice<f32>,
+        n1: usize,
         min_cossim: f32,
-    ) -> Result<MatchPending, XFeatError> {
-        let (n0, n1) = (res0.count, res1.count);
+        out: &mut MatchResult,
+    ) -> Result<(), XFeatError> {
+        debug_assert!(
+            n0 <= out.cap && n1 <= out.cap,
+            "match output capacity too small"
+        );
+        out.n0 = n0;
+        out.min_cossim = min_cossim;
         if n0 == 0 || n1 == 0 {
-            return Ok(MatchPending {
-                inner: None,
-                min_cossim,
-            });
+            return Ok(());
         }
 
-        let m12_dev: CudaSlice<i32> = unsafe { self.stream.alloc(n0)? };
-        let m21_dev: CudaSlice<i32> = unsafe { self.stream.alloc(n1)? };
-        let s12_dev: CudaSlice<f32> = unsafe { self.stream.alloc(n0)? };
-
-        let d0_raw = res0.descs.device_ptr(self.stream.as_ref()).0;
-        let d1_raw = res1.descs.device_ptr(self.stream.as_ref()).0;
-        let m12_raw = m12_dev.device_ptr(self.stream.as_ref()).0;
-        let m21_raw = m21_dev.device_ptr(self.stream.as_ref()).0;
-        let s12_raw = s12_dev.device_ptr(self.stream.as_ref()).0;
+        let d0_raw = descs0.device_ptr(self.stream.as_ref()).0;
+        let d1_raw = descs1.device_ptr(self.stream.as_ref()).0;
+        let m12_raw = out.m12_dev.device_ptr(self.stream.as_ref()).0;
+        let m21_raw = out.m21_dev.device_ptr(self.stream.as_ref()).0;
+        let s12_raw = out.s12_dev.device_ptr(self.stream.as_ref()).0;
         let null_sim: CUdeviceptr = 0;
         let (n0_i, n1_i) = (n0 as i32, n1 as i32);
 
         // One tiled argmax kernel, both directions (sim only needed for 1→2).
-        // Block size must match MATCH_BLOCK in the kernel source.
         self.fn_match_argmax
             .launch_builder(&self.stream)
             .arg(&d0_raw)
@@ -176,90 +216,55 @@ impl Matcher {
             .arg(&n0_i)
             .launch_cfg(cfg_1d(n1, 128))?;
 
-        // Async D2H of the three match arrays into pinned host buffers (no sync).
-        // The device buffers are kept alive in the pending until the caller syncs.
-        let mut m12 = vrt::PinnedBuffer::<i32>::alloc(n0)?;
-        let mut m21 = vrt::PinnedBuffer::<i32>::alloc(n1)?;
-        let mut s12 = vrt::PinnedBuffer::<f32>::alloc(n0)?;
+        // Async D2H of the match arrays into the caller's pinned buffers (no sync).
+        let (m12_pin, m21_pin, s12_pin) = (
+            out.m12.as_mut_ptr(),
+            out.m21.as_mut_ptr(),
+            out.s12.as_mut_ptr(),
+        );
         let vstream = vrt::Stream::from_cuda_stream(self.stream.clone());
         unsafe {
             vstream.memcpy_d2h_raw(
-                m12.as_mut_ptr() as *mut u8,
-                m12_raw as *const _,
+                m12_pin as *mut u8,
+                m12_raw as usize as *const _,
                 n0 * std::mem::size_of::<i32>(),
             )?;
             vstream.memcpy_d2h_raw(
-                m21.as_mut_ptr() as *mut u8,
-                m21_raw as *const _,
+                m21_pin as *mut u8,
+                m21_raw as usize as *const _,
                 n1 * std::mem::size_of::<i32>(),
             )?;
             vstream.memcpy_d2h_raw(
-                s12.as_mut_ptr() as *mut u8,
-                s12_raw as *const _,
+                s12_pin as *mut u8,
+                s12_raw as usize as *const _,
                 n0 * std::mem::size_of::<f32>(),
             )?;
         }
-
-        Ok(MatchPending {
-            inner: Some(MatchInner {
-                _m12_dev: m12_dev,
-                _m21_dev: m21_dev,
-                _s12_dev: s12_dev,
-                m12,
-                m21,
-                s12,
-                n0,
-            }),
-            min_cossim,
-        })
+        Ok(())
     }
 
-    /// Assemble mutual-NN pairs from a [`submit_match`] **after** the caller has
-    /// synced the stream. Pure host work: returns `(i, j)` where keypoint `i` of
-    /// `res0` and `j` of `res1` are mutual nearest neighbours with cosine ≥ the
-    /// submitted `min_cossim`.
+    /// Synchronous one-shot: alloc + [`submit_match`] + one sync + `pairs`.
+    /// Convenience; drive the split with a reused [`MatchResult`] for a hot loop.
     ///
     /// [`submit_match`]: Matcher::submit_match
-    pub fn finish_match(&self, pending: MatchPending) -> Vec<(usize, usize)> {
-        let Some(inner) = pending.inner else {
-            return Vec::new();
-        };
-        let (m12, m21, s12) = (
-            inner.m12.as_slice(),
-            inner.m21.as_slice(),
-            inner.s12.as_slice(),
-        );
-        (0..inner.n0)
-            .filter(|&i| {
-                let j = m12[i] as usize;
-                m21[j] as usize == i && s12[i] >= pending.min_cossim
-            })
-            .map(|i| (i, m12[i] as usize))
-            .collect()
-    }
-
-    /// Synchronous one-shot: [`submit_match`] + one sync + [`finish_match`].
-    /// Convenience for the single-pair case; drive the split directly to fold
-    /// matching into a larger continuous submit.
-    ///
-    /// [`submit_match`]: Matcher::submit_match
-    /// [`finish_match`]: Matcher::finish_match
     pub fn match_mutual_nn_gpu(
         &self,
-        res0: &XFeatResult,
-        res1: &XFeatResult,
+        descs0: &CudaSlice<f32>,
+        n0: usize,
+        descs1: &CudaSlice<f32>,
+        n1: usize,
         min_cossim: f32,
     ) -> Result<Vec<(usize, usize)>, XFeatError> {
-        let pending = self.submit_match(res0, res1, min_cossim)?;
+        let mut out = MatchResult::alloc(&self.stream, n0.max(n1).max(1))?;
+        self.submit_match(descs0, n0, descs1, n1, min_cossim, &mut out)?;
         self.stream.synchronize()?;
-        Ok(self.finish_match(pending))
+        Ok(out.pairs())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::postprocess::XFeatResult;
 
     /// Independent CPU mutual nearest-neighbour reference (O(n²×64)) — the oracle
     /// the GPU tiled-argmax kernel is validated against. Test-only.
@@ -332,16 +337,6 @@ mod tests {
         v
     }
 
-    fn result_from_descs(stream: &Arc<CudaStream>, descs: &[f32], n: usize) -> XFeatResult {
-        XFeatResult {
-            kpts: stream.clone_htod(&vec![0.0f32; n * 2]).unwrap(),
-            descs: stream.clone_htod(descs).unwrap(),
-            scores: stream.clone_htod(&vec![1.0f32; n]).unwrap(),
-            count: n,
-            scale: (1.0, 1.0),
-        }
-    }
-
     /// GPU tiled-argmax matching must agree with the CPU reference.
     /// Needs the Jetson GPU; run explicitly:
     ///   cargo test -p vrt-xfeat -- --ignored
@@ -355,12 +350,12 @@ mod tests {
         for (n0, n1) in [(4096usize, 4096usize), (1000, 3000), (1, 4096), (130, 1)] {
             let h0 = random_descs(n0, 42);
             let h1 = random_descs(n1, 7);
-            let r0 = result_from_descs(&stream, &h0, n0);
-            let r1 = result_from_descs(&stream, &h1, n1);
+            let d0 = stream.clone_htod(&h0).unwrap();
+            let d1 = stream.clone_htod(&h1).unwrap();
 
-            let _ = matcher.match_mutual_nn_gpu(&r0, &r1, -1.0).unwrap(); // warm-up
+            let _ = matcher.match_mutual_nn_gpu(&d0, n0, &d1, n1, -1.0).unwrap(); // warm-up
             let t0 = std::time::Instant::now();
-            let gpu = matcher.match_mutual_nn_gpu(&r0, &r1, -1.0).unwrap();
+            let gpu = matcher.match_mutual_nn_gpu(&d0, n0, &d1, n1, -1.0).unwrap();
             let gpu_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
             let cpu = cpu_match_reference(&h0, &h1, -1.0);

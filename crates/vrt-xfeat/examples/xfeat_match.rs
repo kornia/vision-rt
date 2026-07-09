@@ -67,29 +67,36 @@ fn main() -> Result<(), vrt::BoxError> {
     let engine = Engine::from_file(runtime, &engine_path)?;
     let params = XFeatParams::new(TOP_K, THRESHOLD);
 
-    // One shared CUDA stream. Two XFeat instances (separate buffers, same engine
-    // + stream) so both extractions can be outstanding under ONE sync.
+    // One shared CUDA stream + one extractor with two caller-owned output buffers
+    // (VPI-style), so both extractions can be outstanding under ONE sync.
     let stream = vrt::Stream::new_standalone()?.cuda_stream().clone();
-    let mut xf_map = XFeat::new(Arc::clone(&engine), stream.clone(), params.clone())?;
-    let mut xf_query = XFeat::new(Arc::clone(&engine), stream.clone(), params)?;
+    let mut xfeat = XFeat::new(Arc::clone(&engine), stream.clone(), params)?;
+    let mut map_res = xfeat.alloc_result()?;
+    let mut query_res = xfeat.alloc_result()?;
 
     // Load both frames to device (native resolution).
     let (map_dev, map_img) = load(&stream, map_path)?;
     let (query_dev, query_img) = load(&stream, query_path)?;
 
-    // Continuous flow: submit BOTH extractions async on the shared stream, then a
-    // SINGLE synchronize() covers both; keypoints come back in source pixels.
-    let map_pending = xf_map.submit(&map_dev)?;
-    let query_pending = xf_query.submit(&query_dev)?;
+    // Continuous flow: submit BOTH extractions into their own results (async), then
+    // ONE synchronize() covers both; keypoints come back in source pixels.
+    xfeat.submit(&map_dev, &mut map_res)?;
+    xfeat.submit(&query_dev, &mut query_res)?;
     stream.synchronize()?;
-    let map_res = xf_map.finish(map_pending);
-    let query_res = xf_query.finish(query_pending);
 
-    // Match on the same stream (decoupled Matcher), also async: submit → sync → finish.
+    // Match on the same stream (decoupled Matcher): submit → one sync → read pairs.
     let matcher = Matcher::new(stream.clone())?;
-    let match_pending = matcher.submit_match(&map_res, &query_res, MIN_COSSIM)?;
+    let mut m = matcher.alloc_result(map_res.capacity().max(query_res.capacity()))?;
+    matcher.submit_match(
+        &map_res.descs,
+        map_res.count(),
+        &query_res.descs,
+        query_res.count(),
+        MIN_COSSIM,
+        &mut m,
+    )?;
     stream.synchronize()?;
-    let matches = matcher.finish_match(match_pending);
+    let matches = m.pairs();
 
     println!("map:   {} keypoints", map_res.len());
     println!("query: {} keypoints", query_res.len());

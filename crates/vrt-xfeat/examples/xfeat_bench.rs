@@ -60,16 +60,21 @@ fn main() -> Result<(), vrt::BoxError> {
     );
     println!("warmup {WARMUP}, measure {iters} iters\n");
 
+    // Reuse one caller-owned output across all iterations (no per-frame alloc).
+    let mut res = xfeat.alloc_result()?;
+
     for _ in 0..WARMUP {
-        let _ = xfeat.run(&img)?;
+        xfeat.submit(&img, &mut res)?;
+        stream.synchronize()?;
     } // discard warm-up (TRT/CUDA cache fill)
 
     let mut lat = Vec::with_capacity(iters);
     for _ in 0..iters {
         let t = Instant::now();
-        let res = xfeat.run(&img)?; // letterbox + backbone + top-K + sync
+        xfeat.submit(&img, &mut res)?; // resize + backbone + top-K (async)
+        stream.synchronize()?; // one sync = full per-frame latency
         lat.push(t.elapsed().as_secs_f64() * 1000.0);
-        let _ = res.len();
+        let _ = res.count();
     }
 
     let m = lat.len() as f64;

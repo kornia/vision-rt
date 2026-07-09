@@ -220,48 +220,73 @@ extern "C" __global__ void xfeat_topk_select(
 
 // ── Public types ──────────────────────────────────────────────────────────────
 
-/// Output of one XFeat extraction — **entirely on the GPU**.
+/// Output of one XFeat extraction — **caller-owned, pre-allocated, reusable**
+/// (VPI-style output buffer).
 ///
-/// All three buffers have capacity `top_k`; [`count`](Self::count) is the valid
-/// keypoint count (the only host-side scalar). They share the same (GPU-select,
-/// atomic-append) order. Nothing is downloaded — descriptor matching stays on
-/// device (see the `matching::Matcher`); a consumer that needs pixel
-/// coordinates or scores on the host downloads them explicitly with
-/// [`kpts_to_host`](Self::kpts_to_host) / [`scores_to_host`](Self::scores_to_host).
+/// Allocate once with [`alloc`](Self::alloc) (capacity `top_k`), pass `&mut` to
+/// [`XFeat::submit`], sync the stream, then read. All device buffers stay on the
+/// GPU — descriptor matching (`matching::Matcher`) runs on them without a
+/// download; [`count`](Self::count) reads the pinned scalar (valid **after** the
+/// sync). Reuse across frames; hold several to keep multiple frames outstanding.
 pub struct XFeatResult {
-    /// Device (x, y) coordinates in **model space** (the floor-32 backbone input),
-    /// capacity [top_k × 2]. Multiply by [`scale`](Self::scale) for original pixels.
+    /// Device (x, y) in **model space** (floor-32 backbone input), capacity `top_k×2`.
+    /// [`kpts_to_host`](Self::kpts_to_host) applies [`scale`](Self::scale) → original px.
     pub kpts: CudaSlice<f32>,
-    /// L2-normalised 64-D descriptors on device, capacity [top_k × 64].
+    /// L2-normalised 64-D descriptors on device, capacity `top_k×64`.
     pub descs: CudaSlice<f32>,
-    /// Combined NMS scores on device, capacity [top_k].
+    /// Combined NMS scores on device, capacity `top_k`.
     pub scores: CudaSlice<f32>,
-    /// Number of valid keypoints (≤ top_k) — bounds any access to the buffers.
-    pub count: usize,
-    /// Per-axis model→original scale `(rw, rh)` = `(src_w/model_w, src_h/model_h)`
-    /// (matches upstream XFeat's `mkpts * [rw, rh]`). `(1.0, 1.0)` if unset.
-    /// Applied to `kpts` on host readout; descriptors/matching are unaffected.
-    pub scale: (f32, f32),
+    /// Pinned host target for the count scalar (the only D2H), written by `submit`.
+    count_pin: vrt::PinnedBuffer<i32>,
+    top_k: usize,
+    /// Model→original scale `(rw, rh)`, stamped by [`XFeat::submit`].
+    scale: (f32, f32),
 }
 
 impl XFeatResult {
-    /// Valid keypoint count.
+    /// Pre-allocate an extraction output of capacity `top_k` on `stream`.
+    pub fn alloc(stream: &Arc<CudaStream>, top_k: usize) -> Result<Self, XFeatError> {
+        Ok(Self {
+            kpts: stream.alloc_zeros::<f32>(top_k * 2)?,
+            descs: unsafe { stream.alloc::<f32>(top_k * 64)? },
+            scores: stream.alloc_zeros::<f32>(top_k)?,
+            count_pin: vrt::PinnedBuffer::<i32>::alloc(1)?,
+            top_k,
+            scale: (1.0, 1.0),
+        })
+    }
+
+    /// Capacity (max keypoints) this result was allocated for.
+    pub fn capacity(&self) -> usize {
+        self.top_k
+    }
+
+    /// Valid keypoint count — reads the pinned scalar, so call **after** the
+    /// stream sync following [`XFeat::submit`].
+    pub fn count(&self) -> usize {
+        (self.count_pin.as_slice()[0].max(0) as usize).min(self.top_k)
+    }
     pub fn len(&self) -> usize {
-        self.count
+        self.count()
     }
     pub fn is_empty(&self) -> bool {
-        self.count == 0
+        self.count() == 0
+    }
+
+    /// Model→original keypoint scale `(rw, rh)` stamped for the last submit.
+    pub fn scale(&self) -> (f32, f32) {
+        self.scale
     }
 
     /// Download the valid keypoints to host: interleaved `[x0,y0,x1,y1,…]`,
     /// length `count × 2`, in **original image pixels** ([`scale`](Self::scale)
-    /// applied). Call only when you actually need coordinates on the CPU (e.g.
-    /// drawing) — descriptor matching stays on device.
+    /// applied). Call after the stream sync.
     pub fn kpts_to_host(
         &self,
         stream: &Arc<CudaStream>,
     ) -> Result<Vec<f32>, cudarc::driver::DriverError> {
-        let mut xy = stream.clone_dtoh(&self.kpts.slice(0..self.count * 2))?;
+        let n = self.count();
+        let mut xy = stream.clone_dtoh(&self.kpts.slice(0..n * 2))?;
         let (sx, sy) = self.scale;
         if (sx, sy) != (1.0, 1.0) {
             for p in xy.chunks_exact_mut(2) {
@@ -272,31 +297,27 @@ impl XFeatResult {
         Ok(xy)
     }
 
-    /// Download the valid scores to host (length `count`).
+    /// Download the valid scores to host (length `count`). Call after the sync.
     pub fn scores_to_host(
         &self,
         stream: &Arc<CudaStream>,
     ) -> Result<Vec<f32>, cudarc::driver::DriverError> {
-        stream.clone_dtoh(&self.scores.slice(0..self.count))
+        let n = self.count();
+        stream.clone_dtoh(&self.scores.slice(0..n))
+    }
+
+    /// Mutable pinned-count pointer (for the async count D2H in `launch_topk`).
+    pub(crate) fn count_pin_mut(&mut self) -> *mut i32 {
+        self.count_pin.as_mut_ptr()
+    }
+
+    /// Stamp the model→original keypoint scale (set by [`XFeat::submit`]).
+    pub(crate) fn set_scale(&mut self, scale: (f32, f32)) {
+        self.scale = scale;
     }
 }
 
 // ── XFeatPostproc ─────────────────────────────────────────────────────────────
-
-/// Device buffers carrying one frame's GPU-selected keypoints from the async
-/// launch (`launch_topk`) to the post-sync read (`finish_topk`).
-///
-/// All device buffers have **capacity `top_k`**; the valid keypoint count is
-/// staged into this frame's **own** pinned buffer (the only D2H) and read in
-/// `finish_topk`. Because the count buffer is per-frame (not shared), multiple
-/// frames may be outstanding on the stream before a single sync.
-pub struct TopkBufs {
-    kpts_dev: CudaSlice<f32>,          // [top_k * 2]
-    descs_dev: CudaSlice<f32>,         // [top_k * 64]
-    scores_dev: CudaSlice<f32>,        // [top_k]
-    count_pin: vrt::PinnedBuffer<i32>, // [1] — this frame's async count D2H target
-    top_k: usize,
-}
 
 pub struct XFeatPostproc {
     fn_score_nms: CudaKernel,
@@ -306,7 +327,6 @@ pub struct XFeatPostproc {
     fn_cutoff: CudaKernel,
     fn_select: CudaKernel,
     stream: Arc<CudaStream>,
-    top_k: usize,
     threshold: f32,
 }
 
@@ -318,8 +338,9 @@ impl XFeatPostproc {
         &self.stream
     }
 
-    /// Compile all CUDA kernels and return a ready post-processor.
-    pub fn new(stream: Arc<CudaStream>, top_k: usize, threshold: f32) -> Result<Self, XFeatError> {
+    /// Compile all CUDA kernels and return a ready post-processor. The keypoint
+    /// cap comes from the output [`XFeatResult`]'s capacity, not from here.
+    pub fn new(stream: Arc<CudaStream>, threshold: f32) -> Result<Self, XFeatError> {
         // Compile the kernel suite once; load all six functions from the module.
         let names = [
             "xfeat_score_nms",
@@ -341,7 +362,6 @@ impl XFeatPostproc {
             fn_cutoff,
             fn_select,
             stream,
-            top_k,
             threshold,
         })
     }
@@ -378,40 +398,35 @@ impl XFeatPostproc {
         Ok(())
     }
 
-    /// Launch the entire top-K + descriptor postproc **asynchronously** — GPU
-    /// histogram-cutoff top-K, descriptor sampling, L2-norm, and async D2H of
-    /// the host-side results — with **no `stream.synchronize()`**.
+    /// Launch the entire top-K + descriptor postproc **asynchronously** into the
+    /// caller-owned `out` buffers — GPU histogram-cutoff top-K, descriptor
+    /// sampling, L2-norm, and the async D2H of the keypoint count into
+    /// `out`'s pinned buffer — with **no `stream.synchronize()`**.
     ///
     /// The NMS score map must already be in `score_dev` (see [`launch_score_nms`]).
-    /// The returned [`TopkBufs`] owns the device buffers; the caller syncs the
-    /// stream once and then calls [`finish_topk`] to read the count.
-    ///
-    /// The returned [`TopkBufs`] own **per-frame** buffers (including the pinned
-    /// count target), so several frames may be outstanding on the stream before a
-    /// single sync — submit multiple, sync once, then `finish_topk` each.
+    /// The cap is `out.capacity()`. Sync the stream once, then read `out`
+    /// (`out.count()` is valid after the sync). Several `out`s may be outstanding.
     ///
     /// [`launch_score_nms`]: XFeatPostproc::launch_score_nms
-    /// [`finish_topk`]: XFeatPostproc::finish_topk
     pub fn launch_topk(
-        &mut self,
+        &self,
         desc_ptr: *const f32,
         score_dev: &CudaSlice<f32>,
         h: usize,
         w: usize,
-    ) -> Result<TopkBufs, XFeatError> {
+        out: &mut XFeatResult,
+    ) -> Result<(), XFeatError> {
         use cudarc::driver::DevicePtr;
         let (hd, wd) = (h / 8, w / 8);
         let n_pixels = h * w;
-        let k = self.top_k;
+        let k = out.top_k;
 
-        // Per-frame scratch + outputs (counts/cutoff zeroed; kpts zeroed so the
-        // unused [count..k) tail samples at (0,0) instead of garbage coords).
+        // Per-frame scratch (zeroed): the atomic count, histogram, and cutoff.
+        // The `out` buffers are reused — the [count..k) tail keeps stale values
+        // but is never read (all access is bounded by `out.count()`).
         let hist_dev: CudaSlice<i32> = self.stream.alloc_zeros(TOPK_NBINS)?;
         let cutoff_dev: CudaSlice<f32> = self.stream.alloc_zeros(1)?;
         let count_dev: CudaSlice<i32> = self.stream.alloc_zeros(1)?;
-        let kpts_dev: CudaSlice<f32> = self.stream.alloc_zeros(k * 2)?;
-        let scores_dev: CudaSlice<f32> = self.stream.alloc_zeros(k)?;
-        let descs_dev: CudaSlice<f32> = unsafe { self.stream.alloc(k * 64)? };
 
         let raw = |s: &CudaSlice<f32>| -> CUdeviceptr { s.device_ptr(self.stream.as_ref()).0 };
         let raw_i = |s: &CudaSlice<i32>| -> CUdeviceptr { s.device_ptr(self.stream.as_ref()).0 };
@@ -420,28 +435,28 @@ impl XFeatPostproc {
         let hist_raw = raw_i(&hist_dev);
         let cut_raw = raw(&cutoff_dev);
         let cnt_raw = raw_i(&count_dev);
-        let kxy_raw = raw(&kpts_dev);
-        let sco_raw = raw(&scores_dev);
+        let kxy_raw = raw(&out.kpts);
+        let sco_raw = raw(&out.scores);
+        let descs_raw = raw(&out.descs);
+        let desc_raw = desc_ptr as usize as CUdeviceptr;
         let total = n_pixels as i32;
-        let k_i = k as i32;
-        let h_i = h as i32;
-        let w_i = w as i32;
+        let (k_i, h_i, w_i) = (k as i32, h as i32, w as i32);
+        let (hd_i, wd_i) = (hd as i32, wd as i32);
+        let cfg64 = cfg_per_item(k, 64);
 
-        // 1. histogram of survivor scores
+        // 1. histogram → 2. cutoff → 3. select survivors into out.kpts/out.scores
         self.fn_histogram
             .launch_builder(&self.stream)
             .arg(&score_raw)
             .arg(&hist_raw)
             .arg(&total)
             .launch_cfg(cfg_1d(n_pixels, 256))?;
-        // 2. find the score cutoff for ~K survivors (one block, one thread)
         self.fn_cutoff
             .launch_builder(&self.stream)
             .arg(&hist_raw)
             .arg(&k_i)
             .arg(&cut_raw)
             .launch_cfg(cfg_1d(1, 1))?;
-        // 3. gather survivors >= cutoff, capped at K
         self.fn_select
             .launch_builder(&self.stream)
             .arg(&score_raw)
@@ -453,13 +468,7 @@ impl XFeatPostproc {
             .arg(&w_i)
             .arg(&k_i)
             .launch_cfg(cfg_1d(n_pixels, 256))?;
-        // 4. sample 64-D descriptors at the selected keypoints (cap K; the
-        //    unused tail samples at (0,0) and is ignored by `finish_topk`).
-        let desc_raw = desc_ptr as usize as CUdeviceptr;
-        let descs_raw = raw(&descs_dev);
-        let hd_i = hd as i32;
-        let wd_i = wd as i32;
-        let cfg64 = cfg_per_item(k, 64);
+        // 4. sample 64-D descriptors into out.descs → 5. L2-normalise in place
         self.fn_sample_descs
             .launch_builder(&self.stream)
             .arg(&desc_raw)
@@ -470,51 +479,25 @@ impl XFeatPostproc {
             .arg(&h_i)
             .arg(&w_i)
             .launch_cfg(cfg64)?;
-        // 5. L2-normalise each descriptor row in place
         self.fn_l2_norm
             .launch_builder(&self.stream)
             .arg(&descs_raw)
             .arg(&k_i)
             .launch_cfg(cfg64)?;
 
-        // 6. async D2H of the count scalar (the ONLY host transfer) into THIS
-        //    frame's pinned buffer — pinned host memory makes cudaMemcpyAsync
-        //    truly asynchronous, so the host thread is free until the sync. A
-        //    per-frame buffer (not shared) lets several frames stay outstanding.
-        //    Keypoints/descs/scores stay on device (downloaded only on demand).
-        let mut count_pin = vrt::PinnedBuffer::<i32>::alloc(1)?;
+        // 6. async D2H of the count scalar (the ONLY host transfer) into the
+        //    caller's pinned buffer — pinned makes cudaMemcpyAsync truly async,
+        //    so the host thread is free until the sync.
+        let cnt_pin = out.count_pin_mut();
         let vstream = vrt::Stream::from_cuda_stream(self.stream.clone());
         unsafe {
             vstream.memcpy_d2h_raw(
-                count_pin.as_mut_ptr() as *mut u8,
+                cnt_pin as *mut u8,
                 cnt_raw as usize as *const _,
                 std::mem::size_of::<i32>(),
             )?;
         }
-
-        Ok(TopkBufs {
-            kpts_dev,
-            descs_dev,
-            scores_dev,
-            count_pin,
-            top_k: k,
-        })
-    }
-
-    /// Assemble the final [`XFeatResult`] from [`TopkBufs`] **after the stream
-    /// has been synced** (the async count D2H is then done).
-    ///
-    /// All buffers stay on device; only the keypoint `count` is read here (from
-    /// the pinned scalar). Consumers use `result.count` (or `result.len()`).
-    pub fn finish_topk(&self, bufs: TopkBufs) -> XFeatResult {
-        let count = (bufs.count_pin.as_slice()[0].max(0) as usize).min(bufs.top_k);
-        XFeatResult {
-            kpts: bufs.kpts_dev,
-            descs: bufs.descs_dev,
-            scores: bufs.scores_dev,
-            count,
-            scale: (1.0, 1.0), // caller (XFeat::run) stamps the real model→src scale
-        }
+        Ok(())
     }
 }
 
@@ -530,7 +513,8 @@ mod gpu_compact_tests {
     fn gpu_topk_selects_correct_keypoints() {
         let ctx = cudarc::driver::CudaContext::new(0).unwrap();
         let stream = ctx.new_stream().unwrap();
-        let mut pp = XFeatPostproc::new(stream.clone(), 2, 0.05).unwrap(); // top_k = 2
+        let pp = XFeatPostproc::new(stream.clone(), 0.05).unwrap();
+        let mut res = XFeatResult::alloc(&stream, 2).unwrap(); // top_k = 2
 
         let (h, w) = (32usize, 32usize);
         let (hd, wd) = (h / 8, w / 8);
@@ -555,12 +539,12 @@ mod gpu_compact_tests {
             desc_dev.device_ptr(stream.as_ref()).0 as *const f32
         };
 
-        let bufs = pp.launch_topk(desc_ptr, &score_dev, h, w).unwrap();
+        pp.launch_topk(desc_ptr, &score_dev, h, w, &mut res)
+            .unwrap();
         stream.synchronize().unwrap();
-        let res = pp.finish_topk(bufs);
 
         // Exactly the top-2 keypoints, in any order: pair (score, x, y) and sort.
-        assert_eq!(res.count, 2);
+        assert_eq!(res.count(), 2);
         let scores = res.scores_to_host(&stream).unwrap();
         let kpts = res.kpts_to_host(&stream).unwrap();
         let mut got: Vec<(i32, u32, u32)> = scores
@@ -580,7 +564,7 @@ mod gpu_compact_tests {
         // Descriptors (count rows of the capacity-K buffer) must be L2-normalized
         // samples of the constant map.
         let descs: Vec<f32> = stream.clone_dtoh(&res.descs).unwrap();
-        for row in descs.chunks_exact(64).take(res.count) {
+        for row in descs.chunks_exact(64).take(res.count()) {
             let norm: f32 = row.iter().map(|v| v * v).sum::<f32>().sqrt();
             assert!(
                 (norm - 1.0).abs() < 1e-4,
