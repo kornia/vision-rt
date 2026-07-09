@@ -22,6 +22,7 @@ one-stream/one-sync model, and the VPI-style submit/sync/read API).
 | `vrt` | `crates/vrt` | Safe core: `Logger→Runtime→Engine→Session`, `ModelSession` inference, `cuda` launch helpers |
 | `vrt-hub` | `crates/vrt-hub` | Model weights (Hugging Face Hub, sha256-pinned) + on-device engine cache |
 | `vrt-xfeat` | `crates/vrt-xfeat` | XFeat keypoints: TRT backbone + GPU NMS / top-K / descriptor sampling / mutual-NN matching |
+| `vrt-rfdetr` | `crates/vrt-rfdetr` | RF-DETR object detector (NMS-free) + on-device GPU decode |
 
 In Rust the crates keep short names: `use vrt::…`, `use vrt_xfeat::…`.
 
@@ -72,12 +73,15 @@ to `XFeat::new` — see `examples/xfeat_match`.
 
 ## Examples
 
-Examples live inside the `vrt-xfeat` crate (`crates/vrt-xfeat/examples/`):
+Each model crate carries its own `examples/`:
 
 ```bash
-# .onnx → engine built once on device, then feature-matched across two images
-cargo run --release -p vrt-xfeat --example xfeat_match -- xfeat_backbone.onnx map.jpg query.jpg out.png
-cargo run --release -p vrt-xfeat --example xfeat_bench -- xfeat_backbone.onnx image.jpg 100
+# xfeat: .onnx → engine built once on device, then feature-matched across two images
+cargo run --release -p vrt-xfeat  --example xfeat_match  -- xfeat_backbone.onnx map.jpg query.jpg out.png
+cargo run --release -p vrt-xfeat  --example xfeat_bench  -- xfeat_backbone.onnx image.jpg 100
+cargo run --release -p vrt-xfeat  --example xfeat_detect -- xfeat_backbone.onnx image.jpg out.png
+# rfdetr: .onnx → engine, then detect
+cargo run --release -p vrt-rfdetr --example rfdetr_detect -- rf-detr-small.onnx image.jpg 0.5
 ```
 
 Set MAXN power mode before benchmarking: `sudo nvpmodel -m 2 && sudo jetson_clocks`.
