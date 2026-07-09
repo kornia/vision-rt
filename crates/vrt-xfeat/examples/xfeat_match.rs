@@ -114,8 +114,8 @@ fn main() -> Result<(), vrt::BoxError> {
     );
 
     // Keypoints live on the GPU — download both sets to host for drawing.
-    let map_kpts = map_res.kpts_to_host(&stream)?;
-    let query_kpts = query_res.kpts_to_host(&stream)?;
+    let map_kpts = map_res.kpts_to_host()?;
+    let query_kpts = query_res.kpts_to_host()?;
     save_match_viz(
         &map_img,
         &query_img,

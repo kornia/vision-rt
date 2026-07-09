@@ -1,5 +1,6 @@
 use crate::{
     error::{last_trt_error, Result, TrtError},
+    logger::{Logger, Severity},
     runtime::Runtime,
 };
 use std::path::Path;
@@ -57,6 +58,13 @@ impl Engine {
         let bytes = std::fs::read(path)
             .map_err(|e| TrtError::Deserialize(format!("could not read file: {e}")))?;
         Self::deserialize(runtime, &bytes)
+    }
+
+    /// Convenience: load a `.engine` with a fresh `Logger`(Warning)→`Runtime` — the
+    /// common case for a self-contained model that doesn't already own a runtime.
+    pub fn load(path: impl AsRef<Path>) -> Result<Arc<Self>> {
+        let runtime = Runtime::new(Logger::new(Severity::Warning)?)?;
+        Self::from_file(runtime, path)
     }
 
     /// Deserialize from raw bytes (e.g. built by `trtexec` or the in-process builder).
