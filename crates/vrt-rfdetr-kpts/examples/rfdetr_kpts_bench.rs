@@ -26,7 +26,8 @@ fn main() -> Result<(), vrt::BoxError> {
         fp16: true,
         workspace_mb: 2048,
     };
-    let engine_path = vrt_hub::EngineCache::default().resolve("rfdetr-kpts", model_path, &profile)?;
+    let engine_path =
+        vrt_hub::EngineCache::default().resolve("rfdetr-kpts", model_path, &profile)?;
     let mut pose = RfDetrKpts::from_engine_file(&engine_path, stream.clone(), conf)?;
 
     let src = read_image_any_rgb8(image_path)?;
