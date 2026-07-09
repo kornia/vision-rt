@@ -32,9 +32,9 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - name: cargo check (stub)
-        run: cargo check -p trt-sys -p vrt -p vrt-hub -p vrt-xfeat -p vrt-rfdetr
+        run: cargo check -p trt-sys -p vrt -p vrt-hub -p vrt-xfeat -p vrt-rfdetr -p vrt-rfdetr-kpts
       - name: cargo clippy (stub)
-        run: cargo clippy --all-targets -p trt-sys -p vrt -p vrt-hub -p vrt-xfeat -p vrt-rfdetr -- -D warnings
+        run: cargo clippy --all-targets -p trt-sys -p vrt -p vrt-hub -p vrt-xfeat -p vrt-rfdetr -p vrt-rfdetr-kpts -- -D warnings
       - name: cargo clippy (builder + hub features)
         run: cargo clippy -p vrt -p vrt-hub -p vrt-xfeat --features vrt-xfeat/builder,vrt-xfeat/hub -- -D warnings
 

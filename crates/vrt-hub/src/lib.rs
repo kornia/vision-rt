@@ -146,6 +146,25 @@ pub static REGISTRY: &[ModelSpec] = &[
             sm: "87",
         }],
     },
+    ModelSpec {
+        // RF-DETR Keypoint (human pose): box + 17 COCO keypoints. Fixed-resolution
+        // export (input [1,3,576,576]) + a prebuilt engine for this Orin config
+        // (trt+sm guarded; other boxes build from the ONNX on-device). Shares the
+        // kornia/rfdetr HF repo with the detector (distinct filenames).
+        name: "rfdetr-kpts",
+        hf_repo: "kornia/rfdetr",
+        revision: "main",
+        files: &[ModelFile {
+            filename: "rfdetr-keypoint-preview-folded.onnx",
+            sha256: "d969cac0266cbbd335bc818ea186d6f91ad7d5730002b40d8287651abc95b406",
+        }],
+        engines: &[EngineArtifact {
+            filename: "rfdetr-keypoint-preview-trt10.3.0.30-sm87-fp16.engine",
+            sha256: "0c4595bf0689ba509a33be9ab7eea02320a57bc2b59ad33f694c181e4bd54cf2",
+            trt_version: "10.3.0.30",
+            sm: "87",
+        }],
+    },
 ];
 
 /// Look up a model spec by name.
