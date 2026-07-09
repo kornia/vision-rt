@@ -1,26 +1,32 @@
-# Updating for a new TensorRT version
+# Updating for a new TensorRT version (Jetson / JetPack)
+
+TensorRT ships as part of **JetPack** on Jetson Orin, so a TRT bump usually means
+a JetPack upgrade. Engines are machine-locked to the exact TRT runtime + GPU arch
+(SM87), so **every `.engine` must be rebuilt on-device** after the bump — see the
+checklist. Off-Jetson, `TRT_STUB=1` lets `cargo check`/`clippy` run against the
+committed bindings without any of this.
 
 ---
 
-## Files to change in `vrt-sys`
+## Files to change in `trt-sys`
 
-### `vrt-sys/src/trt_bridge.cpp`
+### `trt-sys/src/trt_bridge.cpp`
 
 This is the C++ bridge that wraps TRT's abstract C++ API and exposes a flat C surface (`btrt_*` functions). Each function has a comment referencing the exact TRT header and method it wraps.
 
-When TRT renames or changes a method, the C++ compiler reports an error here on `cargo build -p vrt-sys`. Fix the error, then proceed.
+When TRT renames or changes a method, the C++ compiler reports an error here on `cargo build -p trt-sys`. Fix the error, then proceed.
 
-### `vrt-sys/src/logger_shim.cpp`
+### `trt-sys/src/logger_shim.cpp`
 
 The ONLY hand-written C++ that cannot be replaced by code generation: `ShimLogger : public nvinfer1::ILogger`. Only change this file if TRT changes the `ILogger::log()` virtual signature.
 
-### `vrt-sys/include/trt_bridge.h`
+### `trt-sys/include/trt_bridge.h`
 
 The pure-C header that `bindgen` uses to generate `OUT_DIR/bridge_bindings.rs`. Only change this if the C API surface changes (new `btrt_*` function, changed return type, etc.). `bindgen` regenerates `bridge_bindings.rs` automatically on every build — never edit it by hand.
 
-### `vrt-sys/src/lib.rs`
+### `trt-sys/build.rs`
 
-Nothing — `TENSORRT_VERSION` is parsed from `NvInferVersion.h` at build time.
+Nothing required — `TENSORRT_VERSION` is parsed from `NvInferVersion.h` at build time and feeds the engine-cache keys. If the new release is outside the tested 10.3.x range, the build emits a `cargo:warning` (it does not fail); bump the supported major.minor set here once the new version is validated.
 
 ---
 
@@ -40,25 +46,28 @@ TRT 10.x minor releases: the named-tensor I/O API (`setTensorAddress`, `getIOTen
 
 ## Update checklist
 
-1. Install new TRT headers:
+1. Confirm the TRT headers the new JetPack installed (Jetson paths are `aarch64`):
    ```
-   apt install tensorrt   # or download tar and copy headers
-   dpkg -l | grep tensorrt
-   cat /usr/include/aarch64-linux-gnu/NvInferVersion.h | grep NV_TENSORRT
+   dpkg -l | grep -i tensorrt
+   grep NV_TENSORRT /usr/include/aarch64-linux-gnu/NvInferVersion.h
    ```
 
-2. Build `vrt-sys` — the C++ compiler catches API breakage:
+2. Build `trt-sys` — the C++ compiler catches API breakage:
    ```
-   cargo build -p vrt-sys
+   cargo build -p trt-sys
    ```
    Fix any errors in `trt_bridge.cpp` (and rarely `logger_shim.cpp`).
 
-4. Run the unit tests (no GPU required):
+3. Run the CPU unit tests (no GPU required):
    ```
-   cargo test -p vrt-yolo -p vision-rt
+   cargo test -p vrt-hub
    ```
 
-5. Rebuild all `.engine` files — TRT engines are tied to the exact runtime version:
+4. Rebuild all `.engine` files on-device — engines are tied to the exact TRT
+   runtime version + SM87, so stale caches must be dropped:
    ```
+   rm -rf ~/.cache/vision-rt/engines/*
    /usr/src/tensorrt/bin/trtexec --onnx=model.onnx --saveEngine=model.fp16.engine --fp16
    ```
+   (The `vrt-hub` `EngineCache` rebuilds automatically on next run — the new
+   `TENSORRT_VERSION` changes the cache key, so old engines are ignored.)
