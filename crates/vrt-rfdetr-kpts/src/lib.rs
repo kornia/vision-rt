@@ -192,16 +192,19 @@ impl RfDetrKpts {
         }
         let (mh, mw) = (d[2] as usize, d[3] as usize);
 
+        // Positive-dim guards reject dynamic/unknown outputs (-1 → would wrap to a
+        // huge usize); labels is rank-3 with last-dim ≠ 4 so a box-shaped tensor
+        // can't be misbound as labels.
         let (mut dets_name, mut labels_name, mut kpts_name) = (None, None, None);
         let (mut q, mut num_classes, mut slots, mut kp_ch) = (0usize, 0usize, 0usize, 0usize);
         for s in engine.outputs() {
             match s.dims.as_slice() {
-                [1, nq, ns, nc] => {
+                [1, nq, ns, nc] if *nq > 0 && *ns > 0 && *nc > 0 => {
                     kpts_name = Some(s.name.clone());
                     (q, slots, kp_ch) = (*nq as usize, *ns as usize, *nc as usize);
                 }
-                [1, _, 4] => dets_name = Some(s.name.clone()),
-                [1, nq, ncl] => {
+                [1, nq, 4] if *nq > 0 => dets_name = Some(s.name.clone()),
+                [1, nq, ncl] if *nq > 0 && *ncl > 0 && *ncl != 4 => {
                     labels_name = Some(s.name.clone());
                     (q, num_classes) = (*nq as usize, *ncl as usize);
                 }
