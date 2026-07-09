@@ -10,11 +10,16 @@ returned in original-image pixels (COCO class ids 1–90).
 Same **async / caller-owned** API as the rest of the workspace (VPI-style):
 
 ```rust
-let mut det = RfDetr::from_engine_file("rfdetr.engine", stream.clone(), 0.5)?;
+// Weights: auto-pull from Hugging Face (kornia/rfdetr, feature `hub`),
+// build from a local ONNX (feature `hub`/`builder`), or load a prebuilt engine:
+let mut det = RfDetr::from_hub(stream.clone(), 0.5)?;
+// let mut det = RfDetr::from_onnx("rf-detr-small.onnx", stream.clone(), 0.5)?;
+// let mut det = RfDetr::from_engine_file("rfdetr.engine", stream.clone(), 0.5)?;
+
 let mut out = det.alloc_result()?;      // caller-owned, reused
 det.submit(&image, &mut out)?;          // enqueue (resize→backbone→decode), no sync
 stream.synchronize()?;                   // caller owns the one sync
-let dets = out.detections(&stream)?;     // survivors in original pixels
+let dets = out.detections()?;            // survivors in original pixels
 ```
 
 Model: the fixed-resolution official export (`rfdetr-small`, input `[1,3,512,512]`;

@@ -103,30 +103,44 @@ pub struct ModelSpec {
 ///
 /// To add a model: export ONNX (scripts/), upload to the HF repo, add an
 /// entry here with `sha256sum` pins.
-pub static REGISTRY: &[ModelSpec] = &[ModelSpec {
-    // Source: XFeat (Potje et al., CVPR 2024) — https://github.com/verlab/accelerated_features
-    // The .onnx is a backbone-only export of the upstream `xfeat.pt`, produced by
-    // crates/vrt-xfeat/scripts/export_xfeat_backbone.py. Model credit is the authors'.
-    name: "xfeat-backbone",
-    hf_repo: "kornia/xfeat",
-    revision: "main",
-    files: &[
-        ModelFile {
-            filename: "xfeat_backbone.onnx",
-            sha256: "86d7d549b380405f208933efb5202e1584d9762f3a72e06e7ed81ca1436972e0",
-        },
-        ModelFile {
-            filename: "xfeat_backbone.onnx.data",
-            sha256: "d4498528d37bf7c737cce9c135f9b0340d828bab7dc808339e50553ac8c1b7d9",
-        },
-    ],
-    engines: &[EngineArtifact {
-        filename: "xfeat_backbone-trt10.3.0.30-sm87-fp16.engine",
-        sha256: "2190ad0e8daf7356708f91a2c18b89fa481082646c79b25fab91f5af6a912e6d",
-        trt_version: "10.3.0.30",
-        sm: "87",
-    }],
-}];
+pub static REGISTRY: &[ModelSpec] = &[
+    ModelSpec {
+        // Source: XFeat (Potje et al., CVPR 2024) — https://github.com/verlab/accelerated_features
+        // The .onnx is a backbone-only export of the upstream `xfeat.pt`, produced by
+        // crates/vrt-xfeat/scripts/export_xfeat_backbone.py. Model credit is the authors'.
+        name: "xfeat-backbone",
+        hf_repo: "kornia/xfeat",
+        revision: "main",
+        files: &[
+            ModelFile {
+                filename: "xfeat_backbone.onnx",
+                sha256: "86d7d549b380405f208933efb5202e1584d9762f3a72e06e7ed81ca1436972e0",
+            },
+            ModelFile {
+                filename: "xfeat_backbone.onnx.data",
+                sha256: "d4498528d37bf7c737cce9c135f9b0340d828bab7dc808339e50553ac8c1b7d9",
+            },
+        ],
+        engines: &[EngineArtifact {
+            filename: "xfeat_backbone-trt10.3.0.30-sm87-fp16.engine",
+            sha256: "2190ad0e8daf7356708f91a2c18b89fa481082646c79b25fab91f5af6a912e6d",
+            trt_version: "10.3.0.30",
+            sm: "87",
+        }],
+    },
+    ModelSpec {
+        // RF-DETR (NMS-free transformer detector). Fixed-resolution official export
+        // (input [1,3,512,512]); ONNX only — engines are built on-device.
+        name: "rfdetr",
+        hf_repo: "kornia/rfdetr",
+        revision: "main",
+        files: &[ModelFile {
+            filename: "rf-detr-small.onnx",
+            sha256: "0e0817f4cafa479ccba17662a142092932b0b10c98947e7cf60f3badd0f5c219",
+        }],
+        engines: &[],
+    },
+];
 
 /// Look up a model spec by name.
 pub fn spec(name: &str) -> Option<&'static ModelSpec> {

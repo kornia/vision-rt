@@ -227,6 +227,39 @@ impl RfDetr {
         Self::new(engine, stream, conf)
     }
 
+    /// Build (and cache) an engine from an ONNX file, then construct. First call
+    /// builds on-device (cache hit thereafter, keyed by ONNX + TRT version + GPU
+    /// arch). Requires feature `hub` (trtexec build) or `builder` (in-process).
+    #[cfg(any(feature = "hub", feature = "builder"))]
+    pub fn from_onnx(
+        onnx_path: impl AsRef<std::path::Path>,
+        stream: Arc<CudaStream>,
+        conf: f32,
+    ) -> Result<Self, BoxError> {
+        // RF-DETR export is fixed-resolution (static shapes) → no shape profile.
+        let profile = vrt_hub::EngineProfile {
+            input: None,
+            fp16: true,
+            workspace_mb: 2048,
+        };
+        let model_path = onnx_path
+            .as_ref()
+            .to_str()
+            .ok_or("rfdetr: onnx path is not valid UTF-8")?;
+        let engine_path =
+            vrt_hub::EngineCache::default().resolve("rfdetr", model_path, &profile)?;
+        Self::from_engine_file(engine_path, stream, conf)
+    }
+
+    /// Pull the pinned RF-DETR ONNX from Hugging Face (`kornia/rfdetr`), build/
+    /// cache the engine on-device, and construct. Network is needed only on the
+    /// first run; for a private/gated HF repo set `HF_TOKEN`. Requires feature `hub`.
+    #[cfg(feature = "hub")]
+    pub fn from_hub(stream: Arc<CudaStream>, conf: f32) -> Result<Self, BoxError> {
+        let onnx = vrt_hub::ModelHub::get("rfdetr")?;
+        Self::from_onnx(onnx, stream, conf)
+    }
+
     /// Number of query slots (fixed by the engine) — the [`DetectResult`] capacity.
     pub fn num_queries(&self) -> usize {
         self.q
