@@ -241,6 +241,19 @@ impl ModelHub {
     }
 }
 
+/// Resolve a registry model to a usable engine path (feature `hub`): a matching
+/// prebuilt engine if the registry lists one for this box's TRT+SM, otherwise the
+/// pinned ONNX downloaded and built/cached on-device. This is the one call behind
+/// each model crate's `from_hub` constructor.
+#[cfg(feature = "hub")]
+pub fn resolve_engine(name: &str, profile: &EngineProfile) -> Result<String, HubError> {
+    if let Some(engine) = ModelHub::get_engine(name)? {
+        return Ok(engine.to_string_lossy().into_owned());
+    }
+    let onnx = ModelHub::get(name)?;
+    EngineCache::default().resolve(name, &onnx.to_string_lossy(), profile)
+}
+
 /// Verify a file against an expected sha256 hex digest.
 pub fn verify_sha256(path: &Path, expected: &str) -> Result<(), HubError> {
     let actual = sha256_file(path)?;

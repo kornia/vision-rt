@@ -3,6 +3,9 @@
 //! Usage:
 //!   cargo run --release -p vrt-rfdetr --example rfdetr_detect -- \
 //!       <model.onnx|engine>  <image>  [conf]
+//!   # or pull weights from Hugging Face (kornia/rfdetr):
+//!   cargo run --release -p vrt-rfdetr --example rfdetr_detect --features hub -- \
+//!       hub  <image>  [conf]
 
 use kornia_image::Image;
 use kornia_io::functional::read_image_any_rgb8;
@@ -17,16 +20,27 @@ fn main() -> Result<(), vrt::BoxError> {
     let (model_path, image_path) = (&args[1], &args[2]);
     let conf: f32 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(0.5);
 
-    // .onnx → on-device engine cache (static shapes); .engine → used directly.
-    let profile = vrt_hub::EngineProfile {
-        input: None,
-        fp16: true,
-        workspace_mb: 2048,
-    };
-    let engine_path = vrt_hub::EngineCache::default().resolve("rfdetr", model_path, &profile)?;
-
     let stream = vrt::Stream::new_standalone()?.cuda_stream().clone();
-    let mut det = RfDetr::from_engine_file(&engine_path, stream.clone(), conf)?;
+    let mut det = if model_path == "hub" {
+        #[cfg(feature = "hub")]
+        {
+            RfDetr::from_hub(stream.clone(), conf)? // pull ONNX/engine from kornia/rfdetr
+        }
+        #[cfg(not(feature = "hub"))]
+        {
+            return Err("pass an .onnx/.engine path, or rebuild with --features hub".into());
+        }
+    } else {
+        // .onnx → on-device engine cache (static shapes); .engine → used directly.
+        let profile = vrt_hub::EngineProfile {
+            input: None,
+            fp16: true,
+            workspace_mb: 2048,
+        };
+        let engine_path =
+            vrt_hub::EngineCache::default().resolve("rfdetr", model_path, &profile)?;
+        RfDetr::from_engine_file(&engine_path, stream.clone(), conf)?
+    };
 
     let src = read_image_any_rgb8(image_path)?; // Rgb8 (derefs to Image<u8,3>)
     let dev = Image(src.0.to_cuda(&stream)?);

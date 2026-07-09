@@ -221,10 +221,17 @@ impl RfDetr {
         stream: Arc<CudaStream>,
         conf: f32,
     ) -> Result<Self, BoxError> {
-        let logger = vrt::Logger::new(vrt::logger::Severity::Warning)?;
-        let runtime = vrt::Runtime::new(logger)?;
-        let engine = vrt::Engine::from_file(runtime, engine_path.as_ref())?;
-        Self::new(engine, stream, conf)
+        Self::new(Engine::load(engine_path)?, stream, conf)
+    }
+
+    /// The engine build profile — RF-DETR is fixed-resolution (static shapes).
+    #[cfg(any(feature = "hub", feature = "builder"))]
+    fn engine_profile() -> vrt_hub::EngineProfile {
+        vrt_hub::EngineProfile {
+            input: None,
+            fp16: true,
+            workspace_mb: 2048,
+        }
     }
 
     /// Build (and cache) an engine from an ONNX file, then construct. First call
@@ -236,33 +243,26 @@ impl RfDetr {
         stream: Arc<CudaStream>,
         conf: f32,
     ) -> Result<Self, BoxError> {
-        // RF-DETR export is fixed-resolution (static shapes) → no shape profile.
-        let profile = vrt_hub::EngineProfile {
-            input: None,
-            fp16: true,
-            workspace_mb: 2048,
-        };
         let model_path = onnx_path
             .as_ref()
             .to_str()
             .ok_or("rfdetr: onnx path is not valid UTF-8")?;
-        let engine_path =
-            vrt_hub::EngineCache::default().resolve("rfdetr", model_path, &profile)?;
+        let engine_path = vrt_hub::EngineCache::default().resolve(
+            "rfdetr",
+            model_path,
+            &Self::engine_profile(),
+        )?;
         Self::from_engine_file(engine_path, stream, conf)
     }
 
-    /// Pull the pinned RF-DETR ONNX from Hugging Face (`kornia/rfdetr`), build/
-    /// cache the engine on-device, and construct. Network is needed only on the
-    /// first run; for a private/gated HF repo set `HF_TOKEN`. Requires feature `hub`.
+    /// Pull from Hugging Face (`kornia/rfdetr`) and construct: a prebuilt engine
+    /// matching this box's TRT+SM if the registry has one (skips the slow build),
+    /// else the pinned ONNX built on-device. Network only on first run; for a
+    /// private/gated HF repo set `HF_TOKEN`. Requires feature `hub`.
     #[cfg(feature = "hub")]
     pub fn from_hub(stream: Arc<CudaStream>, conf: f32) -> Result<Self, BoxError> {
-        // Prefer a prebuilt engine matching this box's TRT+SM (skips the on-device
-        // build, which is slow for the transformer); otherwise pull the ONNX.
-        if let Some(engine) = vrt_hub::ModelHub::get_engine("rfdetr")? {
-            return Self::from_engine_file(engine, stream, conf);
-        }
-        let onnx = vrt_hub::ModelHub::get("rfdetr")?;
-        Self::from_onnx(onnx, stream, conf)
+        let engine = vrt_hub::resolve_engine("rfdetr", &Self::engine_profile())?;
+        Self::from_engine_file(engine, stream, conf)
     }
 
     /// Number of query slots (fixed by the engine) — the [`DetectResult`] capacity.

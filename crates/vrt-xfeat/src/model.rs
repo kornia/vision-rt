@@ -104,26 +104,14 @@ impl XFeat {
         stream: Arc<CudaStream>,
         params: XFeatParams,
     ) -> Result<Self, BoxError> {
-        let logger = vrt::Logger::new(vrt::logger::Severity::Warning)?;
-        let runtime = vrt::Runtime::new(logger)?;
-        let engine = vrt::Engine::from_file(runtime, engine_path.as_ref())?;
-        Self::new(engine, stream, params)
+        Self::new(Engine::load(engine_path)?, stream, params)
     }
 
-    /// Build (and cache) an engine from an ONNX file, then construct. First call
-    /// builds on-device (~1–5 min); later calls are cache hits keyed by ONNX
-    /// content + TRT version + GPU arch. The build profile matches the XFeat
-    /// backbone (dynamic input `image`, fp16). Requires feature `hub` or
-    /// `builder`; with only `hub` the build runs via the `trtexec` subprocess.
+    /// The engine build profile — XFeat backbone: dynamic H×W input (downsampled
+    /// ×8), fp16. min/opt/max mirror `examples/xfeat_match` (opt = 640×640).
     #[cfg(any(feature = "hub", feature = "builder"))]
-    pub fn from_onnx(
-        onnx_path: impl AsRef<std::path::Path>,
-        stream: Arc<CudaStream>,
-        params: XFeatParams,
-    ) -> Result<Self, BoxError> {
-        let profile = vrt_hub::EngineProfile {
-            // XFeat backbone: dynamic H×W input, downsampled ×8. min/opt/max
-            // mirror examples/xfeat_match; opt = 640×640 (the common query size).
+    fn engine_profile() -> vrt_hub::EngineProfile {
+        vrt_hub::EngineProfile {
             input: Some((
                 "image".into(),
                 vec![1, 3, 240, 320],
@@ -132,30 +120,40 @@ impl XFeat {
             )),
             fp16: true,
             workspace_mb: 2048,
-        };
+        }
+    }
+
+    /// Build (and cache) an engine from an ONNX file, then construct. First call
+    /// builds on-device (~1–5 min); later calls are cache hits keyed by ONNX
+    /// content + TRT version + GPU arch. Requires feature `hub` (trtexec build)
+    /// or `builder` (in-process).
+    #[cfg(any(feature = "hub", feature = "builder"))]
+    pub fn from_onnx(
+        onnx_path: impl AsRef<std::path::Path>,
+        stream: Arc<CudaStream>,
+        params: XFeatParams,
+    ) -> Result<Self, BoxError> {
         let model_path = onnx_path
             .as_ref()
             .to_str()
             .ok_or_else(|| BoxError::from("onnx path is not valid UTF-8"))?;
-        let engine_path =
-            vrt_hub::EngineCache::default().resolve("xfeat-backbone", model_path, &profile)?;
+        let engine_path = vrt_hub::EngineCache::default().resolve(
+            "xfeat-backbone",
+            model_path,
+            &Self::engine_profile(),
+        )?;
         Self::from_engine_file(engine_path, stream, params)
     }
 
     /// Construct from Hugging Face (`kornia/xfeat`). Requires feature `hub`.
     ///
-    /// Prefers a **prebuilt engine** when the registry lists one matching this
-    /// box's TensorRT version + GPU arch (skips the on-device build entirely);
-    /// otherwise pulls the pinned ONNX and builds/caches the engine locally.
-    /// Network is needed only on the first run (artifacts are then cached). For a
-    /// private/gated HF repo set `HF_TOKEN` in the environment.
+    /// Prefers a prebuilt engine matching this box's TRT+SM (skips the on-device
+    /// build), else pulls the pinned ONNX and builds/caches it. Network only on
+    /// the first run. For a private/gated HF repo set `HF_TOKEN`.
     #[cfg(feature = "hub")]
     pub fn from_hub(stream: Arc<CudaStream>, params: XFeatParams) -> Result<Self, BoxError> {
-        if let Some(engine) = vrt_hub::ModelHub::get_engine("xfeat-backbone")? {
-            return Self::from_engine_file(engine, stream, params);
-        }
-        let onnx = vrt_hub::ModelHub::get("xfeat-backbone")?;
-        Self::from_onnx(onnx, stream, params)
+        let engine = vrt_hub::resolve_engine("xfeat-backbone", &Self::engine_profile())?;
+        Self::from_engine_file(engine, stream, params)
     }
 
     /// Submit one frame's async GPU work — resize/normalize → backbone → NMS →
