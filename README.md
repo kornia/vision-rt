@@ -11,6 +11,9 @@ per-model crates (`vrt-xfeat`, more to come) over a shared safe core.
 
 **Target platform:** Jetson Orin (aarch64), JetPack 6.x, TensorRT 10.3.x, CUDA 12.6.
 
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the internals (crate stack, the
+one-stream/one-sync model, and the VPI-style submit/sync/read API).
+
 ## Workspace
 
 | Crate (package) | Path | Role |
