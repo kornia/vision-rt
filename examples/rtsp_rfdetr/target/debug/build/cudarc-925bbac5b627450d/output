@@ -1,0 +1,12 @@
+cargo:rustc-cfg=feature="dynamic-loading"
+cargo:rerun-if-changed=build.rs
+cargo:rerun-if-env-changed=CUDARC_CUDA_VERSION
+cargo:rerun-if-env-changed=CUDA_HOME
+cargo:rerun-if-env-changed=CUDA_PATH
+cargo:rerun-if-env-changed=CUDA_ROOT
+cargo:rerun-if-env-changed=CUDA_TOOLKIT_ROOT_DIR
+cargo:rerun-if-env-changed=CUDNN_LIB
+cargo:warning=Failed to run `nvcc --version`. Following `-F fallback-latest`; using CUDA (13, 3).
+cargo:rustc-cfg=feature="cuda-13030"
+cargo:rustc-env=CUDA_MAJOR_VERSION=13
+cargo:rustc-env=CUDA_MINOR_VERSION=3
