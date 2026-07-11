@@ -53,6 +53,41 @@ space** and the full-frame `Stretch` preprocess makes cross-grid scaling a plain
 `grid/src` ratio. Worked example: `vrt-depth-anything`'s `detect_depth` (RF-DETR-Seg
 + Depth Anything V2 on one stream → per-instance mask-sampled metric depth, one sync).
 
+## Multiple cameras
+
+One physical GPU → CUDA compute is **serial** whatever you do; `Session` is `Send`
+but **`!Sync`** (drive each model from one thread). But **NVDEC decode + VIC resize
+are separate fixed-function blocks**, so N cameras *decode concurrently* — only model
+inference serializes. Three patterns:
+
+- **A — round-robin, one stream, shared models (default on Orin Nano).** One stream +
+  one set of model instances; loop cameras, each with its own reused result buffers;
+  one sync per camera-frame. Memory-light (one copy of each engine), works today, no
+  code changes. Throughput ≈ `1/(N × per-frame GPU ms)` — honest, since you're
+  GPU-bound anyway. Right default for a handful of cameras.
+- **B — stream + thread per camera.** Each camera gets its own thread, stream, and
+  **own** model instances (`!Sync`) → **N× engine memory**; on 7.4 GB that's ~2–3
+  cameras with seg+depth. The single GPU still serializes compute, so little
+  throughput gain — only worth it for independent per-camera latency. Usually avoid.
+- **C — batched engine.** Re-export at `batch=N` (or dynamic batch), stack N frames
+  into one enqueue → best GPU utilization. One engine + N× activations (cheaper than
+  B). Needs batch-aware decode/fusion kernels; not supported by the current
+  fixed-`batch=1` exports.
+
+**Async cameras + batching:** batching **couples camera timing** — you must assemble
+N frames. Different-fps/phase cameras break the natural batch. It's fine that a
+batch's slots have different timestamps (perception is per-frame; no cross-camera
+temporal fusion), but you **must** carry `(camera_id, timestamp)` per slot and
+**demux** the batched output back to per-camera. Never block a batch on the slowest
+camera. Assemble by: **latest-frame on a fixed tick** (loose sync, similar fps,
+accept ≤1-interval staleness), **ragged dynamic batch** (batch only the cameras ready
+this tick, `min=1..max=N`), or **don't batch → pattern A**. Per-camera state is
+unaffected: each camera runs its **own** tracker stepping the Kalman by **its own
+frame `dt`** (that camera's timestamps), not the batch cadence — IDs don't cross
+cameras without explicit multi-camera re-ID. For genlocked/same-fps cameras C is
+clean; for truly async cameras **A usually wins** (batching's launch-overhead payoff
+is small next to the model compute).
+
 ## Hard constraints
 
 - **RAM 7.4 GB (Orin Nano): build with `-j2` / `CARGO_BUILD_JOBS=2`** — parallel
