@@ -1,0 +1,19 @@
+[package]
+name = "vrt-types"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+description = "Shared vision types for vision-rt — Detection, Mask, DepthImage (kornia-image newtypes)"
+readme = "README.md"
+
+[lib]
+name = "vrt_types"
+
+# Deliberately dependency-light (kornia-image/tensor + cudarc only) so this crate
+# stays a leaf the model crates depend on downward — and can later be upstreamed
+# into kornia-rs. No vrt / trt-sys dependency.
+[dependencies]
+kornia-image  = { workspace = true }
+kornia-tensor = { workspace = true }
+cudarc        = { workspace = true }

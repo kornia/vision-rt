@@ -8,6 +8,8 @@ members = [
     "crates/vrt-rfdetr",
     "crates/vrt-rfdetr-kpts",
     "crates/vrt-rfdetr-seg",
+    "crates/vrt-types",
+    "crates/vrt-depth-anything",
 ]
 # The RTSP→RF-DETR example depends on the private `sensor-rtsp` (kornia/sensor-rt)
 # + GStreamer. Excluded from the workspace so hosted CI never clones a private repo
