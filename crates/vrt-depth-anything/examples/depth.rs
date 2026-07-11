@@ -24,7 +24,18 @@ fn main() -> Result<(), vrt::BoxError> {
     let out_path = args.get(3);
 
     let stream = vrt::Stream::new_standalone()?.cuda_stream().clone();
-    let mut depth = DepthAnything::from_engine_file(depth_engine, stream.clone())?;
+    let mut depth = if depth_engine == "hub" {
+        #[cfg(feature = "hub")]
+        {
+            DepthAnything::from_hub(stream.clone())?
+        }
+        #[cfg(not(feature = "hub"))]
+        {
+            return Err("pass an .engine path, or rebuild with --features hub".into());
+        }
+    } else {
+        DepthAnything::from_engine_file(depth_engine, stream.clone())?
+    };
 
     let src = read_image_any_rgb8(image_path)?;
     let dev = Image(src.0.to_cuda(&stream)?);
