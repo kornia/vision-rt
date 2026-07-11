@@ -133,7 +133,9 @@ extern "C" __global__ void seg_masks(
     int p    = blockIdx.x * blockDim.x + threadIdx.x; // mask pixel
     int slot = blockIdx.y * blockDim.y + threadIdx.y; // survivor slot
     if (p >= L || slot >= *count) return;
-    long qi = qidx[slot];
+    // qidx[slot] is the same for all L pixel-threads of this slot; read it through
+    // the read-only cache so the redundant loads coalesce in L1.
+    long qi = __ldg(&qidx[slot]);
     out[(long)slot * L + p] = (masks_logits[qi * L + p] >= 0.0f) ? 1 : 0;
 }
 "#;
@@ -413,18 +415,16 @@ impl RfDetrSeg {
         self.preproc.run(img, &mut self.input)?;
         let tmap = self.model.run(&self.input)?;
 
-        let box_raw = tmap
-            .get(&self.dets_name)
-            .ok_or_else(|| SegError::MissingOutput(self.dets_name.clone()))?
-            .f32_ptr()? as usize as CUdeviceptr;
-        let lab_raw = tmap
-            .get(&self.labels_name)
-            .ok_or_else(|| SegError::MissingOutput(self.labels_name.clone()))?
-            .f32_ptr()? as usize as CUdeviceptr;
-        let msk_raw = tmap
-            .get(&self.masks_name)
-            .ok_or_else(|| SegError::MissingOutput(self.masks_name.clone()))?
-            .f32_ptr()? as usize as CUdeviceptr;
+        let out_ptr = |name: &str| -> Result<CUdeviceptr, SegError> {
+            let p = tmap
+                .get(name)
+                .ok_or_else(|| SegError::MissingOutput(name.to_string()))?
+                .f32_ptr()?;
+            Ok(p as usize as CUdeviceptr)
+        };
+        let box_raw = out_ptr(&self.dets_name)?;
+        let lab_raw = out_ptr(&self.labels_name)?;
+        let msk_raw = out_ptr(&self.masks_name)?;
 
         // Per-frame device count (atomic, zeroed). Survivors land in the caller's
         // buffers; `qidx` maps each survivor slot back to its query for the mask pass.

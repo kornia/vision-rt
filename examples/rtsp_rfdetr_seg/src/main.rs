@@ -81,18 +81,9 @@ fn main() -> Res<()> {
             let (dw, dh) = (w as usize, h as usize);
             let host = frame.image().to_host(&stream)?; // device Rgb8 → host
             let mut buf = host.as_slice().to_vec();
-            let dets = out.detections()?;
-            let masks = out.masks_host()?;
-            let msize = out.mask_size();
-            for (i, (d, m)) in dets.iter().zip(&masks).enumerate() {
-                let inst = Instance {
-                    class_id: d.class_id,
-                    score: d.score,
-                    bbox: d.bbox,
-                    mask: m.clone(),
-                    mask_size: msize,
-                };
-                draw_instance(&mut buf, dw, dh, &inst, PALETTE[i % PALETTE.len()]);
+            let instances = out.instances()?; // boxes + masks to host
+            for (i, inst) in instances.iter().enumerate() {
+                draw_instance(&mut buf, dw, dh, inst, PALETTE[i % PALETTE.len()]);
             }
             let img = Image::<u8, 3>::new(
                 ImageSize {
@@ -102,7 +93,7 @@ fn main() -> Res<()> {
                 buf,
             )?;
             write_image_png_rgb8(&path, &img)?;
-            println!("     saved debug overlay → {path} ({} instances)", dets.len());
+            println!("     saved debug overlay → {path} ({} instances)", instances.len());
         }
 
         n += 1;
