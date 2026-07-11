@@ -2459,6 +2459,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "vrt-track"
+version = "0.1.0"
+dependencies = [
+ "nalgebra",
+ "thiserror",
+]
+
+[[package]]
 name = "vrt-xfeat"
 version = "0.1.0"
 dependencies = [
