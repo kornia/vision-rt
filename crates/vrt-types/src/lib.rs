@@ -11,11 +11,29 @@
 //! - [`Mask`] — a binary instance mask (`Image<u8,1>`, `1` = foreground), host or device.
 //! - [`DepthImage`] — a **metric** depth map in meters (`Image<f32,1>`), host or device.
 
+use std::collections::HashMap;
 use std::ops::{Deref, DerefMut};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 
-use cudarc::driver::CudaStream;
+use cudarc::driver::{CudaSlice, CudaStream, LaunchConfig};
 use kornia_image::{Image, ImageError, ImageSize};
+use kornia_tensor::CudaKernel;
+
+/// Errors from the device-resident sampling builtins ([`DepthImage::sample_masks`]
+/// / [`sample_boxes`](DepthImage::sample_boxes), [`Mask::sample_depth`]).
+///
+/// [`sample_boxes`]: DepthImage::sample_boxes
+#[derive(Debug, thiserror::Error)]
+pub enum TypeError {
+    #[error(transparent)]
+    Image(#[from] ImageError),
+    #[error("kornia CUDA: {0}")]
+    Cuda(#[from] kornia_tensor::CudaError),
+    #[error("CUDA driver: {0}")]
+    Driver(#[from] cudarc::driver::DriverError),
+    #[error("expected a device-resident image (backed by a CudaSlice)")]
+    NotOnDevice,
+}
 
 /// A detected object in original-image coordinate space.
 ///
@@ -62,6 +80,17 @@ macro_rules! typed_image {
             /// Borrow the underlying `Image`.
             pub fn as_image(&self) -> &Image<$ty, $ch> {
                 &self.0
+            }
+
+            #[doc = concat!("Borrow the backing `CudaSlice` if this ", stringify!($name), " is device-resident (else `None`).")]
+            pub fn as_cudaslice(&self) -> Option<&cudarc::driver::CudaSlice<$ty>> {
+                // Deref to the inner `Tensor` (Image → Tensor3), then to its CudaSlice.
+                self.0.as_cudaslice()
+            }
+
+            #[doc = concat!("Mutably borrow the backing `CudaSlice` if this ", stringify!($name), " is device-resident (else `None`).")]
+            pub fn as_cudaslice_mut(&mut self) -> Option<&mut cudarc::driver::CudaSlice<$ty>> {
+                self.0.as_cudaslice_mut()
             }
 
             #[doc = concat!("Allocate a zero-initialised device-resident ", stringify!($name), ".")]
@@ -116,6 +145,217 @@ typed_image!(
     1,
     "A **metric** depth map in meters (per-pixel `z`), host or device."
 );
+
+// ── Device-resident depth-sampling builtins ────────────────────────────────────
+//
+// GPU depth-at-box / depth-at-mask fusion, hosted on the typed images so any crate
+// with a `DepthImage` + a `Mask` (or a detector's packed masks/boxes) can sample
+// per-instance metric depth without pulling in a model crate. The kernels are the
+// depth-fusion pair that used to live in `vrt-depth-anything`.
+
+// One block per box: average the depth over the box's inner-50% central patch
+// (avoids DPT depth bleeding across object edges). Box xyxy is in source pixels;
+// the Stretch preprocess is full-frame, so source→map is a plain linear scale.
+//
+// One block per instance: average the depth over the instance mask's foreground
+// pixels. Mask grid (mmh,mmw) and depth grid (dmh,dmw) both span the full frame,
+// so a mask pixel maps to a depth pixel by a plain scale. `masks` is packed per
+// surviving slot ([count*mmh*mmw], 1 = foreground).
+const SAMPLE_SRC: &str = r#"
+extern "C" __global__ void depth_box(
+    const float* __restrict__ depth, int dmh, int dmw,
+    const float* __restrict__ boxes, int stride, int n,
+    float src_w, float src_h,
+    float* __restrict__ out_z
+) {
+    int b = blockIdx.x;
+    if (b >= n) return;
+    const float* box = boxes + (long)b * stride;
+    float sx = (float)dmw / src_w, sy = (float)dmh / src_h;
+    float x1 = box[0] * sx, y1 = box[1] * sy, x2 = box[2] * sx, y2 = box[3] * sy;
+    float cx = (x1 + x2) * 0.5f, cy = (y1 + y2) * 0.5f;
+    float hw = (x2 - x1) * 0.25f, hh = (y2 - y1) * 0.25f;  // inner 50%
+    int ix0 = max(0, (int)floorf(cx - hw)), ix1 = min(dmw - 1, (int)ceilf(cx + hw));
+    int iy0 = max(0, (int)floorf(cy - hh)), iy1 = min(dmh - 1, (int)ceilf(cy + hh));
+    int W = ix1 - ix0 + 1, H = iy1 - iy0 + 1, N = (W > 0 && H > 0) ? W * H : 0;
+
+    float sum = 0.0f; int cnt = 0;
+    for (int p = threadIdx.x; p < N; p += blockDim.x) {
+        int x = ix0 + p % W, y = iy0 + p / W;
+        float d = depth[(long)y * dmw + x];
+        if (d > 0.0f) { sum += d; ++cnt; }
+    }
+    __shared__ float ssum[256]; __shared__ int scnt[256];
+    int t = threadIdx.x;
+    ssum[t] = sum; scnt[t] = cnt; __syncthreads();
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (t < s) { ssum[t] += ssum[t + s]; scnt[t] += scnt[t + s]; }
+        __syncthreads();
+    }
+    if (t == 0) out_z[b] = scnt[0] > 0 ? ssum[0] / scnt[0] : 0.0f;
+}
+
+extern "C" __global__ void depth_mask(
+    const float* __restrict__ depth, int dmh, int dmw,
+    const unsigned char* __restrict__ masks, int mmh, int mmw,
+    int count,
+    float* __restrict__ out_z
+) {
+    int m = blockIdx.x;
+    if (m >= count) return;
+    const unsigned char* mask = masks + (long)m * mmh * mmw;
+    int L = mmh * mmw;
+    float sx = (float)dmw / mmw, sy = (float)dmh / mmh;
+
+    float sum = 0.0f; int cnt = 0;
+    for (int p = threadIdx.x; p < L; p += blockDim.x) {
+        if (mask[p] != 0) {
+            int mx = p % mmw, my = p / mmw;
+            int dx = min(dmw - 1, (int)(mx * sx)), dy = min(dmh - 1, (int)(my * sy));
+            float d = depth[(long)dy * dmw + dx];
+            if (d > 0.0f) { sum += d; ++cnt; }
+        }
+    }
+    __shared__ float ssum[256]; __shared__ int scnt[256];
+    int t = threadIdx.x;
+    ssum[t] = sum; scnt[t] = cnt; __syncthreads();
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (t < s) { ssum[t] += ssum[t + s]; scnt[t] += scnt[t + s]; }
+        __syncthreads();
+    }
+    if (t == 0) out_z[m] = scnt[0] > 0 ? ssum[0] / scnt[0] : 0.0f;
+}
+"#;
+
+// One block per item, `threads` threads/block — inlined from `vrt::cuda::cfg_per_item`
+// (`vrt` is not a dependency of this leaf crate).
+fn cfg_per_item(n: usize, threads: u32) -> LaunchConfig {
+    LaunchConfig {
+        grid_dim: (n as u32, 1, 1),
+        block_dim: (threads, 1, 1),
+        shared_mem_bytes: 0,
+    }
+}
+
+// Per-context cache of the compiled sampling kernels ([depth_box, depth_mask]). A
+// free function has no `self` to hold the kernel, so cache by context pointer. The
+// nvrtc compile happens once per CUDA context, not per call. `CudaKernel` is
+// `Send + Sync`, so the static is sound.
+static SAMPLE_K: OnceLock<Mutex<HashMap<usize, Arc<Vec<CudaKernel>>>>> = OnceLock::new();
+
+fn sample_kernels(stream: &Arc<CudaStream>) -> Result<Arc<Vec<CudaKernel>>, TypeError> {
+    let ctx = stream.context();
+    let key = Arc::as_ptr(ctx) as usize;
+    let map = SAMPLE_K.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut guard = map.lock().expect("SAMPLE_K mutex poisoned");
+    if let Some(k) = guard.get(&key) {
+        return Ok(k.clone());
+    }
+    let kernels = Arc::new(CudaKernel::compile_many(
+        ctx,
+        SAMPLE_SRC,
+        &["depth_box", "depth_mask"],
+    )?);
+    guard.insert(key, kernels.clone());
+    Ok(kernels)
+}
+
+impl DepthImage {
+    /// Sample per-**instance** metric depth over each instance mask's foreground
+    /// pixels (isolates the object — no background bleed, unlike the box). `masks`
+    /// is a device `[slots*mmh*mmw]` u8 buffer packed per slot (e.g. a detector's
+    /// `masks_slice()`), `mask_wh = (mmw, mmh)`. The slot count is derived from the
+    /// buffer length — every slot is sampled, so the caller does **not** pass (and
+    /// need not have synced) a survivor count; zip the returned `[slots]` z buffer
+    /// against the detector's decoded instances, which truncates to the live count.
+    /// Enqueues on the shared stream; the z buffer (meters) is valid after the
+    /// caller's single `stream.synchronize()`.
+    pub fn sample_masks(
+        &self,
+        masks: &CudaSlice<u8>,
+        mask_wh: (usize, usize),
+        stream: &Arc<CudaStream>,
+    ) -> Result<CudaSlice<f32>, TypeError> {
+        let (mmw, mmh) = mask_wh;
+        let slots = masks.len() / (mmw * mmh).max(1);
+        let z = stream.alloc_zeros::<f32>(slots)?;
+        if slots > 0 {
+            let depth = self.as_cudaslice().ok_or(TypeError::NotOnDevice)?;
+            let (dmh, dmw) = (self.size().height as i32, self.size().width as i32);
+            let (mmhi, mmwi, cnt) = (mmh as i32, mmw as i32, slots as i32);
+            let kernels = sample_kernels(stream)?;
+            kernels[1]
+                .launch_builder(stream)
+                .arg(depth)
+                .arg(&dmh)
+                .arg(&dmw)
+                .arg(masks)
+                .arg(&mmhi)
+                .arg(&mmwi)
+                .arg(&cnt)
+                .arg(&z)
+                .launch_cfg(cfg_per_item(slots, 256))?;
+        }
+        Ok(z)
+    }
+
+    /// Sample per-**box** metric depth (mean of the box's inner-50% central patch).
+    /// `boxes` is a device `[slots*stride]` buffer with `x1,y1,x2,y2` (source pixels)
+    /// in the first 4 lanes — e.g. a detector's `dets_slice()` (`stride=6`); `src_wh`
+    /// is the original-image `(width, height)`. The slot count is derived from the
+    /// buffer length (every slot sampled — no pre-sync survivor count needed; zip the
+    /// returned `[slots]` z buffer against the decoded detections). Enqueues on the
+    /// shared stream; z (meters) is valid after the single sync.
+    pub fn sample_boxes(
+        &self,
+        boxes: &CudaSlice<f32>,
+        stride: usize,
+        src_wh: (f32, f32),
+        stream: &Arc<CudaStream>,
+    ) -> Result<CudaSlice<f32>, TypeError> {
+        let slots = boxes.len() / stride.max(1);
+        let z = stream.alloc_zeros::<f32>(slots)?;
+        if slots > 0 {
+            let depth = self.as_cudaslice().ok_or(TypeError::NotOnDevice)?;
+            let (dmh, dmw) = (self.size().height as i32, self.size().width as i32);
+            let (st, ni) = (stride as i32, slots as i32);
+            let (sw, sh) = src_wh;
+            let kernels = sample_kernels(stream)?;
+            kernels[0]
+                .launch_builder(stream)
+                .arg(depth)
+                .arg(&dmh)
+                .arg(&dmw)
+                .arg(boxes)
+                .arg(&st)
+                .arg(&ni)
+                .arg(&sw)
+                .arg(&sh)
+                .arg(&z)
+                .launch_cfg(cfg_per_item(slots, 256))?;
+        }
+        Ok(z)
+    }
+}
+
+impl Mask {
+    /// Single-mask convenience: mean metric depth over this one mask's foreground.
+    /// Runs the `depth_mask` fusion with `count = 1`, then D2H-copies and syncs the
+    /// single value. Returns the scalar `z` in meters (`0.0` if the mask is empty).
+    /// For many masks at once, prefer [`DepthImage::sample_masks`] (one launch).
+    pub fn sample_depth(
+        &self,
+        depth: &DepthImage,
+        stream: &Arc<CudaStream>,
+    ) -> Result<f32, TypeError> {
+        let this = self.as_cudaslice().ok_or(TypeError::NotOnDevice)?;
+        let mask_wh = (self.size().width, self.size().height);
+        let z = depth.sample_masks(this, mask_wh, stream)?; // single mask → 1 slot
+        let v = stream.clone_dtoh(&z)?;
+        stream.synchronize()?;
+        Ok(v[0])
+    }
+}
 
 #[cfg(test)]
 mod tests {

@@ -17,7 +17,7 @@
 //! ```ignore
 //! det.submit(&img, &mut d)?;                                   // enqueue, no sync
 //! depth.submit(&img, &mut z)?;                                 // same stream, no sync
-//! let zs = depth.sample_masks(&z, d.masks_slice(), d.mask_size(), d.count())?; // enqueue fusion
+//! let zs = z.depth_image().sample_masks(d.masks_slice(), d.mask_size(), &stream)?; // enqueue fusion
 //! stream.synchronize()?;                                        // ONE sync drains all
 //! let zs = stream.clone_dtoh(&zs)?;                             // per-instance metric z
 //! ```
@@ -35,7 +35,7 @@ use cudarc::driver::{CudaSlice, CudaStream, DevicePtr};
 use kornia_image::{Image, ImageSize};
 use kornia_imgproc::preprocess::{Normalize, Preprocessor, PreprocessorBuilder, ResizeMode};
 use kornia_tensor::{zeros_cuda, CudaKernel, Tensor};
-use vrt::cuda::{cfg_1d, cfg_per_item};
+use vrt::cuda::cfg_1d;
 use vrt::{BoxError, Engine, ModelSession};
 use vrt_types::DepthImage;
 
@@ -65,127 +65,64 @@ extern "C" __global__ void depth_copy(const float* __restrict__ src, int n, floa
 }
 "#;
 
-// One block per box: average the depth over the box's inner-50% central patch
-// (avoids DPT depth bleeding across object edges). Box xyxy is in source pixels;
-// the Stretch preprocess is full-frame, so source→map is a plain linear scale.
-const BOX_SRC: &str = r#"
-extern "C" __global__ void depth_box(
-    const float* __restrict__ depth, int dmh, int dmw,
-    const float* __restrict__ boxes, int stride, int n,
-    float src_w, float src_h,
-    float* __restrict__ out_z
-) {
-    int b = blockIdx.x;
-    if (b >= n) return;
-    const float* box = boxes + (long)b * stride;
-    float sx = (float)dmw / src_w, sy = (float)dmh / src_h;
-    float x1 = box[0] * sx, y1 = box[1] * sy, x2 = box[2] * sx, y2 = box[3] * sy;
-    float cx = (x1 + x2) * 0.5f, cy = (y1 + y2) * 0.5f;
-    float hw = (x2 - x1) * 0.25f, hh = (y2 - y1) * 0.25f;  // inner 50%
-    int ix0 = max(0, (int)floorf(cx - hw)), ix1 = min(dmw - 1, (int)ceilf(cx + hw));
-    int iy0 = max(0, (int)floorf(cy - hh)), iy1 = min(dmh - 1, (int)ceilf(cy + hh));
-    int W = ix1 - ix0 + 1, H = iy1 - iy0 + 1, N = (W > 0 && H > 0) ? W * H : 0;
-
-    float sum = 0.0f; int cnt = 0;
-    for (int p = threadIdx.x; p < N; p += blockDim.x) {
-        int x = ix0 + p % W, y = iy0 + p / W;
-        float d = depth[(long)y * dmw + x];
-        if (d > 0.0f) { sum += d; ++cnt; }
-    }
-    __shared__ float ssum[256]; __shared__ int scnt[256];
-    int t = threadIdx.x;
-    ssum[t] = sum; scnt[t] = cnt; __syncthreads();
-    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
-        if (t < s) { ssum[t] += ssum[t + s]; scnt[t] += scnt[t + s]; }
-        __syncthreads();
-    }
-    if (t == 0) out_z[b] = scnt[0] > 0 ? ssum[0] / scnt[0] : 0.0f;
-}
-"#;
-
-// One block per instance: average the depth over the instance mask's foreground
-// pixels. Mask grid (mmh,mmw) and depth grid (dmh,dmw) both span the full frame,
-// so a mask pixel maps to a depth pixel by a plain scale. `masks` is packed per
-// surviving slot ([count*mmh*mmw], 1 = foreground).
-const MASK_SRC: &str = r#"
-extern "C" __global__ void depth_mask(
-    const float* __restrict__ depth, int dmh, int dmw,
-    const unsigned char* __restrict__ masks, int mmh, int mmw,
-    int count,
-    float* __restrict__ out_z
-) {
-    int m = blockIdx.x;
-    if (m >= count) return;
-    const unsigned char* mask = masks + (long)m * mmh * mmw;
-    int L = mmh * mmw;
-    float sx = (float)dmw / mmw, sy = (float)dmh / mmh;
-
-    float sum = 0.0f; int cnt = 0;
-    for (int p = threadIdx.x; p < L; p += blockDim.x) {
-        if (mask[p] != 0) {
-            int mx = p % mmw, my = p / mmw;
-            int dx = min(dmw - 1, (int)(mx * sx)), dy = min(dmh - 1, (int)(my * sy));
-            float d = depth[(long)dy * dmw + dx];
-            if (d > 0.0f) { sum += d; ++cnt; }
-        }
-    }
-    __shared__ float ssum[256]; __shared__ int scnt[256];
-    int t = threadIdx.x;
-    ssum[t] = sum; scnt[t] = cnt; __syncthreads();
-    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
-        if (t < s) { ssum[t] += ssum[t + s]; scnt[t] += scnt[t + s]; }
-        __syncthreads();
-    }
-    if (t == 0) out_z[m] = scnt[0] > 0 ? ssum[0] / scnt[0] : 0.0f;
-}
-"#;
-
 /// Caller-owned depth output (VPI-style): a GPU-resident metric depth map, filled
 /// async by [`DepthAnything::submit`]. Copy to host on request ([`depth_host`]) or
 /// hand the device slice to the fusion kernels / downstream GPU work.
 ///
 /// [`depth_host`]: DepthResult::depth_host
 pub struct DepthResult {
-    depth: CudaSlice<f32>, // [mh*mw] metric meters, row-major
+    depth: DepthImage, // device-resident [mh*mw] metric meters, row-major
     stream: Arc<CudaStream>,
-    mh: usize,
-    mw: usize,
     src: (f32, f32), // original-image (w, h), stamped by submit
 }
 
 impl DepthResult {
     fn alloc(stream: &Arc<CudaStream>, mh: usize, mw: usize) -> Result<Self, DepthError> {
         Ok(Self {
-            depth: unsafe { stream.alloc::<f32>(mh * mw)? },
+            depth: DepthImage::zeros_cuda(
+                ImageSize {
+                    width: mw,
+                    height: mh,
+                },
+                stream,
+            )?,
             stream: stream.clone(),
-            mh,
-            mw,
             src: (0.0, 0.0),
         })
     }
 
     /// Depth-map grid `(width, height)`.
     pub fn map_size(&self) -> (usize, usize) {
-        (self.mw, self.mh)
+        let s = self.depth.size();
+        (s.width, s.height)
     }
 
-    /// GPU-resident depth map `[mh*mw]` (metric meters) — for the fusion kernels /
-    /// downstream on-device work. Valid after the stream sync.
-    pub fn depth_slice(&self) -> &CudaSlice<f32> {
+    /// Original-image `(width, height)` stamped by the last [`DepthAnything::submit`]
+    /// — pass as `src_wh` to [`DepthImage::sample_boxes`], whose box coords are in
+    /// source pixels.
+    pub fn src_wh(&self) -> (f32, f32) {
+        self.src
+    }
+
+    /// GPU-resident dense metric depth map — pass to the [`DepthImage`] sampling
+    /// builtins (`sample_masks` / `sample_boxes`) or other downstream GPU work.
+    /// Valid after the stream sync that follows [`DepthAnything::submit`].
+    pub fn depth_image(&self) -> &DepthImage {
         &self.depth
+    }
+
+    /// GPU-resident depth map `[mh*mw]` (metric meters) as a raw device slice.
+    /// Valid after the stream sync.
+    pub fn depth_slice(&self) -> &CudaSlice<f32> {
+        self.depth
+            .as_cudaslice()
+            .expect("DepthResult depth map is device-resident")
     }
 
     /// Download the dense metric depth map to a host [`DepthImage`] (meters). Call
     /// after the stream sync that follows [`DepthAnything::submit`].
     pub fn depth_host(&self) -> Result<DepthImage, DepthError> {
-        let v = self.stream.clone_dtoh(&self.depth)?;
-        Ok(DepthImage::from_size_vec(
-            ImageSize {
-                width: self.mw,
-                height: self.mh,
-            },
-            v,
-        )?)
+        Ok(self.depth.to_host(&self.stream)?)
     }
 }
 
@@ -201,8 +138,6 @@ pub struct DepthAnything {
     mw: usize,
     out_name: String,
     copy_k: CudaKernel,
-    box_k: CudaKernel,
-    mask_k: CudaKernel,
 }
 
 impl DepthAnything {
@@ -240,8 +175,6 @@ impl DepthAnything {
             .build_cuda(stream.clone())?;
         let input = zeros_cuda::<f32, 4>([1, 3, ih, iw], &stream)?;
         let copy_k = CudaKernel::compile(stream.context(), COPY_SRC, "depth_copy")?;
-        let box_k = CudaKernel::compile(stream.context(), BOX_SRC, "depth_box")?;
-        let mask_k = CudaKernel::compile(stream.context(), MASK_SRC, "depth_mask")?;
         let model = ModelSession::new(engine, stream.clone())?;
 
         Ok(Self {
@@ -253,8 +186,6 @@ impl DepthAnything {
             mw,
             out_name,
             copy_k,
-            box_k,
-            mask_k,
         })
     }
 
@@ -324,7 +255,7 @@ impl DepthAnything {
             .get(&self.out_name)
             .ok_or_else(|| DepthError::MissingOutput(self.out_name.clone()))?
             .f32_ptr()? as usize as CUdeviceptr;
-        let dst_raw = out.depth.device_ptr(self.stream.as_ref()).0;
+        let dst_raw = out.depth_slice().device_ptr(self.stream.as_ref()).0;
         let n = (self.mh * self.mw) as i32;
         self.copy_k
             .launch_builder(&self.stream)
@@ -334,76 +265,5 @@ impl DepthAnything {
             .launch_cfg(cfg_1d(self.mh * self.mw, 256))?;
         out.src = (img.width() as f32, img.height() as f32);
         Ok(())
-    }
-
-    /// Sample per-**box** metric depth (mean of the box's inner-50% central patch).
-    /// `boxes` is a GPU `[n*stride]` buffer with `x1,y1,x2,y2` (source pixels) in the
-    /// first 4 lanes — e.g. a detector's `dets_slice()` (`stride=6`). Enqueues the
-    /// kernel on the shared stream; returns a GPU `[n]` z buffer (meters), valid
-    /// after the single sync — read it with `stream.clone_dtoh`.
-    pub fn sample_boxes(
-        &self,
-        out: &DepthResult,
-        boxes: &CudaSlice<f32>,
-        stride: usize,
-        n: usize,
-    ) -> Result<CudaSlice<f32>, DepthError> {
-        let z: CudaSlice<f32> = self.stream.alloc_zeros::<f32>(n)?;
-        if n > 0 {
-            let depth_raw = out.depth.device_ptr(self.stream.as_ref()).0;
-            let boxes_raw = boxes.device_ptr(self.stream.as_ref()).0;
-            let z_raw = z.device_ptr(self.stream.as_ref()).0;
-            let (dmh, dmw) = (out.mh as i32, out.mw as i32);
-            let (st, ni) = (stride as i32, n as i32);
-            let (sw, sh) = out.src;
-            self.box_k
-                .launch_builder(&self.stream)
-                .arg(&depth_raw)
-                .arg(&dmh)
-                .arg(&dmw)
-                .arg(&boxes_raw)
-                .arg(&st)
-                .arg(&ni)
-                .arg(&sw)
-                .arg(&sh)
-                .arg(&z_raw)
-                .launch_cfg(cfg_per_item(n, 256))?;
-        }
-        Ok(z)
-    }
-
-    /// Sample per-**instance** metric depth over each instance mask's foreground
-    /// pixels (isolates the object — no background bleed). `masks` is a GPU
-    /// `[q*mmh*mmw]` u8 buffer packed per slot (a detector's `masks_slice()`),
-    /// `mask_wh = (mmw, mmh)`, `count` valid instances. Enqueues on the shared
-    /// stream; returns a GPU `[count]` z buffer (meters), valid after the single sync.
-    pub fn sample_masks(
-        &self,
-        out: &DepthResult,
-        masks: &CudaSlice<u8>,
-        mask_wh: (usize, usize),
-        count: usize,
-    ) -> Result<CudaSlice<f32>, DepthError> {
-        let z: CudaSlice<f32> = self.stream.alloc_zeros::<f32>(count)?;
-        if count > 0 {
-            let (mmw, mmh) = mask_wh;
-            let depth_raw = out.depth.device_ptr(self.stream.as_ref()).0;
-            let masks_raw = masks.device_ptr(self.stream.as_ref()).0;
-            let z_raw = z.device_ptr(self.stream.as_ref()).0;
-            let (dmh, dmw) = (out.mh as i32, out.mw as i32);
-            let (mmhi, mmwi, cnt) = (mmh as i32, mmw as i32, count as i32);
-            self.mask_k
-                .launch_builder(&self.stream)
-                .arg(&depth_raw)
-                .arg(&dmh)
-                .arg(&dmw)
-                .arg(&masks_raw)
-                .arg(&mmhi)
-                .arg(&mmwi)
-                .arg(&cnt)
-                .arg(&z_raw)
-                .launch_cfg(cfg_per_item(count, 256))?;
-        }
-        Ok(z)
     }
 }

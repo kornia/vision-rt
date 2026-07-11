@@ -2482,6 +2482,7 @@ dependencies = [
  "cudarc",
  "kornia-image",
  "kornia-tensor",
+ "thiserror",
 ]
 
 [[package]]

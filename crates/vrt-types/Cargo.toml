@@ -17,3 +17,4 @@ name = "vrt_types"
 kornia-image  = { workspace = true }
 kornia-tensor = { workspace = true }
 cudarc        = { workspace = true }
+thiserror     = "2.0"
