@@ -8,6 +8,11 @@ members = [
     "crates/vrt-rfdetr",
     "crates/vrt-rfdetr-kpts",
 ]
+# The RTSP→RF-DETR example depends on the private `sensor-rtsp` (kornia/sensor-rt)
+# + GStreamer. Excluded from the workspace so hosted CI never clones a private repo
+# to resolve, and GStreamer stays out of the pure-algorithm crates. Build it
+# directly: `cargo run --manifest-path examples/rtsp_rfdetr/Cargo.toml`.
+exclude = ["examples/rtsp_rfdetr"]
 
 [workspace.dependencies]
 # One cudarc across the workspace, matching kornia-rs's cudarc feature set so cargo

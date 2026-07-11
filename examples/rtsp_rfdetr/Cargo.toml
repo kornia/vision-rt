@@ -1,0 +1,28 @@
+# Standalone example: RTSP → RF-DETR, device end-to-end. Kept OUT of the vision-rt
+# workspace (see root `[workspace] exclude`) because it depends on the private
+# `sensor-rtsp` (kornia/sensor-rt) + GStreamer — pulling it into the workspace
+# would force the hosted CI to clone a private repo just to resolve the graph, and
+# drag GStreamer into the pure-algorithm crates. Build it directly on-device.
+[package]
+name = "rtsp_rfdetr"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "rtsp_rfdetr"
+path = "src/main.rs"
+
+[dependencies]
+vrt-rfdetr = { path = "../../crates/vrt-rfdetr", features = ["hub"] }
+# Private git dep (kornia/sensor-rt) — needs CARGO_NET_GIT_FETCH_WITH_CLI=true.
+sensor-rtsp = { git = "https://github.com/kornia/sensor-rt", rev = "d3b369c95b259c9b14e9b4f69581c2d609dbb2cc" }
+cudarc = { version = "0.19", default-features = false, features = [
+  "cuda-version-from-build-system",
+  "driver",
+  "nvrtc",
+  "std",
+  "fallback-dynamic-loading",
+  "fallback-latest",
+] }
+env_logger = "0.11"
