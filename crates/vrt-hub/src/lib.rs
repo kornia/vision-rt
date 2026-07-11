@@ -165,6 +165,25 @@ pub static REGISTRY: &[ModelSpec] = &[
             sm: "87",
         }],
     },
+    ModelSpec {
+        // RF-DETR Segmentation (instance masks): box + class + per-instance mask.
+        // Fixed-resolution export (input [1,3,432,432]) + a prebuilt engine for this
+        // Orin config (trt+sm guarded; other boxes build from the ONNX on-device).
+        // Shares the kornia/rfdetr HF repo with the detector (distinct filenames).
+        name: "rfdetr-seg",
+        hf_repo: "kornia/rfdetr",
+        revision: "main",
+        files: &[ModelFile {
+            filename: "rfdetr-seg-preview.onnx",
+            sha256: "82c5c032cf5e7c97d00dff59b72f67cc8f8f0a481b350193bba29cb7fe51c111",
+        }],
+        engines: &[EngineArtifact {
+            filename: "rfdetr-seg-preview-trt10.3.0.30-sm87-fp16.engine",
+            sha256: "57582be75a56411ffe1900165d2dc7860e8709498bbd5b669cda4f88a673d753",
+            trt_version: "10.3.0.30",
+            sm: "87",
+        }],
+    },
 ];
 
 /// Look up a model spec by name.
