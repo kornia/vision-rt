@@ -34,6 +34,25 @@ convenience constructors (`from_hub`/`from_onnx`/`from_engine_file`) over the
 `vrt-hub` weight-fetch + engine-cache. No `Pipeline`/`Operator` framework —
 composition is just calling methods in a loop.
 
+## Composing multiple models (one image, one stream)
+
+The single-model idiom extends to running **N models on the same frame** with no
+framework. Build every model on **one shared `Arc<CudaStream>`**; pass the **same**
+device `Image<u8,3>` **by reference** to each `submit` (each preprocessor only reads
+it and writes its own reused `input` tensor — no aliasing, no divergence); enqueue
+any **fusion kernel last**; then **one** `stream.synchronize()` drains everything.
+
+The stream is an ordered FIFO, so enqueue order *is* the dependency edge: a fusion
+kernel enqueued after two models' `submit`s is guaranteed to see both models'
+finished outputs — no CUDA events, no second stream (single serial stream by design;
+event tracking is deliberately disabled). Caller responsibilities: `submit` all
+models from the **same** frame before advancing the source, and keep each frame /
+`input` / result buffer alive until the sync (the GPU reads their device pointers
+during it). Coordinates line up because every model decodes back to **source pixel
+space** and the full-frame `Stretch` preprocess makes cross-grid scaling a plain
+`grid/src` ratio. Worked example: `vrt-depth-anything`'s `detect_depth` (RF-DETR-Seg
++ Depth Anything V2 on one stream → per-instance mask-sampled metric depth, one sync).
+
 ## Hard constraints
 
 - **RAM 7.4 GB (Orin Nano): build with `-j2` / `CARGO_BUILD_JOBS=2`** — parallel
