@@ -1,0 +1,30 @@
+# Standalone example: RTSP → RF-DETR-Seg, device end-to-end. Kept OUT of the
+# vision-rt workspace (see root `[workspace] exclude`) because it depends on the
+# private `sensor-rtsp` (kornia/sensor-rt) + GStreamer. Build it directly on-device.
+[package]
+name = "rtsp_rfdetr_seg"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "rtsp_rfdetr_seg"
+path = "src/main.rs"
+
+[dependencies]
+vrt-rfdetr-seg = { path = "../../crates/vrt-rfdetr-seg" }
+# Private git dep (kornia/sensor-rt) — needs CARGO_NET_GIT_FETCH_WITH_CLI=true.
+sensor-rtsp = { git = "https://github.com/kornia/sensor-rt", rev = "d3b369c95b259c9b14e9b4f69581c2d609dbb2cc" }
+# For the optional debug-overlay dump (device frame → host + PNG). Pinned to the
+# same kornia rev as the workspace so cudarc unifies to one build.
+kornia-image = { git = "https://github.com/kornia/kornia-rs", tag = "v0.1.15-rc.4", features = ["cudarc"] }
+kornia-io = { git = "https://github.com/kornia/kornia-rs", tag = "v0.1.15-rc.4" }
+cudarc = { version = "0.19", default-features = false, features = [
+  "cuda-version-from-build-system",
+  "driver",
+  "nvrtc",
+  "std",
+  "fallback-dynamic-loading",
+  "fallback-latest",
+] }
+env_logger = "0.11"
