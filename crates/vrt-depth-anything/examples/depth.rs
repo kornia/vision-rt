@@ -7,10 +7,12 @@
 //!       <depth.engine> <image> [out.png]
 
 use kornia_image::Image;
-use kornia_imgproc::color::{apply_colormap, ColormapType};
 use kornia_io::functional::read_image_any_rgb8;
 use kornia_io::png::write_image_png_rgb8;
 use vrt_depth_anything::DepthAnything;
+
+#[path = "common/mod.rs"]
+mod common;
 
 fn main() -> Result<(), vrt::BoxError> {
     let args: Vec<String> = std::env::args().collect();
@@ -36,11 +38,10 @@ fn main() -> Result<(), vrt::BoxError> {
 
     let (mw, mh) = depth.map_size();
     let vals = dmap.as_slice();
-    let (mut min, mut max) = (f32::INFINITY, f32::NEG_INFINITY);
+    let mut min = f32::INFINITY;
     for &v in vals {
         if v.is_finite() {
             min = min.min(v);
-            max = max.max(v);
         }
     }
     let mut sorted: Vec<f32> = vals.iter().copied().filter(|v| v.is_finite()).collect();
@@ -53,19 +54,9 @@ fn main() -> Result<(), vrt::BoxError> {
         src.0.height(),
     );
 
-    // Optional: Turbo-colorized depth PNG. Normalize meters over [min,max] → u8
-    // gray (host path — vision-rt has cudarc, not gpu-cuda, so keep it on host),
-    // then apply the Turbo colormap.
+    // Optional: Turbo-colorized depth PNG.
     if let Some(out_path) = out_path {
-        let span = (max - min).max(1e-6);
-        let gray_buf: Vec<u8> = vals
-            .iter()
-            .map(|&v| (((v - min) / span).clamp(0.0, 1.0) * 255.0) as u8)
-            .collect();
-        let gray = Image::<u8, 1>::new(dmap.size(), gray_buf)?;
-        let mut rgb = Image::<u8, 3>::from_size_val(dmap.size(), 0)?;
-        apply_colormap(&gray, &mut rgb, ColormapType::Turbo)?;
-        write_image_png_rgb8(out_path, &rgb)?;
+        write_image_png_rgb8(out_path, &common::depth_to_turbo(&dmap)?)?;
         println!("saved {out_path}");
     }
     Ok(())

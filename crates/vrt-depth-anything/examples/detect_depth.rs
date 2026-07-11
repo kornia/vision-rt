@@ -15,11 +15,13 @@
 use std::time::Instant;
 
 use kornia_image::{Image, ImageSize};
-use kornia_imgproc::color::{apply_colormap, ColormapType};
 use kornia_io::functional::read_image_any_rgb8;
 use kornia_io::png::write_image_png_rgb8;
 use vrt_depth_anything::DepthAnything;
 use vrt_rfdetr_seg::{Instance, RfDetrSeg};
+
+#[path = "common/mod.rs"]
+mod common;
 
 fn main() -> Result<(), vrt::BoxError> {
     // Split flags from positionals: [--bench [N]] may appear anywhere.
@@ -116,25 +118,8 @@ fn main() -> Result<(), vrt::BoxError> {
         write_image_png_rgb8(out_path, &img)?;
         println!("saved {out_path}");
 
-        // Colorized depth map alongside (host colormap — vision-rt has cudarc,
-        // not gpu-cuda, so keep it on host).
-        let dmap = z.depth_host()?;
-        let vals = dmap.as_slice();
-        let (mut lo, mut hi) = (f32::INFINITY, f32::NEG_INFINITY);
-        for &v in vals {
-            if v.is_finite() {
-                lo = lo.min(v);
-                hi = hi.max(v);
-            }
-        }
-        let span = (hi - lo).max(1e-6);
-        let gray_buf: Vec<u8> = vals
-            .iter()
-            .map(|&v| (((v - lo) / span).clamp(0.0, 1.0) * 255.0) as u8)
-            .collect();
-        let gray = Image::<u8, 1>::new(dmap.size(), gray_buf)?;
-        let mut rgb = Image::<u8, 3>::from_size_val(dmap.size(), 0)?;
-        apply_colormap(&gray, &mut rgb, ColormapType::Turbo)?;
+        // Colorized depth map alongside.
+        let rgb = common::depth_to_turbo(&z.depth_host()?)?;
         let depth_out = depth_png_path(out_path);
         write_image_png_rgb8(&depth_out, &rgb)?;
         println!("saved {depth_out}");
@@ -161,6 +146,7 @@ fn run_bench(
     stream: &std::sync::Arc<cudarc::driver::CudaStream>,
     n: usize,
 ) -> Result<(), vrt::BoxError> {
+    let n = n.max(1); // at least one timed iter (avoids a 0-division in the fps line)
     let warmup = 20.min(n / 2);
     let ms = |dur: std::time::Duration| dur.as_secs_f64() * 1e3;
     let (mut a_enq, mut a_fus, mut a_sync, mut a_read, mut a_e2e) = (0.0, 0.0, 0.0, 0.0, 0.0);

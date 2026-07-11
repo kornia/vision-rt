@@ -11,7 +11,6 @@
 //! - [`Mask`] — a binary instance mask (`Image<u8,1>`, `1` = foreground), host or device.
 //! - [`DepthImage`] — a **metric** depth map in meters (`Image<f32,1>`), host or device.
 
-use std::collections::HashMap;
 use std::ops::{Deref, DerefMut};
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -237,26 +236,33 @@ fn cfg_per_item(n: usize, threads: u32) -> LaunchConfig {
     }
 }
 
-// Per-context cache of the compiled sampling kernels ([depth_box, depth_mask]). A
-// free function has no `self` to hold the kernel, so cache by context pointer. The
-// nvrtc compile happens once per CUDA context, not per call. `CudaKernel` is
-// `Send + Sync`, so the static is sound.
-static SAMPLE_K: OnceLock<Mutex<HashMap<usize, Arc<Vec<CudaKernel>>>>> = OnceLock::new();
+/// The two compiled sampling kernels, JIT-compiled once (lazily) and shared.
+struct SampleKernels {
+    depth_box: CudaKernel,
+    depth_mask: CudaKernel,
+}
 
-fn sample_kernels(stream: &Arc<CudaStream>) -> Result<Arc<Vec<CudaKernel>>, TypeError> {
-    let ctx = stream.context();
-    let key = Arc::as_ptr(ctx) as usize;
-    let map = SAMPLE_K.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut guard = map.lock().expect("SAMPLE_K mutex poisoned");
-    if let Some(k) = guard.get(&key) {
+// A free builtin has no `self` to hold the compiled kernel, so cache it in a
+// process-global. vision-rt uses a single CUDA context for the process lifetime, so
+// one cache suffices — no per-context map. The nvrtc compile runs once (first call);
+// `CudaKernel` is `Send + Sync`, so the static is sound.
+static SAMPLE_K: OnceLock<Mutex<Option<Arc<SampleKernels>>>> = OnceLock::new();
+
+fn sample_kernels(stream: &Arc<CudaStream>) -> Result<Arc<SampleKernels>, TypeError> {
+    let cell = SAMPLE_K.get_or_init(|| Mutex::new(None));
+    // Recover from a poisoned lock: a panic mid-compile shouldn't wedge the cache.
+    let mut guard = cell.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(k) = guard.as_ref() {
         return Ok(k.clone());
     }
-    let kernels = Arc::new(CudaKernel::compile_many(
-        ctx,
-        SAMPLE_SRC,
-        &["depth_box", "depth_mask"],
-    )?);
-    guard.insert(key, kernels.clone());
+    let mut it =
+        CudaKernel::compile_many(stream.context(), SAMPLE_SRC, &["depth_box", "depth_mask"])?
+            .into_iter();
+    let kernels = Arc::new(SampleKernels {
+        depth_box: it.next().expect("compile_many returns one kernel per name"),
+        depth_mask: it.next().expect("compile_many returns one kernel per name"),
+    });
+    *guard = Some(kernels.clone());
     Ok(kernels)
 }
 
@@ -268,7 +274,10 @@ impl DepthImage {
     /// buffer length — every slot is sampled, so the caller does **not** pass (and
     /// need not have synced) a survivor count; zip the returned `[slots]` z buffer
     /// against the detector's decoded instances, which truncates to the live count.
-    /// Enqueues on the shared stream; the z buffer (meters) is valid after the
+    /// **The trailing `slots - live_count` entries are computed from stale mask slots
+    /// and are meaningless — only ever consume `z[i]` for `i < live_count`** (zipping
+    /// against `instances()` / `detections()` does this for you). Enqueues on the
+    /// shared stream; the z buffer (meters) is valid after the
     /// caller's single `stream.synchronize()`.
     pub fn sample_masks(
         &self,
@@ -284,7 +293,8 @@ impl DepthImage {
             let (dmh, dmw) = (self.size().height as i32, self.size().width as i32);
             let (mmhi, mmwi, cnt) = (mmh as i32, mmw as i32, slots as i32);
             let kernels = sample_kernels(stream)?;
-            kernels[1]
+            kernels
+                .depth_mask
                 .launch_builder(stream)
                 .arg(depth)
                 .arg(&dmh)
@@ -315,13 +325,16 @@ impl DepthImage {
     ) -> Result<CudaSlice<f32>, TypeError> {
         let slots = boxes.len() / stride.max(1);
         let z = stream.alloc_zeros::<f32>(slots)?;
-        if slots > 0 {
+        let (sw, sh) = src_wh;
+        // src_w/h scale source-pixel boxes into map space; a non-positive src would
+        // make the scale inf → NaN box coords. Guard (returns all-zero z).
+        if slots > 0 && sw > 0.0 && sh > 0.0 {
             let depth = self.as_cudaslice().ok_or(TypeError::NotOnDevice)?;
             let (dmh, dmw) = (self.size().height as i32, self.size().width as i32);
             let (st, ni) = (stride as i32, slots as i32);
-            let (sw, sh) = src_wh;
             let kernels = sample_kernels(stream)?;
-            kernels[0]
+            kernels
+                .depth_box
                 .launch_builder(stream)
                 .arg(depth)
                 .arg(&dmh)
