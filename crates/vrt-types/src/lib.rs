@@ -166,11 +166,15 @@ const SAMPLE_SRC: &str = r#"
 extern "C" __global__ void depth_box(
     const float* __restrict__ depth, int dmh, int dmw,
     const float* __restrict__ boxes, int stride, int n,
+    const int* __restrict__ live,
     float src_w, float src_h,
     float* __restrict__ out_z
 ) {
     int b = blockIdx.x;
     if (b >= n) return;
+    // On-device survivor gate: slots >= the live count are stale (never written by
+    // the detector this frame) — leave their pre-zeroed out_z at 0, don't sample.
+    if (b >= *live) return;
     const float* box = boxes + (long)b * stride;
     float sx = (float)dmw / src_w, sy = (float)dmh / src_h;
     float x1 = box[0] * sx, y1 = box[1] * sy, x2 = box[2] * sx, y2 = box[3] * sy;
@@ -200,10 +204,14 @@ extern "C" __global__ void depth_mask(
     const float* __restrict__ depth, int dmh, int dmw,
     const unsigned char* __restrict__ masks, int mmh, int mmw,
     int count,
+    const int* __restrict__ live,
     float* __restrict__ out_z
 ) {
     int m = blockIdx.x;
     if (m >= count) return;
+    // On-device survivor gate: slots >= the live count are stale (never written by
+    // the detector this frame) — leave their pre-zeroed out_z at 0, don't sample.
+    if (m >= *live) return;
     const unsigned char* mask = masks + (long)m * mmh * mmw;
     int L = mmh * mmw;
     float sx = (float)dmw / mmw, sy = (float)dmh / mmh;
@@ -272,19 +280,20 @@ impl DepthImage {
     /// Sample per-**instance** metric depth over each instance mask's foreground
     /// pixels (isolates the object — no background bleed, unlike the box). `masks`
     /// is a device `[slots*mmh*mmw]` u8 buffer packed per slot (e.g. a detector's
-    /// `masks_slice()`), `mask_wh = (mmw, mmh)`. The slot count is derived from the
-    /// buffer length — every slot is sampled, so the caller does **not** pass (and
-    /// need not have synced) a survivor count; zip the returned `[slots]` z buffer
-    /// against the detector's decoded instances, which truncates to the live count.
-    /// **The trailing `slots - live_count` entries are computed from stale mask slots
-    /// and are meaningless — only ever consume `z[i]` for `i < live_count`** (zipping
-    /// against `instances()` / `detections()` does this for you). Enqueues on the
-    /// shared stream; the z buffer (meters) is valid after the
-    /// caller's single `stream.synchronize()`.
+    /// `masks_slice()`), `mask_wh = (mmw, mmh)`. `live` is the detector's **on-device**
+    /// survivor count (a `[1]` i32 device slice, e.g. `SegResult::count_slice()`): the
+    /// kernel reads it **on the GPU** so no host sync is needed, and every slot `>=`
+    /// the live count is left at `0` instead of sampling its stale (previous-frame)
+    /// mask contents. So the returned `[slots]` z buffer is safe to read in full — the
+    /// trailing entries are deterministically `0`, not garbage — though zipping against
+    /// `instances()` / `detections()` is still the natural consume. Enqueues on the
+    /// shared stream; z (meters) is valid after the caller's single
+    /// `stream.synchronize()`.
     pub fn sample_masks(
         &self,
         masks: &CudaSlice<u8>,
         mask_wh: (usize, usize),
+        live: &CudaSlice<i32>,
         stream: &Arc<CudaStream>,
     ) -> Result<CudaSlice<f32>, TypeError> {
         let (mmw, mmh) = mask_wh;
@@ -305,6 +314,7 @@ impl DepthImage {
                 .arg(&mmhi)
                 .arg(&mmwi)
                 .arg(&cnt)
+                .arg(live)
                 .arg(&z)
                 .launch_cfg(cfg_per_item(slots, 256))?;
         }
@@ -314,14 +324,16 @@ impl DepthImage {
     /// Sample per-**box** metric depth (mean of the box's inner-50% central patch).
     /// `boxes` is a device `[slots*stride]` buffer with `x1,y1,x2,y2` (source pixels)
     /// in the first 4 lanes — e.g. a detector's `dets_slice()` (`stride=6`); `src_wh`
-    /// is the original-image `(width, height)`. The slot count is derived from the
-    /// buffer length (every slot sampled — no pre-sync survivor count needed; zip the
-    /// returned `[slots]` z buffer against the decoded detections). Enqueues on the
-    /// shared stream; z (meters) is valid after the single sync.
+    /// is the original-image `(width, height)`. `live` is the detector's **on-device**
+    /// survivor count (a `[1]` i32 device slice): the kernel gates on it on the GPU, so
+    /// slots `>=` the live count are left at `0` (not sampled from stale box coords) and
+    /// the returned `[slots]` z buffer is safe to read in full. Enqueues on the shared
+    /// stream; z (meters) is valid after the single sync.
     pub fn sample_boxes(
         &self,
         boxes: &CudaSlice<f32>,
         stride: usize,
+        live: &CudaSlice<i32>,
         src_wh: (f32, f32),
         stream: &Arc<CudaStream>,
     ) -> Result<CudaSlice<f32>, TypeError> {
@@ -353,6 +365,7 @@ impl DepthImage {
                 .arg(boxes)
                 .arg(&st)
                 .arg(&ni)
+                .arg(live)
                 .arg(&sw)
                 .arg(&sh)
                 .arg(&z)
@@ -374,7 +387,8 @@ impl Mask {
     ) -> Result<f32, TypeError> {
         let this = self.as_cudaslice().ok_or(TypeError::NotOnDevice)?;
         let mask_wh = (self.size().width, self.size().height);
-        let z = depth.sample_masks(this, mask_wh, stream)?; // single mask → 1 slot
+        let live = stream.clone_htod(&[1i32])?; // exactly one live slot
+        let z = depth.sample_masks(this, mask_wh, &live, stream)?; // single mask → 1 slot
         let v = stream.clone_dtoh(&z)?;
         stream.synchronize()?;
         Ok(v[0])

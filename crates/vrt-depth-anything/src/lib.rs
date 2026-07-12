@@ -17,7 +17,8 @@
 //! ```ignore
 //! det.submit(&img, &mut d)?;                                   // enqueue, no sync
 //! depth.submit(&img, &mut z)?;                                 // same stream, no sync
-//! let zs = z.depth_image().sample_masks(d.masks_slice(), d.mask_size(), &stream)?; // enqueue fusion
+//! let zs = z.depth_image()
+//!     .sample_masks(d.masks_slice(), d.mask_size(), d.count_slice(), &stream)?; // enqueue fusion
 //! stream.synchronize()?;                                        // ONE sync drains all
 //! let zs = stream.clone_dtoh(&zs)?;                             // per-instance metric z
 //! ```

@@ -68,9 +68,9 @@ fn main() -> Result<(), vrt::BoxError> {
     // reads the detector's GPU masks + the depth map. One sync drains everything.
     det.submit(&dev, &mut d)?;
     depth.submit(&dev, &mut z)?;
-    let zs_dev = z
-        .depth_image()
-        .sample_masks(d.masks_slice(), d.mask_size(), &stream)?;
+    let zs_dev =
+        z.depth_image()
+            .sample_masks(d.masks_slice(), d.mask_size(), d.count_slice(), &stream)?;
     stream.synchronize()?;
 
     let instances = d.instances()?;
@@ -159,9 +159,12 @@ fn run_bench(
         det.submit(dev, d)?;
         depth.submit(dev, z)?;
         let t1 = Instant::now();
-        let zs_dev = z
-            .depth_image()
-            .sample_masks(d.masks_slice(), d.mask_size(), stream)?;
+        let zs_dev = z.depth_image().sample_masks(
+            d.masks_slice(),
+            d.mask_size(),
+            d.count_slice(),
+            stream,
+        )?;
         let t2 = Instant::now();
         stream.synchronize()?; // the one sync completes both models + fusion
         let t3 = Instant::now();

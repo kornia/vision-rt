@@ -82,7 +82,7 @@ fn main() -> Res<()> {
         // [count] z buffer, valid after the sync below.
         let zs = z
             .depth_image()
-            .sample_masks(d.masks_slice(), d.mask_size(), &stream)?;
+            .sample_masks(d.masks_slice(), d.mask_size(), d.count_slice(), &stream)?;
         let t3 = Instant::now();
         stream.synchronize()?; // the one sync completes source + detect + depth + fusion
         let t4 = Instant::now();

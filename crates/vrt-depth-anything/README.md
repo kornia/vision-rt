@@ -24,7 +24,7 @@ let (mut d, mut z) = (det.alloc_result()?, depth.alloc_result()?);
 det.submit(&img, &mut d)?;      // enqueue: seg  → boxes + masks  (no sync)
 depth.submit(&img, &mut z)?;    // enqueue: DA2  → metric depth   (no sync)
 let zs = z.depth_image()        // depth-at-mask sampling is a builtin on DepthImage
-    .sample_masks(d.masks_slice(), d.mask_size(), &stream)?;
+    .sample_masks(d.masks_slice(), d.mask_size(), d.count_slice(), &stream)?;
 stream.synchronize()?;          // ONE sync drains seg + depth + fusion
 
 for (inst, z_m) in d.instances()?.iter().zip(stream.clone_dtoh(&zs)?) {

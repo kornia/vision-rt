@@ -158,6 +158,7 @@ pub struct SegResult {
     dets: CudaSlice<f32>, // [q*6] x1,y1,x2,y2,class,score (survivors, packed by slot)
     qidx: CudaSlice<i32>, // [q] survivor slot -> query index
     masks: CudaSlice<u8>, // [q*mh*mw] binary masks (survivors, packed by slot)
+    count_dev: CudaSlice<i32>, // [1] survivor count on-device (atomic target, retained for GPU readers)
     count_pin: vrt::PinnedBuffer<i32>,
     stream: Arc<CudaStream>,
     q: usize,
@@ -171,6 +172,7 @@ impl SegResult {
             dets: unsafe { stream.alloc::<f32>(q * 6)? },
             qidx: unsafe { stream.alloc::<i32>(q)? },
             masks: unsafe { stream.alloc::<u8>(q * mh * mw)? },
+            count_dev: stream.alloc_zeros::<i32>(1)?,
             count_pin: vrt::PinnedBuffer::<i32>::alloc(1)?,
             stream: stream.clone(),
             q,
@@ -254,6 +256,16 @@ impl SegResult {
     /// GPU-resident survivor-slot → query-index map `[q]`; slots `0..count()` valid.
     pub fn qidx_slice(&self) -> &CudaSlice<i32> {
         &self.qidx
+    }
+
+    /// GPU-resident survivor count `[1]` (the decode kernel's atomic target). Pass to
+    /// the `vrt-types` fusion builtins (`DepthImage::sample_masks`/`sample_boxes`) so
+    /// they gate stale capacity slots **on the GPU** — valid on the stream from the
+    /// moment `submit` returns (no host sync needed), unlike the pinned [`count`].
+    ///
+    /// [`count`]: Self::count
+    pub fn count_slice(&self) -> &CudaSlice<i32> {
+        &self.count_dev
     }
 }
 
@@ -426,13 +438,15 @@ impl RfDetrSeg {
         let lab_raw = out_ptr(&self.labels_name)?;
         let msk_raw = out_ptr(&self.masks_name)?;
 
-        // Per-frame device count (atomic, zeroed). Survivors land in the caller's
-        // buffers; `qidx` maps each survivor slot back to its query for the mask pass.
-        let count_dev: CudaSlice<i32> = self.stream.alloc_zeros(1)?;
+        // Per-frame device count (atomic). Zero the caller-owned counter (retained in
+        // `SegResult` so GPU fusion readers can gate on it without a host sync);
+        // survivors land in the caller's buffers; `qidx` maps each survivor slot back
+        // to its query for the mask pass.
+        self.stream.memset_zeros(&mut out.count_dev)?;
         let dets_raw = out.dets.device_ptr(self.stream.as_ref()).0;
         let qidx_raw = out.qidx.device_ptr(self.stream.as_ref()).0;
         let masks_out_raw = out.masks.device_ptr(self.stream.as_ref()).0;
-        let cnt_raw = count_dev.device_ptr(self.stream.as_ref()).0;
+        let cnt_raw = out.count_dev.device_ptr(self.stream.as_ref()).0;
 
         let (qi, ci) = (self.q as i32, self.c as i32);
         let conf = self.conf;

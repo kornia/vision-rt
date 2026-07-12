@@ -30,7 +30,7 @@ loop {
     det.submit(img, &mut d)?;              // enqueue only — NO sync, NO host copy
     depth.submit(img, &mut z)?;            // SAME &img by reference, same stream
     let zs = z.depth_image()               // depth-at-mask sampling is a DepthImage builtin
-        .sample_masks(d.masks_slice(), d.mask_size(), &stream)?;      // fusion enqueued LAST
+        .sample_masks(d.masks_slice(), d.mask_size(), d.count_slice(), &stream)?; // fusion enqueued LAST
     stream.synchronize()?;                 // the ONE sync drains source + both models + fusion
 
     let n = d.count();                     // reads pinned scalar — post-sync, cheap
@@ -65,9 +65,11 @@ frame) and `examples/rtsp_rfdetr_seg/src/main.rs:63-97` (RTSP loop + profiler).
 ## Fusion: detect + depth on one stream
 
 Depth-at-mask/box sampling are **builtins on the typed device images in
-`vrt-types`**: `z.depth_image().sample_masks(masks, mask_wh, &stream)` (and
-`sample_boxes`, plus `Mask::sample_depth(&depth, &stream)` for a single mask) enqueue
-a GPU fusion kernel that reads the detector's device masks **and** the depth map,
+`vrt-types`**: `z.depth_image().sample_masks(masks, mask_wh, live_count, &stream)`
+(and `sample_boxes`, plus `Mask::sample_depth(&depth, &stream)` for a single mask;
+`live_count` = the detector's on-device survivor count, e.g. `d.count_slice()`, which
+gates stale capacity slots on the GPU) enqueue a GPU fusion kernel that reads the
+detector's device masks **and** the depth map,
 returning one z per slot valid after the single sync
 (`crates/vrt-types/src/lib.rs`; call site `detect_depth.rs`). The slot count is
 derived from the mask buffer — you do **not** pass a survivor count, so it never
