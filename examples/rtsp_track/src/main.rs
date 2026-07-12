@@ -24,6 +24,8 @@
 
 use std::collections::HashSet;
 use std::io::Write;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Instant;
 
 use cudarc::driver::CudaContext;
@@ -52,6 +54,63 @@ const TAPO_C210_K1: f32 = -0.28;
 /// Standalone BEV canvas size (matches the 1280-wide main frame so they stack clean).
 const BEV_W: usize = 1280;
 const BEV_H: usize = 640;
+
+/// A rendered `(main_rgb, bev_rgb)` pair awaiting JPEG encode.
+type FramePair = (Vec<u8>, Vec<u8>);
+/// Latest-only handoff slot: newest pair + a condvar the worker waits on.
+type FrameSlot = Arc<(Mutex<Option<FramePair>>, Condvar)>;
+
+/// Off-thread JPEG encoder + MJPEG publisher. The render loop hands over the two
+/// rendered RGB buffers through a **latest-only** slot; a worker thread owns the
+/// [`JpegEncoder`] + [`MjpegServer`] and does the ~13 ms turbojpeg encode + publish
+/// off the hot path, so encoding never stalls frame production. If the worker falls
+/// behind, the slot keeps only the newest pair (stale frames dropped → no queued
+/// latency), which also steadies the publish cadence the browser sees.
+struct EncodeSink {
+    /// Newest un-encoded pair; `None` once the worker takes it.
+    slot: FrameSlot,
+    /// Worker's last measured encode×2 time (µs), for the profiling line.
+    enc_us: Arc<AtomicU32>,
+}
+
+impl EncodeSink {
+    /// Bind the MJPEG server and spawn the encode worker. `w`/`h` size the main
+    /// stream, `bw`/`bh` the BEV.
+    fn spawn(port: u16, w: usize, h: usize, bw: usize, bh: usize) -> Res<Self> {
+        let server = MjpegServer::spawn(port)?;
+        let _ = JpegEncoder::new(72)?; // fail fast on the main thread if turbojpeg is absent
+        let slot = Arc::new((Mutex::new(None), Condvar::new()));
+        let enc_us = Arc::new(AtomicU32::new(0));
+        let (wslot, wenc) = (slot.clone(), enc_us.clone());
+        std::thread::spawn(move || {
+            let jenc = JpegEncoder::new(72).expect("jpeg encoder");
+            let (lock, cv) = &*wslot;
+            loop {
+                let (main, bev) = {
+                    let mut g = lock.lock().unwrap_or_else(|e| e.into_inner());
+                    while g.is_none() {
+                        g = cv.wait(g).unwrap_or_else(|e| e.into_inner());
+                    }
+                    g.take().unwrap()
+                };
+                let t = Instant::now();
+                if let (Ok(mj), Ok(bj)) = (jenc.encode(main, w, h), jenc.encode(bev, bw, bh)) {
+                    server.publish(mj, bj);
+                }
+                wenc.store(t.elapsed().as_micros() as u32, Ordering::Relaxed);
+            }
+        });
+        Ok(Self { slot, enc_us })
+    }
+
+    /// Hand the latest rendered pair to the worker, overwriting any pair not yet
+    /// encoded (drop-stale → the browser always gets the freshest frame).
+    fn submit(&self, main: Vec<u8>, bev: Vec<u8>) {
+        let (lock, cv) = &*self.slot;
+        *lock.lock().unwrap_or_else(|e| e.into_inner()) = Some((main, bev));
+        cv.notify_one();
+    }
+}
 
 fn main() -> Res<()> {
     env_logger::init();
@@ -97,10 +156,10 @@ fn main() -> Res<()> {
     // Output mode from the 5th arg.
     let record = out.as_deref().is_some_and(|p| p.ends_with(".gif"));
     let serve_port = out.as_deref().and_then(parse_port);
-    let server = match serve_port {
+    let enc_sink = match serve_port {
         Some(port) => {
             println!("live: open http://<this-jetson-ip>:{port} in a phone browser (same Wi-Fi)");
-            Some((MjpegServer::spawn(port)?, JpegEncoder::new(72)?))
+            Some(EncodeSink::spawn(port, w, h, BEV_W, BEV_H)?)
         }
         None => None,
     };
@@ -118,7 +177,7 @@ fn main() -> Res<()> {
     let (mut a_src, mut a_enq, mut a_fus, mut a_sync, mut a_read, mut a_trk) =
         (0.0f64, 0.0, 0.0, 0.0, 0.0, 0.0);
     let (mut prev, mut ema_dt, mut a_dt) = (Instant::now(), 0.0f64, 0.0f64);
-    let (mut a_render, mut a_enc) = (0.0f64, 0.0);
+    let mut a_render = 0.0f64;
     loop {
         let t0 = Instant::now();
         let Some(frame) = source.next_frame() else {
@@ -179,13 +238,17 @@ fn main() -> Res<()> {
         // ── viz (vrt-viz): render main + BEV, then serve / record / dump ──
         // Only one of the three sinks is active per run; each renders the same pair.
         // Smoothed end-to-end loop rate for the on-frame HUD (EMA of the frame interval).
-        let fps = if ema_dt > 0.0 { (1.0 / ema_dt) as f32 } else { 0.0 };
-        if let Some((server, jenc)) = &server {
+        let fps = if ema_dt > 0.0 {
+            (1.0 / ema_dt) as f32
+        } else {
+            0.0
+        };
+        if let Some(sink) = &enc_sink {
+            // Render on this thread (needs the GPU host-copies + trails); hand the two
+            // RGB buffers to the worker, which encodes + publishes off the hot path.
             let (main, bev) = render_pair(&rect, &stream, &d, w, h, &tracks, &intr, &trails, fps)?;
-            let r = Instant::now();
-            server.publish(jenc.encode(main, w, h)?, jenc.encode(bev, BEV_W, BEV_H)?);
-            a_render += ms(r - t6);
-            a_enc += ms(Instant::now() - r);
+            sink.submit(main, bev);
+            a_render += ms(Instant::now() - t6);
         } else if record {
             if t_start.elapsed().as_secs_f64() < rec_secs {
                 if n.is_multiple_of(2) {
@@ -258,17 +321,17 @@ fn main() -> Res<()> {
                 })
                 .collect();
             println!("     tracks: {}", shown.join(", "));
-            if server.is_some() {
+            if let Some(sink) = &enc_sink {
+                // Encode runs on the worker thread; report its last measured cost.
+                let enc_ms = sink.enc_us.load(Ordering::Relaxed) as f64 / 1000.0;
                 println!(
-                    "     serve: render {:.1} ms | encode×2 {:.1} ms",
+                    "     serve: render {:.1} ms | encode×2 {enc_ms:.1} ms (worker, off hot path)",
                     a_render / k,
-                    a_enc / k
                 );
             }
             let _ = std::io::stdout().flush();
-            (
-                a_src, a_enq, a_fus, a_sync, a_read, a_trk, a_dt, a_render, a_enc,
-            ) = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+            (a_src, a_enq, a_fus, a_sync, a_read, a_trk, a_dt, a_render) =
+                (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
         }
     }
     Ok(())
