@@ -97,11 +97,14 @@ impl EncodeSink {
         let down = scale < 0.999;
         let (sw, sh) = (scaled_even(w, scale), scaled_even(h, scale));
         let (sbw, sbh) = (scaled_even(bw, scale), scaled_even(bh, scale));
-        if down {
-            println!(
-                "     stream: main {sw}x{sh} + bev {sbw}x{sbh} @ q{quality} (downscaled {scale})"
-            );
-        }
+        let (mw, mh, bvw, bvh) = if down {
+            (sw, sh, sbw, sbh)
+        } else {
+            (w, h, bw, bh)
+        };
+        println!(
+            "     stream: main {mw}x{mh} + bev {bvw}x{bvh} @ q{quality} (turbojpeg, scale {scale})"
+        );
         let slot = Arc::new((Mutex::new(None), Condvar::new()));
         let enc_us = Arc::new(AtomicU32::new(0));
         let (wslot, wenc) = (slot.clone(), enc_us.clone());
@@ -194,19 +197,19 @@ fn main() -> Res<()> {
     let enc_sink = match serve_port {
         Some(port) => {
             println!("live: open http://<this-jetson-ip>:{port} in a phone browser (same Wi-Fi)");
-            // Streamed JPEGs are downscaled for bandwidth (remote/cellular links buffer
-            // on the full 1280-wide feed). Tune with RTSP_TRACK_STREAM_SCALE (0<s≤1) /
-            // RTSP_TRACK_STREAM_Q; defaults 0.5 + q65 suit a phone over Tailscale.
+            // Streamed at full res by default (the WebSocket client's jitter buffer
+            // absorbs network cadence). On a constrained remote/cellular link, drop
+            // RTSP_TRACK_STREAM_SCALE (0<s≤1) / RTSP_TRACK_STREAM_Q to cut bandwidth.
             let scale = std::env::var("RTSP_TRACK_STREAM_SCALE")
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .filter(|s: &f32| *s > 0.0 && *s <= 1.0)
-                .unwrap_or(0.5);
+                .unwrap_or(1.0);
             let quality = std::env::var("RTSP_TRACK_STREAM_Q")
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .filter(|q: &u8| *q >= 10 && *q <= 95)
-                .unwrap_or(65);
+                .unwrap_or(72);
             Some(EncodeSink::spawn(port, w, h, BEV_W, BEV_H, scale, quality)?)
         }
         None => None,
