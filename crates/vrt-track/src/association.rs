@@ -1,8 +1,10 @@
 //! Cost matrices and optimal linear assignment for track ↔ detection matching.
 //!
-//! The primary cost is **IoU distance** (`1 − IoU`) in the image plane. When the
-//! `appearance` feature is enabled, per-track appearance embeddings are fused in
-//! via BoT-SORT-style gated **cosine** distance (see [`fuse_appearance`]).
+//! The primary cost is **IoU distance** (`1 − IoU`) in the image plane, min-fused
+//! with a size-normalised **centre-proximity** rescue ([`fuse_center`]) so an
+//! occlusion-shrunk box still matches its coasting track. When the `appearance`
+//! feature is enabled, per-track appearance embeddings are fused in via
+//! BoT-SORT-style gated **cosine** distance (see [`fuse_appearance`]).
 //!
 //! Assignment uses a compact, dependency-free **Hungarian** (Kuhn–Munkres,
 //! O(n³)) solver — optimal, and for MOT-scale problems (tens of tracks/dets) its
@@ -81,6 +83,50 @@ pub fn iou_cost_matrix(tracks: &[[f32; 4]], dets: &[[f32; 4]]) -> Vec<Vec<f64>> 
         .iter()
         .map(|t| dets.iter().map(|d| 1.0 - iou(t, d) as f64).collect())
         .collect()
+}
+
+/// Track half-extents at which the centre-proximity cost saturates to 1 (no
+/// rescue). At 1.5 a detection whose centre sits within ~0.75 box half-extents of a
+/// coasting track yields a cost ≤ 0.5 (the second-stage gate), so an occlusion-shrunk
+/// box is re-acquired; a detection a full box-width away contributes nothing.
+const CENTER_SPAN: f64 = 1.5;
+
+/// Size-normalised centre-distance cost in `[0, 1]` between a track box and a
+/// detection box. Normalising the offset by the **track** half-extents makes it
+/// scale-invariant: a partially-occluded detection (same object centre, shrunken
+/// area) scores ~0 where IoU — which counts the missing area against the pair —
+/// would wrongly reject it. Saturates to 1 beyond [`CENTER_SPAN`] half-extents.
+fn center_cost(track: &[f32; 4], det: &[f32; 4]) -> f64 {
+    let hw = ((track[2] - track[0]) * 0.5).max(1.0) as f64;
+    let hh = ((track[3] - track[1]) * 0.5).max(1.0) as f64;
+    let nx = ((track[0] + track[2] - det[0] - det[2]) as f64 * 0.5) / hw;
+    let ny = ((track[1] + track[3] - det[1] - det[3]) as f64 * 0.5) / hh;
+    ((nx * nx + ny * ny).sqrt() / CENTER_SPAN).min(1.0)
+}
+
+/// Min-fuse the size-normalised centre-proximity cost into an IoU cost matrix:
+/// `cost ← min(cost, center_cost)`, but only for track rows flagged in `rescue`.
+/// This **rescues** coasting/occluded tracks whose box shrank under occlusion (so IoU
+/// is poor) but whose centre the constant-velocity motion model still tracks — the
+/// dominant ID-churn cause on partially-visible objects. Like [`fuse_appearance`] it
+/// only ever *lowers* a cost, so it can add a match but never block one; apply
+/// [`gate_depth`] afterwards so a cross-depth pair is still hard-rejected.
+///
+/// `rescue[t]` gates the fuse to **near-static** tracks: a fast-coasting track's
+/// predicted centre drifts far from where it was last seen, so centre-only matching
+/// (which discards box shape) would let it capture a *different* object that drifted
+/// into range. Restricting the rescue to slow/stationary tracks keeps the occluded
+/// re-acquisition while removing that steal. A row with `rescue[t] == false` (or beyond
+/// the slice) keeps its plain IoU cost.
+pub fn fuse_center(cost: &mut [Vec<f64>], tracks: &[[f32; 4]], dets: &[[f32; 4]], rescue: &[bool]) {
+    for (t, row) in cost.iter_mut().enumerate() {
+        if !rescue.get(t).copied().unwrap_or(false) {
+            continue;
+        }
+        for (d, c) in row.iter_mut().enumerate() {
+            *c = c.min(center_cost(&tracks[t], &dets[d]));
+        }
+    }
 }
 
 /// Cosine distance `1 − cos(a, b)` in `[0, 2]` (0 = identical direction).
@@ -319,6 +365,39 @@ mod tests {
         assert!(
             near[0][0] >= DEPTH_GATE_COST,
             "2 m gap exceeds 0.5 m tol at 2 m"
+        );
+    }
+
+    #[test]
+    fn center_fuse_rescues_occluded_box() {
+        // 100×100 track box; the detection is the object half-occluded — a shrunken
+        // box at (almost) the same centre. IoU alone rejects it; the centre fuse,
+        // normalised by the track size, brings the cost below the second-stage gate.
+        let track = [50.0, 50.0, 150.0, 150.0];
+        let frag = [60.0, 100.0, 140.0, 150.0]; // bottom slice, centre offset 0.5·hh
+        let base = 1.0 - iou(&track, &frag) as f64;
+        assert!(
+            base > 0.5,
+            "IoU alone would reject the fragment (cost {base:.2})"
+        );
+        let mut cost = vec![vec![base]];
+        fuse_center(&mut cost, &[track], &[frag], &[true]);
+        assert!(
+            cost[0][0] < 0.5,
+            "centre fuse should rescue it (cost {:.2})",
+            cost[0][0]
+        );
+        // A detection a full box-width away is not rescued.
+        let far = [400.0, 400.0, 480.0, 450.0];
+        let mut cost_far = vec![vec![1.0]];
+        fuse_center(&mut cost_far, &[track], &[far], &[true]);
+        assert!(cost_far[0][0] >= 1.0, "distant box must not be rescued");
+        // A non-static track (rescue = false) keeps its plain IoU cost — no rescue.
+        let mut cost_moving = vec![vec![base]];
+        fuse_center(&mut cost_moving, &[track], &[frag], &[false]);
+        assert!(
+            (cost_moving[0][0] - base).abs() < 1e-9,
+            "rescue=false must leave the IoU cost untouched"
         );
     }
 

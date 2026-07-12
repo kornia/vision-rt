@@ -1,11 +1,16 @@
 //! The [`Tracker`]: ByteTrack two-stage association over the 3D Kalman motion model
-//! (NSA measurement noise), with a depth-gated 3D association and an optional
-//! appearance-fusion hook.
+//! (NSA measurement noise), with a centre-proximity rescue for occlusion-shrunk
+//! boxes, a depth-gated 3D association, and an optional appearance-fusion hook.
 
-use crate::association::{gate_depth, iou_cost_matrix, linear_assignment};
+use crate::association::{fuse_center, gate_depth, iou_cost_matrix, linear_assignment};
 use crate::kalman::KalmanParams;
 use crate::track::{Track, TrackState, Tracklet};
 use crate::{Detection, TrackError};
+
+/// Image-plane speed (px per nominal frame) below which a track counts as
+/// **near-static** and is eligible for the stage-2 centre-proximity rescue. Above it,
+/// a coasting track's centre has drifted too far for centre-only matching to be safe.
+const STATIC_SPEED_PX: f64 = 8.0;
 
 /// Configuration for [`Tracker`]. [`Default`] gives sensible defaults tuned for
 /// pixel-space boxes.
@@ -66,7 +71,7 @@ impl Default for TrackerConfig {
             new_track_thresh: 0.6,
             match_thresh: 0.8,
             match_thresh_second: 0.5,
-            track_buffer: 30,
+            track_buffer: 60, // ~4 s at 15 fps — survive intermittent/occluded detection
             min_hits: 3,
             kalman: KalmanParams::default(),
             #[cfg(feature = "appearance")]
@@ -247,6 +252,10 @@ impl Tracker {
         // ---- Stage 1: pool vs high-confidence detections (IoU + appearance) ----
         let high_boxes: Vec<[f32; 4]> = high_det.iter().map(|&i| detections[i].bbox).collect();
         let pool_boxes: Vec<[f32; 4]> = pool.iter().map(|&ti| self.tracks[ti].bbox()).collect();
+        // Stage 1 uses strict IoU (+ appearance): these tracks matched a strong
+        // detection recently, so their boxes are fresh and IoU is precise. A
+        // centre-proximity rescue here would let adjacent same-depth objects swap;
+        // it is confined to the stage-2 recovery pass below.
         #[cfg_attr(not(feature = "appearance"), allow(unused_mut))]
         let mut cost1 = iou_cost_matrix(&pool_boxes, &high_boxes);
         #[cfg(feature = "appearance")]
@@ -282,17 +291,30 @@ impl Tracker {
             }
         }
 
-        // ---- Stage 2: still-tracked (was Confirmed) pool tracks vs low dets ----
-        // Only previously-tracked tracks chase low-confidence boxes; genuinely
-        // lost tracks are not re-found on weak evidence (ByteTrack rule).
-        let r_tracked: Vec<usize> = u_pool
-            .iter()
-            .map(|&pi| pool[pi])
-            .filter(|&ti| self.tracks[ti].state == TrackState::Confirmed)
-            .collect();
+        // ---- Stage 2: unmatched pool (Confirmed + Lost) tracks vs low dets ----
+        // Every still-unmatched pool track chases low-confidence boxes, so an object
+        // the detector only fires on weakly while partially occluded (a half-hidden
+        // chair) re-acquires its id instead of churning. The centre-proximity fuse
+        // below is what makes this land: the occlusion-shrunk box has poor IoU but its
+        // centre still sits on the track's coasting position. The depth gate stays the
+        // hard veto, so a weak box can't steal an id across a depth gap. (`pool` is
+        // already exactly Confirmed|Lost, so no further state filter is needed here.)
+        let r_tracked: Vec<usize> = u_pool.iter().map(|&pi| pool[pi]).collect();
         let low_boxes: Vec<[f32; 4]> = low_det.iter().map(|&i| detections[i].bbox).collect();
         let r_boxes: Vec<[f32; 4]> = r_tracked.iter().map(|&ti| self.tracks[ti].bbox()).collect();
+        // Restrict the centre-proximity rescue to near-static tracks: a fast-coasting
+        // track's predicted centre has drifted, so centre-only matching could capture a
+        // different object that drifted into range. A slow/stationary track (the
+        // occluded-chair case) is safe to rescue.
+        let r_static: Vec<bool> = r_tracked
+            .iter()
+            .map(|&ti| {
+                let v = self.tracks[ti].kf.velocity_3d();
+                (v[0] * v[0] + v[1] * v[1]).sqrt() < STATIC_SPEED_PX
+            })
+            .collect();
         let mut cost2 = iou_cost_matrix(&r_boxes, &low_boxes);
+        fuse_center(&mut cost2, &r_boxes, &low_boxes, &r_static);
         self.gate_stage(&mut cost2, &r_tracked, &low_det, detections);
         let (m2, _u_r, _u_low) = linear_assignment(
             &cost2,

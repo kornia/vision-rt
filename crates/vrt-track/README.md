@@ -33,7 +33,11 @@ for frame in frames {
 
 - **ByteTrack two-stage association** — high-confidence detections match first,
   then a recovery pass over low-confidence detections keeps established tracks
-  alive through partial/occluded frames.
+  alive through partial/occluded frames. The recovery pass min-fuses a
+  **size-normalised centre-proximity** cost into IoU, so a partially-occluded
+  object whose box shrinks (a half-hidden chair) still matches its coasting track
+  on centre alone instead of churning its id — while the depth gate stays the hard
+  veto against a cross-depth swap.
 - **3D constant-velocity Kalman filter** — see below.
 - **Track lifecycle** `Tentative → Confirmed → Lost → Removed` with age / hit /
   time-since-update counters and a re-identification buffer.
@@ -42,6 +46,17 @@ for frame in frames {
   IoU cost with a per-track EMA feature bank. It is a *hook*: you provide the
   vectors (e.g. from a future `vrt-reid` crate), there is **no** hard dependency on
   any embedding model.
+
+## Roadmap
+
+- **Appearance ReID (next).** Geometry (IoU + centre + depth) re-acquires an object
+  only while its box still overlaps its coasting track; a detection whose *shape*
+  changed under heavy occlusion, or that re-enters after a long gap, needs
+  appearance. The `appearance` feature already exposes the fusion hook
+  (`Detection::feature` + per-track EMA bank); the next step is to port the OSNet
+  embedder (`vrt-reid`) into the workspace and feed its L2-normalised vectors in,
+  updating the bank only from confident detections (StrongSORT) so a noisy
+  embedding doesn't poison an identity.
 
 ## The 3D Kalman model (the point of this crate)
 

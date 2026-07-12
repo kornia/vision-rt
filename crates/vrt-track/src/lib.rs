@@ -248,6 +248,35 @@ mod tests {
         assert_eq!(out.len(), 1);
     }
 
+    /// A track that has fully transitioned to `Lost` (missed several frames) must be
+    /// re-acquired with the SAME id by a **low-confidence** detection in stage 2 — the
+    /// occluded-object recovery path (weak re-detection of a partially-visible object).
+    #[test]
+    fn lost_track_recovered_by_low_confidence_detection() {
+        let mut t = Tracker::new(TrackerConfig::default()).unwrap();
+        let bx = [100.0, 100.0, 160.0, 220.0]; // static box
+                                               // Establish a confirmed track.
+        let mut id = None;
+        for _ in 0..5 {
+            if let Some(tr) = t.update(&[Detection::new(bx, 0.9, 0)]).first() {
+                id = Some(tr.id);
+            }
+        }
+        let id = id.expect("track established");
+        // Miss several frames → Confirmed → Lost (kept alive by track_buffer).
+        for _ in 0..4 {
+            assert!(t.update(&[]).is_empty(), "no detection ⇒ nothing reported");
+        }
+        // Only a low-confidence detection (in [track_low_thresh, track_high_thresh)) at
+        // the same place → must re-acquire via the second (recovery) stage.
+        let out = t.update(&[Detection::new(bx, 0.3, 0)]);
+        assert_eq!(out.len(), 1, "lost track not re-acquired by low-conf det");
+        assert_eq!(
+            out[0].id, id,
+            "re-acquired with a new id instead of the lost one"
+        );
+    }
+
     #[test]
     fn invalid_config_rejected() {
         let cfg = TrackerConfig {
