@@ -29,10 +29,10 @@ const DEPTH_GATE_COST: f64 = 1.0e3;
 /// untouched, so the tracker degrades gracefully to pure IoU. Apply this **after**
 /// [`fuse_appearance`] so a depth-inconsistent pair is rejected even when appearance
 /// would have rescued it. `rel`/`abs_floor` are
-/// [`BotSortConfig::depth_gate_rel`]/[`depth_gate_abs`].
+/// [`TrackerConfig::depth_gate_rel`]/[`depth_gate_abs`].
 ///
-/// [`BotSortConfig::depth_gate_rel`]: crate::BotSortConfig::depth_gate_rel
-/// [`depth_gate_abs`]: crate::BotSortConfig::depth_gate_abs
+/// [`TrackerConfig::depth_gate_rel`]: crate::TrackerConfig::depth_gate_rel
+/// [`depth_gate_abs`]: crate::TrackerConfig::depth_gate_abs
 pub fn gate_depth(
     cost: &mut [Vec<f64>],
     track_depths: &[Option<f32>],

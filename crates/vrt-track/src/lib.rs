@@ -1,14 +1,17 @@
-//! **BoT-SORT** multi-object tracker with a **3D** Kalman motion model — a pure-CPU
-//! algorithm crate (no TensorRT, no CUDA, no model of its own).
+//! A robust **multi-object tracker** with a **3D** Kalman motion model — a pure-CPU
+//! algorithm crate (no TensorRT, no CUDA, no model of its own). ByteTrack-style
+//! two-stage association + a BoT-SORT-style `w,h` Kalman + a **depth-gated 3D**
+//! extension; not full BoT-SORT (no camera-motion compensation — unneeded for fixed
+//! cameras).
 //!
 //! Feed per-frame [`Detection`]s (box + score + class, plus optional depth and
 //! appearance embedding) and get back stable [`Track`] ids:
 //!
 //! ```
-//! use vrt_track::{BotSort, BotSortConfig, Detection};
+//! use vrt_track::{Tracker, TrackerConfig, Detection};
 //!
 //! // Construct once, reuse every frame.
-//! let mut tracker = BotSort::new(BotSortConfig::default()).unwrap();
+//! let mut tracker = Tracker::new(TrackerConfig::default()).unwrap();
 //! for _frame in 0..3 {
 //!     let dets = vec![Detection::new([100.0, 100.0, 140.0, 220.0], 0.92, 0)];
 //!     let tracks = tracker.update(&dets); // Vec<Track> (id, bbox, class, 3D state)
@@ -19,7 +22,7 @@
 //! # What it implements
 //! - **ByteTrack two-stage association** — high-confidence detections first, then a
 //!   recovery pass over low-confidence detections for the still-tracked targets
-//!   ([`association`], [`BotSort::update`]).
+//!   ([`association`], [`Tracker::update`]).
 //! - A **3D constant-velocity Kalman filter** ([`kalman`]) — state
 //!   `[px, py, pz, w, h, vx, vy, vz]`. This is the crate's defining choice: it
 //!   models depth (`pz`) as a first-class axis and **degrades gracefully to the
@@ -32,30 +35,26 @@
 //!   distance on [`Detection::feature`] embeddings, min-fused into the IoU cost,
 //!   with an EMA feature bank per track. This is a *hook*, not a dependency on any
 //!   embedding model — you supply the vectors.
-//! - A **camera-motion compensation** hook ([`gmc`]) — the [`gmc::CameraMotion`]
-//!   trait plus an identity stub; plug a real estimator into
-//!   [`BotSort::update_with_motion`].
 //!
 //! Assignment is a compact, dependency-free Hungarian solver; the only external
 //! dependency is `nalgebra` for the small fixed-size Kalman matrices.
 
 pub mod association;
-pub mod botsort;
-pub mod gmc;
 pub mod kalman;
 pub mod track;
+pub mod tracker;
 
 pub use association::iou;
-pub use botsort::{BotSort, BotSortConfig};
 pub use kalman::{KalmanFilter3D, KalmanParams};
 pub use track::{Track, TrackState};
+pub use tracker::{Tracker, TrackerConfig};
 // Camera model lives in the shared `vrt-types` leaf; re-exported for convenience.
 pub use vrt_types::{CameraExtrinsics, CameraIntrinsics};
 
 /// Errors from tracker construction / configuration.
 #[derive(Debug, thiserror::Error)]
 pub enum TrackError {
-    /// The supplied [`BotSortConfig`] is inconsistent.
+    /// The supplied [`TrackerConfig`] is inconsistent.
     #[error("invalid tracker config: {0}")]
     InvalidConfig(String),
 }
@@ -111,7 +110,7 @@ mod tests {
     /// stable id throughout.
     #[test]
     fn single_target_stable_id() {
-        let mut t = BotSort::new(BotSortConfig::default()).unwrap();
+        let mut t = Tracker::new(TrackerConfig::default()).unwrap();
         let mut id = None;
         for f in 0..10 {
             let x = 50.0 + f as f32 * 12.0;
@@ -132,7 +131,7 @@ mod tests {
     /// Two crossing targets must not swap ids as they pass.
     #[test]
     fn two_crossing_targets_keep_ids() {
-        let mut t = BotSort::new(BotSortConfig::default()).unwrap();
+        let mut t = Tracker::new(TrackerConfig::default()).unwrap();
         let (mut id_a, mut id_b) = (None, None);
         for f in 0..14 {
             let ax = 20.0 + f as f32 * 12.0; // left -> right
@@ -165,7 +164,7 @@ mod tests {
     /// keep constant ids.
     #[test]
     fn depth_gate_prevents_id_swap_on_crossing() {
-        let mut t = BotSort::new(BotSortConfig::default()).unwrap();
+        let mut t = Tracker::new(TrackerConfig::default()).unwrap();
         let (mut near_id, mut far_id) = (None, None);
         for f in 0..16 {
             let ax = 20.0 + f as f32 * 10.0; // near object, L->R, 2 m
@@ -205,11 +204,11 @@ mod tests {
     /// id (Lost → Confirmed), exercising the Kalman coast + re-id path.
     #[test]
     fn occlusion_recovers_same_id() {
-        let cfg = BotSortConfig {
+        let cfg = TrackerConfig {
             min_hits: 3,
             ..Default::default()
         };
-        let mut t = BotSort::new(cfg).unwrap();
+        let mut t = Tracker::new(cfg).unwrap();
 
         let boxf = |f: i32| {
             let x = 40.0 + f as f32 * 8.0;
@@ -238,7 +237,7 @@ mod tests {
     /// track is established from earlier high-confidence frames.
     #[test]
     fn low_confidence_recovery() {
-        let mut t = BotSort::new(BotSortConfig::default()).unwrap();
+        let mut t = Tracker::new(TrackerConfig::default()).unwrap();
         for f in 0..4 {
             let x = 60.0 + f as f32 * 5.0;
             t.update(&[Detection::new([x, 80.0, x + 20.0, 140.0], 0.9, 0)]);
@@ -251,17 +250,17 @@ mod tests {
 
     #[test]
     fn invalid_config_rejected() {
-        let cfg = BotSortConfig {
+        let cfg = TrackerConfig {
             track_low_thresh: 0.9,
             track_high_thresh: 0.5,
             ..Default::default()
         };
-        assert!(BotSort::new(cfg).is_err());
+        assert!(Tracker::new(cfg).is_err());
     }
 
     #[test]
     fn depth_flows_into_track_state() {
-        let mut t = BotSort::new(BotSortConfig::default()).unwrap();
+        let mut t = Tracker::new(TrackerConfig::default()).unwrap();
         let mut last = None;
         for f in 0..6 {
             let x = 50.0 + f as f32 * 4.0;

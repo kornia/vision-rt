@@ -1,16 +1,25 @@
 # vrt-track
 
-**BoT-SORT** multi-object tracker with a **3D** Kalman motion model — a pure-Rust,
+A robust **multi-object tracker** with a **3D** Kalman motion model — a pure-Rust,
 CPU-only algorithm crate. No TensorRT, no CUDA, no model of its own. Part of the
 [`vision-rt`](https://github.com/kornia/vision-rt) workspace.
+
+**Design:** ByteTrack-style two-stage association + a BoT-SORT-style `w,h` Kalman +
+a **depth-gated 3D** extension. It is *not* full BoT-SORT — camera-motion
+compensation (GMC) is deliberately omitted (unneeded for fixed cameras; add it back
+if you ever track from a moving/handheld camera).
+
+> **Upstream candidate.** No model inference, no GPU — a self-contained algorithm
+> (only `nalgebra`). A natural fit to upstream into **kornia-rs** as a tracking
+> module (its `CameraIntrinsics`/`Detection` map onto kornia's own types).
 
 Feed per-frame detections (box + score + class, plus optional depth / appearance
 embedding), get stable track ids back. Construct once, reuse every frame:
 
 ```rust
-use vrt_track::{BotSort, BotSortConfig, Detection};
+use vrt_track::{Tracker, TrackerConfig, Detection};
 
-let mut tracker = BotSort::new(BotSortConfig::default())?;
+let mut tracker = Tracker::new(TrackerConfig::default())?;
 for frame in frames {
     let dets: Vec<Detection> = frame.boxes.iter()
         .map(|b| Detection::new(b.xyxy, b.score, b.class_id))
@@ -33,8 +42,6 @@ for frame in frames {
   IoU cost with a per-track EMA feature bank. It is a *hook*: you provide the
   vectors (e.g. from a future `vrt-reid` crate), there is **no** hard dependency on
   any embedding model.
-- **Camera-motion compensation (GMC) hook** — the `CameraMotion` trait + an
-  identity stub; plug a real affine estimator into `update_with_motion`.
 
 ## The 3D Kalman model (the point of this crate)
 

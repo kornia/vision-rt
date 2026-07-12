@@ -8,7 +8,7 @@
 //!
 //! ```text
 //!   source → seg.submit + depth.submit → sample_masks → ONE sync
-//!   readout → Detection::with_depth(z) → BotSort::update → [Track]
+//!   readout → Detection::with_depth(z) → Tracker::update → [Track]
 //!   vrt_viz::render_main / render_bev → MJPEG / GIF / PNG
 //! ```
 //!
@@ -31,7 +31,7 @@ use kornia_image::{Image, ImageSize};
 use sensor_rtsp::RtspSource;
 use vrt_depth_anything::DepthAnything;
 use vrt_rfdetr_seg::RfDetrSeg;
-use vrt_track::{BotSort, BotSortConfig, CameraIntrinsics, Detection, TrackState};
+use vrt_track::{CameraIntrinsics, Detection, TrackState, Tracker, TrackerConfig};
 use vrt_types::Undistorter;
 use vrt_viz::{
     downscale, encode_png, render_bev, render_main, stack_v, write_gif, JpegEncoder, MaskOverlay,
@@ -77,12 +77,12 @@ fn main() -> Res<()> {
     let mut z = depth.alloc_result()?;
     // Diagnostic A/B: `RTSP_TRACK_NO_DEPTH=1` disables the depth gate + soft cost so
     // ID stability can be compared with vs without the 3D association terms.
-    let mut cfg = BotSortConfig::default();
+    let mut cfg = TrackerConfig::default();
     if std::env::var("RTSP_TRACK_NO_DEPTH").is_ok() {
         cfg.depth_gate = false; // A/B toggle for the depth-gate's effect on ID stability
         println!("(depth gate DISABLED for A/B)");
     }
-    let mut tracker = BotSort::new(cfg)?;
+    let mut tracker = Tracker::new(cfg)?;
     let intr = CameraIntrinsics::from_hfov(w as f32, h as f32, TAPO_C210_HFOV_DEG);
     // Lens undistort (before seg/depth) → rectified pinhole for the whole pipeline.
     let undist = Undistorter::new(&intr, TAPO_C210_K1, w, h, &stream)?;

@@ -6,7 +6,7 @@
 //!
 //! Run: `cargo run -p vrt-track --example track_synthetic`
 
-use vrt_track::{BotSort, BotSortConfig, Detection};
+use vrt_track::{Detection, Tracker, TrackerConfig};
 
 /// Tiny deterministic LCG so the demo needs no `rand` dependency.
 struct Lcg(u64);
@@ -21,7 +21,7 @@ impl Lcg {
 }
 
 fn main() {
-    let mut tracker = BotSort::new(BotSortConfig::default()).expect("valid config");
+    let mut tracker = Tracker::new(TrackerConfig::default()).expect("valid config");
     let mut rng = Lcg(0x1234_5678);
 
     println!("frame | detections in            | tracks out (id:class @ cx,cy [d=depth])");

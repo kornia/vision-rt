@@ -246,33 +246,6 @@ impl KalmanFilter3D {
         true
     }
 
-    /// Squared Mahalanobis distance of a measurement to the predicted measurement,
-    /// in the image-plane subspace `[px, py, w, h]` (depth excluded so the gate is
-    /// meaningful with or without depth). Useful as an association gate.
-    pub fn gating_distance(&self, cx: f64, cy: f64, w: f64, h: f64) -> f64 {
-        // Project onto the 4 observed image-plane rows (indices 0,1,3,4).
-        let idx = [0usize, 1, 3, 4];
-        let mut proj_x = [0.0f64; 4];
-        let mut proj_s = SMatrix::<f64, 4, 4>::zeros();
-        let full_s = {
-            let h_mat = Self::observation();
-            let r = self.measurement_noise(false);
-            h_mat * self.p * h_mat.transpose() + r
-        };
-        let z = [cx, cy, w, h];
-        for (a, &ia) in idx.iter().enumerate() {
-            proj_x[a] = z[a] - self.x[ia];
-            for (b, &ib) in idx.iter().enumerate() {
-                proj_s[(a, b)] = full_s[(ia, ib)];
-            }
-        }
-        let d = SVector::<f64, 4>::from_column_slice(&proj_x);
-        match proj_s.try_inverse() {
-            Some(inv) => (d.transpose() * inv * d)[(0, 0)],
-            None => f64::INFINITY,
-        }
-    }
-
     /// Current box centre `(cx, cy)` in the image plane.
     pub fn center(&self) -> (f64, f64) {
         (self.x[0], self.x[1])
@@ -291,21 +264,6 @@ impl KalmanFilter3D {
     /// Current 3D velocity `[vx, vy, vz]`.
     pub fn velocity_3d(&self) -> [f64; 3] {
         [self.x[5], self.x[6], self.x[7]]
-    }
-
-    /// Apply a 2×3 affine warp (row-major) to the image-plane centre & velocity —
-    /// the hook camera-motion compensation ([`crate::gmc`]) uses to re-anchor a
-    /// track after global background motion between frames.
-    pub fn apply_affine(&mut self, m: &[[f32; 3]; 2]) {
-        let (m00, m01, m02) = (m[0][0] as f64, m[0][1] as f64, m[0][2] as f64);
-        let (m10, m11, m12) = (m[1][0] as f64, m[1][1] as f64, m[1][2] as f64);
-        let (x, y) = (self.x[0], self.x[1]);
-        self.x[0] = m00 * x + m01 * y + m02;
-        self.x[1] = m10 * x + m11 * y + m12;
-        // Velocity transforms by the linear (rotation/scale) part only.
-        let (vx, vy) = (self.x[5], self.x[6]);
-        self.x[5] = m00 * vx + m01 * vy;
-        self.x[6] = m10 * vx + m11 * vy;
     }
 }
 
@@ -419,14 +377,5 @@ mod tests {
                 );
             }
         }
-    }
-
-    #[test]
-    fn affine_identity_is_noop() {
-        let mut kf = KalmanFilter3D::new(10.0, 20.0, 5.0, 5.0, None, params());
-        let id = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
-        kf.apply_affine(&id);
-        let (x, y) = kf.center();
-        assert!((x - 10.0).abs() < 1e-9 && (y - 20.0).abs() < 1e-9);
     }
 }

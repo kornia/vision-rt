@@ -1,16 +1,15 @@
-//! The [`BotSort`] tracker: ByteTrack two-stage association over the 3D Kalman
+//! The [`Tracker`] tracker: ByteTrack two-stage association over the 3D Kalman
 //! motion model, with optional appearance fusion and a camera-motion hook.
 
 use crate::association::{gate_depth, iou_cost_matrix, linear_assignment};
-use crate::gmc::{CameraMotion, NoCameraMotion};
 use crate::kalman::KalmanParams;
 use crate::track::{Track, TrackState, Tracklet};
 use crate::{Detection, TrackError};
 
-/// Configuration for [`BotSort`]. [`Default`] gives BoT-SORT-like defaults tuned
+/// Configuration for [`Tracker`]. [`Default`] gives BoT-SORT-like defaults tuned
 /// for pixel-space boxes.
 #[derive(Debug, Clone)]
-pub struct BotSortConfig {
+pub struct TrackerConfig {
     /// Detections at/above this score enter the **first** (high-confidence)
     /// association stage.
     pub track_high_thresh: f32,
@@ -58,7 +57,7 @@ pub struct BotSortConfig {
     pub depth_gate_abs: f32,
 }
 
-impl Default for BotSortConfig {
+impl Default for TrackerConfig {
     fn default() -> Self {
         Self {
             track_high_thresh: 0.5,
@@ -82,7 +81,7 @@ impl Default for BotSortConfig {
     }
 }
 
-impl BotSortConfig {
+impl TrackerConfig {
     fn validate(&self) -> Result<(), TrackError> {
         let bad = |m: &str| Err(TrackError::InvalidConfig(m.to_string()));
         if !(0.0..=1.0).contains(&self.track_high_thresh)
@@ -104,42 +103,39 @@ impl BotSortConfig {
     }
 }
 
-/// BoT-SORT multi-object tracker. Construct once with [`BotSort::new`], then call
+/// BoT-SORT multi-object tracker. Construct once with [`Tracker::new`], then call
 /// [`update`](Self::update) every frame with that frame's detections.
 ///
 /// ```
-/// use vrt_track::{BotSort, BotSortConfig, Detection};
+/// use vrt_track::{Tracker, TrackerConfig, Detection};
 ///
-/// let mut tracker = BotSort::new(BotSortConfig::default()).unwrap();
+/// let mut tracker = Tracker::new(TrackerConfig::default()).unwrap();
 /// let dets = vec![Detection::new([10.0, 10.0, 40.0, 80.0], 0.9, 0)];
 /// let tracks = tracker.update(&dets); // Vec<Track> with stable ids
 /// let _ = tracks;
 /// ```
-pub struct BotSort {
-    config: BotSortConfig,
+pub struct Tracker {
+    config: TrackerConfig,
     tracks: Vec<Tracklet>,
     next_id: u64,
-    frame_id: u64,
 }
 
-impl BotSort {
+impl Tracker {
     /// Build a tracker. Returns [`TrackError::InvalidConfig`] on a nonsensical
     /// configuration.
-    pub fn new(config: BotSortConfig) -> Result<Self, TrackError> {
+    pub fn new(config: TrackerConfig) -> Result<Self, TrackError> {
         config.validate()?;
         Ok(Self {
             config,
             tracks: Vec::new(),
             next_id: 1,
-            frame_id: 0,
         })
     }
 
-    /// Drop all tracks and reset ids/frame counter.
+    /// Drop all tracks and reset ids.
     pub fn reset(&mut self) {
         self.tracks.clear();
         self.next_id = 1;
-        self.frame_id = 0;
     }
 
     /// Read-only view of every live (`Confirmed`/`Lost`/`Tentative`) track.
@@ -164,30 +160,18 @@ impl BotSort {
         self.len() == 0
     }
 
-    /// Advance one frame (fixed cadence, `dt = 1`) with no camera-motion compensation.
+    /// Advance one frame (fixed cadence, `dt = 1`).
     pub fn update(&mut self, detections: &[Detection]) -> Vec<Track> {
-        self.update_with_motion_dt(detections, &mut NoCameraMotion, 1.0)
+        self.step(detections, 1.0)
     }
 
-    /// Advance by a real inter-frame interval `dt` (no camera motion). Pass the
-    /// elapsed time since the previous frame in the same units the [`KalmanParams`]
-    /// are tuned for (nominal frames — e.g. `actual_interval / nominal_interval`), so
-    /// the constant-velocity prediction stays consistent under variable fps and
-    /// dropped frames. `dt = 1.0` is identical to [`update`](Self::update).
+    /// Advance by a real inter-frame interval `dt`. Pass the elapsed time since the
+    /// previous frame in the same units the [`KalmanParams`] are tuned for (nominal
+    /// frames — e.g. `actual_interval / nominal_interval`), so the constant-velocity
+    /// prediction stays consistent under variable fps and dropped frames. `dt = 1.0`
+    /// is identical to [`update`](Self::update).
     pub fn update_dt(&mut self, detections: &[Detection], dt: f64) -> Vec<Track> {
-        self.update_with_motion_dt(detections, &mut NoCameraMotion, dt)
-    }
-
-    /// Advance one frame (`dt = 1`), re-anchoring track predictions through the
-    /// affine warp from `gmc` (global/camera motion compensation).
-    ///
-    /// Returns the tracks that are **confirmed and matched this frame**.
-    pub fn update_with_motion(
-        &mut self,
-        detections: &[Detection],
-        gmc: &mut dyn CameraMotion,
-    ) -> Vec<Track> {
-        self.update_with_motion_dt(detections, gmc, 1.0)
+        self.step(detections, dt)
     }
 
     /// Depth-gate one stage's cost matrix in place (no-op when `depth_gate` is off):
@@ -222,17 +206,10 @@ impl BotSort {
         );
     }
 
-    /// Advance by `dt` time units with camera-motion compensation — the full entry
-    /// point ([`update`](Self::update) / [`update_dt`](Self::update_dt) /
-    /// [`update_with_motion`](Self::update_with_motion) delegate here). `dt` scales
-    /// the Kalman predict; the lifecycle counters still advance per frame.
-    pub fn update_with_motion_dt(
-        &mut self,
-        detections: &[Detection],
-        gmc: &mut dyn CameraMotion,
-        dt: f64,
-    ) -> Vec<Track> {
-        self.frame_id += 1;
+    /// The core update — [`update`](Self::update) / [`update_dt`](Self::update_dt)
+    /// delegate here. `dt` scales the Kalman predict; the lifecycle counters still
+    /// advance per frame.
+    fn step(&mut self, detections: &[Detection], dt: f64) -> Vec<Track> {
         let cfg = self.config.clone();
 
         // Partition detections by confidence.
@@ -246,12 +223,10 @@ impl BotSort {
             }
         }
 
-        // Predict every live track, then apply the camera-motion warp.
-        let affine = gmc.warp(self.frame_id);
+        // Predict every live track forward by `dt`.
         for t in &mut self.tracks {
             if t.state != TrackState::Removed {
                 t.predict(dt);
-                t.kf.apply_affine(&affine);
             }
         }
 
