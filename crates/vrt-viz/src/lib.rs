@@ -28,8 +28,8 @@ pub use trail::TrailStore;
 pub enum VizError {
     #[error(transparent)]
     Image(#[from] ImageError),
-    #[error("jpeg encode: {0}")]
-    Jpeg(String),
+    #[error("encode: {0}")]
+    Encode(String),
     #[error(transparent)]
     Io(#[from] std::io::Error),
 }

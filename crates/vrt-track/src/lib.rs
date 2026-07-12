@@ -41,15 +41,16 @@
 
 pub mod association;
 pub mod botsort;
-pub mod camera;
 pub mod gmc;
 pub mod kalman;
 pub mod track;
 
+pub use association::iou;
 pub use botsort::{BotSort, BotSortConfig};
-pub use camera::CameraIntrinsics;
 pub use kalman::{KalmanFilter3D, KalmanParams};
 pub use track::{Track, TrackState};
+// Camera intrinsics live in the shared `vrt-types` leaf; re-exported for convenience.
+pub use vrt_types::CameraIntrinsics;
 
 /// Errors from tracker construction / configuration.
 #[derive(Debug, thiserror::Error)]

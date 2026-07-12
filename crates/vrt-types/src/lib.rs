@@ -10,6 +10,10 @@
 //! - [`Detection`] — a detected object: COCO class + score + `xyxy` box in source pixels.
 //! - [`Mask`] — a binary instance mask (`Image<u8,1>`, `1` = foreground), host or device.
 //! - [`DepthImage`] — a **metric** depth map in meters (`Image<f32,1>`), host or device.
+//! - [`CameraIntrinsics`] — pinhole `fx,fy,cx,cy` + `unproject` (pixel+depth → metres).
+
+pub mod camera;
+pub use camera::CameraIntrinsics;
 
 use std::ops::{Deref, DerefMut};
 use std::sync::{Arc, Mutex, OnceLock};

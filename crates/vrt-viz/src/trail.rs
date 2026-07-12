@@ -1,6 +1,6 @@
 //! Per-track metric-position history for drawing motion trails in the BEV.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 use vrt_track::{CameraIntrinsics, Track, TrackState};
 
@@ -8,7 +8,7 @@ const MAX_LEN: usize = 48; // points kept per trail
 const TTL: u32 = 30; // frames a trail survives after a track is last seen
 
 struct Trail {
-    pts: Vec<[f32; 2]>, // metric (X, Z)
+    pts: VecDeque<[f32; 2]>, // metric (X, Z), ring buffer (O(1) push/pop)
     last: u32,
 }
 
@@ -34,12 +34,12 @@ impl TrailStore {
         for t in tracks.iter().filter(|t| t.state == TrackState::Confirmed) {
             let [x, _, z] = t.metric_position(intr);
             let e = self.trails.entry(t.id).or_insert_with(|| Trail {
-                pts: Vec::new(),
+                pts: VecDeque::new(),
                 last: f,
             });
-            e.pts.push([x, z]);
+            e.pts.push_back([x, z]);
             if e.pts.len() > MAX_LEN {
-                e.pts.remove(0);
+                e.pts.pop_front();
             }
             e.last = f;
         }
@@ -47,7 +47,7 @@ impl TrailStore {
     }
 
     /// The metric `(X, Z)` history for a track id (oldest → newest), if any.
-    pub fn get(&self, id: u64) -> Option<&[[f32; 2]]> {
-        self.trails.get(&id).map(|t| t.pts.as_slice())
+    pub fn get(&self, id: u64) -> Option<&VecDeque<[f32; 2]>> {
+        self.trails.get(&id).map(|t| &t.pts)
     }
 }

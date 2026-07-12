@@ -218,18 +218,3 @@ fn font5x7(ch: char) -> Option<[u8; 7]> {
         _ => return None,
     })
 }
-
-/// IoU of two `[x1,y1,x2,y2]` boxes.
-pub fn iou(a: &[f32; 4], b: &[f32; 4]) -> f32 {
-    let (ix1, iy1) = (a[0].max(b[0]), a[1].max(b[1]));
-    let (ix2, iy2) = (a[2].min(b[2]), a[3].min(b[3]));
-    let inter = (ix2 - ix1).max(0.0) * (iy2 - iy1).max(0.0);
-    let ua = (a[2] - a[0]).max(0.0) * (a[3] - a[1]).max(0.0);
-    let ub = (b[2] - b[0]).max(0.0) * (b[3] - b[1]).max(0.0);
-    let uni = ua + ub - inter;
-    if uni <= 0.0 {
-        0.0
-    } else {
-        inter / uni
-    }
-}

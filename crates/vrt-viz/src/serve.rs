@@ -14,10 +14,14 @@ content='width=device-width,initial-scale=1'><style>body{margin:0;background:#11
 img{display:block;width:100%;height:auto}</style></head><body>\
 <img src=/main><img src=/bev></body></html>";
 
+/// A shared latest-JPEG slot: the inner `Arc<Vec<u8>>` lets a client clone the frame
+/// with a refcount bump (not a deep copy) and drop the lock immediately.
+type Slot = Arc<Mutex<Arc<Vec<u8>>>>;
+
 /// A running MJPEG server. Clone-free handle over the two shared latest-JPEG slots.
 pub struct MjpegServer {
-    main: Arc<Mutex<Vec<u8>>>,
-    bev: Arc<Mutex<Vec<u8>>>,
+    main: Slot,
+    bev: Slot,
 }
 
 impl MjpegServer {
@@ -25,9 +29,9 @@ impl MjpegServer {
     /// on background threads.
     pub fn spawn(port: u16) -> std::io::Result<Self> {
         let listener = TcpListener::bind(("0.0.0.0", port))?;
-        let (main, bev) = (
-            Arc::new(Mutex::new(Vec::new())),
-            Arc::new(Mutex::new(Vec::new())),
+        let (main, bev): (Slot, Slot) = (
+            Arc::new(Mutex::new(Arc::new(Vec::new()))),
+            Arc::new(Mutex::new(Arc::new(Vec::new()))),
         );
         let (m, b) = (main.clone(), bev.clone());
         std::thread::spawn(move || {
@@ -41,19 +45,16 @@ impl MjpegServer {
         Ok(Self { main, bev })
     }
 
-    /// Publish the latest encoded JPEG for each stream (call every frame).
+    /// Publish the latest encoded JPEG for each stream (call every frame). Swaps in a
+    /// new `Arc` under the lock — no copy.
     pub fn publish(&self, main_jpeg: Vec<u8>, bev_jpeg: Vec<u8>) {
-        *self.main.lock().unwrap_or_else(|e| e.into_inner()) = main_jpeg;
-        *self.bev.lock().unwrap_or_else(|e| e.into_inner()) = bev_jpeg;
+        *self.main.lock().unwrap_or_else(|e| e.into_inner()) = Arc::new(main_jpeg);
+        *self.bev.lock().unwrap_or_else(|e| e.into_inner()) = Arc::new(bev_jpeg);
     }
 }
 
 /// Route one client by request path: `/main` / `/bev` stream MJPEG, else the index.
-fn serve_client(
-    mut s: TcpStream,
-    main: &Arc<Mutex<Vec<u8>>>,
-    bev: &Arc<Mutex<Vec<u8>>>,
-) -> std::io::Result<()> {
+fn serve_client(mut s: TcpStream, main: &Slot, bev: &Slot) -> std::io::Result<()> {
     let mut req = [0u8; 1024];
     let n = s.read(&mut req).unwrap_or(0);
     let path = std::str::from_utf8(&req[..n])

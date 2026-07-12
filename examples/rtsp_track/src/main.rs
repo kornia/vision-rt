@@ -148,21 +148,18 @@ fn main() -> Res<()> {
         trails.update(&tracks, &intr); // accumulate BEV motion trails
 
         // ── viz (vrt-viz): render main + BEV, then serve / record / dump ──
+        // Only one of the three sinks is active per run; each renders the same pair.
         if let Some((server, jenc)) = &server {
-            let (rgb, insts) = host_frame_and_masks(&frame, &stream, &d)?;
-            let masks = overlays(&insts);
-            let main = render_main(&rgb, w, h, &masks, &tracks);
-            let bev = render_bev(&tracks, &intr, BEV_W, BEV_H, Some(&trails));
+            let (main, bev) = render_pair(&frame, &stream, &d, w, h, &tracks, &intr, &trails)?;
             let r = Instant::now();
-            server.publish(jenc.encode(&main, w, h)?, jenc.encode(&bev, BEV_W, BEV_H)?);
+            server.publish(jenc.encode(main, w, h)?, jenc.encode(bev, BEV_W, BEV_H)?);
             a_render += ms(r - t6);
             a_enc += ms(Instant::now() - r);
         } else if record {
             if t_start.elapsed().as_secs_f64() < rec_secs {
                 if n.is_multiple_of(2) {
-                    let (rgb, insts) = host_frame_and_masks(&frame, &stream, &d)?;
-                    let main = render_main(&rgb, w, h, &overlays(&insts), &tracks);
-                    let bev = render_bev(&tracks, &intr, BEV_W, BEV_H, Some(&trails));
+                    let (main, bev) =
+                        render_pair(&frame, &stream, &d, w, h, &tracks, &intr, &trails)?;
                     let (st, sw, sh) = stack_v(&main, w, h, &bev, BEV_W, BEV_H);
                     gif_frames.push(downscale(&st, sw, sh, gw, gh));
                 }
@@ -172,9 +169,7 @@ fn main() -> Res<()> {
                 break;
             }
         } else if let Some(path) = out.take_if(|_| n == 60) {
-            let (rgb, insts) = host_frame_and_masks(&frame, &stream, &d)?;
-            let main = render_main(&rgb, w, h, &overlays(&insts), &tracks);
-            let bev = render_bev(&tracks, &intr, BEV_W, BEV_H, Some(&trails));
+            let (main, bev) = render_pair(&frame, &stream, &d, w, h, &tracks, &intr, &trails)?;
             let (st, sw, sh) = stack_v(&main, w, h, &bev, BEV_W, BEV_H);
             encode_png(&path, &st, sw, sh)?;
             println!("     saved overlay → {path}");
@@ -237,27 +232,32 @@ fn main() -> Res<()> {
     Ok(())
 }
 
-/// Host-copy the device frame + decode the instance masks (the GPU/model-specific
-/// part the viz crate does not do).
-fn host_frame_and_masks(
+/// The GPU/model-specific bridge to `vrt-viz`: host-copy the device frame, decode the
+/// instance masks, and render the main + BEV pair (owned buffers the caller consumes).
+#[allow(clippy::too_many_arguments)]
+fn render_pair(
     frame: &sensor_rtsp::Frame,
     stream: &std::sync::Arc<cudarc::driver::CudaStream>,
     d: &vrt_rfdetr_seg::SegResult,
-) -> Res<(Vec<u8>, Vec<vrt_rfdetr_seg::Instance>)> {
+    w: usize,
+    h: usize,
+    tracks: &[vrt_track::Track],
+    intr: &CameraIntrinsics,
+    trails: &TrailStore,
+) -> Res<(Vec<u8>, Vec<u8>)> {
     let host = frame.image().to_host(stream)?;
-    Ok((host.as_slice().to_vec(), d.instances()?))
-}
-
-/// Borrow instances as `vrt_viz::MaskOverlay`s for rendering.
-fn overlays(insts: &[vrt_rfdetr_seg::Instance]) -> Vec<MaskOverlay<'_>> {
-    insts
+    let insts = d.instances()?;
+    let masks: Vec<MaskOverlay> = insts
         .iter()
         .map(|i| MaskOverlay {
             mask: &i.mask,
             mask_wh: i.mask_size,
             bbox: i.bbox,
         })
-        .collect()
+        .collect();
+    let main = render_main(host.as_slice().to_vec(), w, h, &masks, tracks);
+    let bev = render_bev(tracks, intr, BEV_W, BEV_H, Some(trails));
+    Ok((main, bev))
 }
 
 /// Parse the output arg into an MJPEG server port: `serve` → 8080, `:PORT` → PORT.

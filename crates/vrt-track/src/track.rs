@@ -1,9 +1,9 @@
 //! Track lifecycle: the internal [`Tracklet`] (Kalman + bookkeeping) and the
 //! public [`Track`] snapshot returned to callers.
 
-use crate::camera::CameraIntrinsics;
 use crate::kalman::{KalmanFilter3D, KalmanParams};
 use crate::Detection;
+use vrt_types::CameraIntrinsics;
 
 /// Lifecycle stage of a track.
 ///

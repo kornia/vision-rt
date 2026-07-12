@@ -1,22 +1,22 @@
 //! Frame renderers: the annotated main view and the top-down floor-plan BEV.
 
-use vrt_track::{CameraIntrinsics, Track, TrackState};
+use vrt_track::{iou, CameraIntrinsics, Track, TrackState};
 
 use crate::draw::*;
 use crate::trail::TrailStore;
 use crate::{track_color, MaskOverlay};
 
-/// Render the **main** view: copy the host `rgb` frame, tint each mask in its track's
-/// id colour (matched by box IoU; unmatched → grey), outline the track box +
-/// `<id> <depth>m` label. Returns a new `w×h` RGB buffer.
+/// Render the **main** view onto the host `rgb` frame (consumed in place, no copy):
+/// tint each mask in its track's id colour (matched by box IoU; unmatched → grey),
+/// outline the track box + `<id> <depth>m` label. Returns the annotated buffer.
 pub fn render_main(
-    rgb: &[u8],
+    rgb: Vec<u8>,
     w: usize,
     h: usize,
     masks: &[MaskOverlay],
     tracks: &[Track],
 ) -> Vec<u8> {
-    let mut buf = rgb.to_vec();
+    let mut buf = rgb;
     let confirmed: Vec<&Track> = tracks
         .iter()
         .filter(|t| t.state == TrackState::Confirmed)

@@ -24,3 +24,5 @@ appearance = []
 # the workspace lock (pulled by kornia), so it adds no new download.
 nalgebra = { version = "0.35", default-features = false, features = ["std"] }
 thiserror = "2.0"
+# Shared `CameraIntrinsics` (and the rest of the vision-rt type vocabulary).
+vrt-types = { path = "../vrt-types" }

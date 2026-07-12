@@ -20,13 +20,13 @@ impl JpegEncoder {
         #[cfg(feature = "turbojpeg")]
         {
             let inner = kornia_io::jpegturbo::JpegTurboEncoder::new()
-                .map_err(|e| VizError::Jpeg(e.to_string()))?;
+                .map_err(|e| VizError::Encode(e.to_string()))?;
             inner
                 .set_quality(quality as i32)
-                .map_err(|e| VizError::Jpeg(e.to_string()))?;
+                .map_err(|e| VizError::Encode(e.to_string()))?;
             inner
                 .set_subsamp(turbojpeg::Subsamp::Sub2x2)
-                .map_err(|e| VizError::Jpeg(e.to_string()))?;
+                .map_err(|e| VizError::Encode(e.to_string()))?;
             Ok(Self { inner })
         }
         #[cfg(not(feature = "turbojpeg"))]
@@ -35,26 +35,27 @@ impl JpegEncoder {
         }
     }
 
-    /// Encode a host RGB buffer to JPEG bytes.
-    pub fn encode(&self, rgb: &[u8], w: usize, h: usize) -> Result<Vec<u8>, VizError> {
+    /// Encode a host RGB buffer to JPEG bytes. Takes the buffer by value so the render
+    /// output moves straight into the encode with no per-frame copy.
+    pub fn encode(&self, rgb: Vec<u8>, w: usize, h: usize) -> Result<Vec<u8>, VizError> {
         let img = Image::<u8, 3>::new(
             ImageSize {
                 width: w,
                 height: h,
             },
-            rgb.to_vec(),
+            rgb,
         )?;
         #[cfg(feature = "turbojpeg")]
         {
             self.inner
                 .encode_rgb8(&img)
-                .map_err(|e| VizError::Jpeg(e.to_string()))
+                .map_err(|e| VizError::Encode(e.to_string()))
         }
         #[cfg(not(feature = "turbojpeg"))]
         {
             let mut out = Vec::new();
             kornia_io::jpeg::encode_image_jpeg_rgb8(&img, self.quality, &mut out)
-                .map_err(|e| VizError::Jpeg(e.to_string()))?;
+                .map_err(|e| VizError::Encode(e.to_string()))?;
             Ok(out)
         }
     }
@@ -69,7 +70,8 @@ pub fn encode_png(path: &str, rgb: &[u8], w: usize, h: usize) -> Result<(), VizE
         },
         rgb.to_vec(),
     )?;
-    kornia_io::png::write_image_png_rgb8(path, &img).map_err(|e| VizError::Jpeg(e.to_string()))?;
+    kornia_io::png::write_image_png_rgb8(path, &img)
+        .map_err(|e| VizError::Encode(e.to_string()))?;
     Ok(())
 }
 
@@ -83,14 +85,14 @@ pub fn write_gif(
 ) -> Result<(), VizError> {
     let file = std::fs::File::create(path)?;
     let mut enc = gif::Encoder::new(std::io::BufWriter::new(file), w, h, &[])
-        .map_err(|e| VizError::Jpeg(e.to_string()))?;
+        .map_err(|e| VizError::Encode(e.to_string()))?;
     enc.set_repeat(gif::Repeat::Infinite)
-        .map_err(|e| VizError::Jpeg(e.to_string()))?;
+        .map_err(|e| VizError::Encode(e.to_string()))?;
     for rgb in frames {
         let mut f = gif::Frame::from_rgb_speed(w, h, rgb, 10);
         f.delay = delay_cs;
         enc.write_frame(&f)
-            .map_err(|e| VizError::Jpeg(e.to_string()))?;
+            .map_err(|e| VizError::Encode(e.to_string()))?;
     }
     Ok(())
 }

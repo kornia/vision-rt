@@ -189,6 +189,33 @@ impl BotSort {
         self.update_with_motion_dt(detections, gmc, 1.0)
     }
 
+    /// Depth-gate one stage's cost matrix in place (no-op when `depth_gate` is off):
+    /// build the track (measured pz) and detection depth vectors from the two index
+    /// slices, then reject depth-mismatched pairs. Shared by all three stages.
+    fn gate_stage(
+        &self,
+        cost: &mut [Vec<f64>],
+        track_idx: &[usize],
+        det_idx: &[usize],
+        detections: &[Detection],
+    ) {
+        if !self.config.depth_gate {
+            return;
+        }
+        let track_d: Vec<Option<f32>> = track_idx
+            .iter()
+            .map(|&ti| self.tracks[ti].measured_depth())
+            .collect();
+        let det_d: Vec<Option<f32>> = det_idx.iter().map(|&i| detections[i].depth).collect();
+        gate_depth(
+            cost,
+            &track_d,
+            &det_d,
+            self.config.depth_gate_rel,
+            self.config.depth_gate_abs,
+        );
+    }
+
     /// Advance by `dt` time units with camera-motion compensation — the full entry
     /// point ([`update`](Self::update) / [`update_dt`](Self::update_dt) /
     /// [`update_with_motion`](Self::update_with_motion) delegate here). `dt` scales
@@ -260,20 +287,7 @@ impl BotSort {
         }
         // Depth gate last, so it overrides an appearance rescue on a depth-mismatched
         // pair (two similar-looking objects at different distances).
-        if cfg.depth_gate {
-            let track_d: Vec<Option<f32>> = pool
-                .iter()
-                .map(|&ti| self.tracks[ti].measured_depth())
-                .collect();
-            let det_d: Vec<Option<f32>> = high_det.iter().map(|&i| detections[i].depth).collect();
-            gate_depth(
-                &mut cost1,
-                &track_d,
-                &det_d,
-                cfg.depth_gate_rel,
-                cfg.depth_gate_abs,
-            );
-        }
+        self.gate_stage(&mut cost1, &pool, &high_det, detections);
         let (m1, u_pool, u_high) =
             linear_assignment(&cost1, pool.len(), high_det.len(), cfg.match_thresh as f64);
         for (pi, di) in m1 {
@@ -297,20 +311,7 @@ impl BotSort {
         let low_boxes: Vec<[f32; 4]> = low_det.iter().map(|&i| detections[i].bbox).collect();
         let r_boxes: Vec<[f32; 4]> = r_tracked.iter().map(|&ti| self.tracks[ti].bbox()).collect();
         let mut cost2 = iou_cost_matrix(&r_boxes, &low_boxes);
-        if cfg.depth_gate {
-            let track_d: Vec<Option<f32>> = r_tracked
-                .iter()
-                .map(|&ti| self.tracks[ti].measured_depth())
-                .collect();
-            let det_d: Vec<Option<f32>> = low_det.iter().map(|&i| detections[i].depth).collect();
-            gate_depth(
-                &mut cost2,
-                &track_d,
-                &det_d,
-                cfg.depth_gate_rel,
-                cfg.depth_gate_abs,
-            );
-        }
+        self.gate_stage(&mut cost2, &r_tracked, &low_det, detections);
         let (m2, _u_r, _u_low) = linear_assignment(
             &cost2,
             r_tracked.len(),
@@ -356,23 +357,7 @@ impl BotSort {
                 cfg.proximity_thresh,
             );
         }
-        if cfg.depth_gate {
-            let track_d: Vec<Option<f32>> = unconfirmed
-                .iter()
-                .map(|&ti| self.tracks[ti].measured_depth())
-                .collect();
-            let det_d: Vec<Option<f32>> = remaining_high
-                .iter()
-                .map(|&i| detections[i].depth)
-                .collect();
-            gate_depth(
-                &mut cost3,
-                &track_d,
-                &det_d,
-                cfg.depth_gate_rel,
-                cfg.depth_gate_abs,
-            );
-        }
+        self.gate_stage(&mut cost3, &unconfirmed, &remaining_high, detections);
         let (m3, u_unconf, u_rem) = linear_assignment(
             &cost3,
             unconfirmed.len(),
