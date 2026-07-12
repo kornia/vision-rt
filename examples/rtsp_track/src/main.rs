@@ -48,7 +48,7 @@ const TAPO_C210_HFOV_DEG: f32 = 67.0;
 
 /// Standalone BEV canvas size (matches the 1280-wide main frame so they stack clean).
 const BEV_W: usize = 1280;
-const BEV_H: usize = 420;
+const BEV_H: usize = 640;
 
 type Res<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
@@ -118,6 +118,7 @@ fn main() -> Res<()> {
     // steady fps, >1 after a dropped frame — keeps the Kalman predict consistent
     // under RTSP jitter without retuning the per-frame KalmanParams.
     let (mut prev, mut ema_dt, mut a_dt) = (Instant::now(), 0.0f64, 0.0f64);
+    let (mut a_rmain, mut a_rbev, mut a_enc) = (0.0f64, 0.0, 0.0); // serve-mode render/encode
     loop {
         let t0 = Instant::now();
         let Some(frame) = source.next_frame() else {
@@ -174,12 +175,19 @@ fn main() -> Res<()> {
 
         if serve_port.is_some() {
             // Two independent JPEG streams: main (camera + masks + boxes) and the BEV.
+            let r0 = Instant::now();
             let main = render_main(frame.image(), &stream, &d, &tracks)?;
+            let r1 = Instant::now();
             let bev = render_bev(&tracks, &intr);
-            *latest_main.lock().unwrap_or_else(|e| e.into_inner()) =
-                encode_jpeg(&main, w as usize, h as usize)?;
-            *latest_bev.lock().unwrap_or_else(|e| e.into_inner()) =
-                encode_jpeg(&bev, BEV_W, BEV_H)?;
+            let r2 = Instant::now();
+            let jm = encode_jpeg(&main, w as usize, h as usize)?;
+            let jb = encode_jpeg(&bev, BEV_W, BEV_H)?;
+            let r3 = Instant::now();
+            *latest_main.lock().unwrap_or_else(|e| e.into_inner()) = jm;
+            *latest_bev.lock().unwrap_or_else(|e| e.into_inner()) = jb;
+            a_rmain += ms(r1 - r0);
+            a_rbev += ms(r2 - r1);
+            a_enc += ms(r3 - r2);
         } else if record {
             if t_start.elapsed().as_secs_f64() < rec_secs {
                 if n.is_multiple_of(2) {
@@ -247,6 +255,14 @@ fn main() -> Res<()> {
                 })
                 .collect();
             println!("     tracks: {}", shown.join(", "));
+            if serve_port.is_some() {
+                println!(
+                    "     serve: render_main {:.1} ms | render_bev {:.1} ms | encode×2 {:.1} ms",
+                    a_rmain / k,
+                    a_rbev / k,
+                    a_enc / k,
+                );
+            }
             let _ = std::io::stdout().flush(); // survive a timeout/SIGTERM kill
             a_src = 0.0;
             a_enq = 0.0;
@@ -255,6 +271,9 @@ fn main() -> Res<()> {
             a_read = 0.0;
             a_trk = 0.0;
             a_dt = 0.0;
+            a_rmain = 0.0;
+            a_rbev = 0.0;
+            a_enc = 0.0;
         }
     }
     Ok(())
@@ -326,10 +345,10 @@ fn render_bev(tracks: &[Track], intr: &CameraIntrinsics) -> Vec<u8> {
         }
     }
 
-    let rmax = 8.0f32; // metres
+    let rmax = 6.0f32; // metres (scene is ~2–5 m; keeps the cone filled, not cramped)
     let ax = w as f32 / 2.0;
-    let ay = h as f32 - 22.0; // camera apex
-    let ppm = (ay - 20.0) / rmax; // pixels per metre
+    let ay = h as f32 - 28.0; // camera apex
+    let ppm = (ay - 26.0) / rmax; // pixels per metre
     let k = (intr.cx / intr.fx).max(0.05); // tan(half-FoV)
     let half = k.atan();
     let rpx = rmax * ppm;
@@ -352,7 +371,7 @@ fn render_bev(tracks: &[Track], intr: &CameraIntrinsics) -> Vec<u8> {
 
     // Concentric range arcs (every 2 m) as polylines within the cone + a labels.
     let arc = [44u8, 64, 84];
-    for r_m in [2.0f32, 4.0, 6.0, 8.0] {
+    for r_m in [2.0f32, 4.0, 6.0] {
         let rr = r_m * ppm;
         let mut prev: Option<(i32, i32)> = None;
         for i in 0..=64 {
@@ -669,9 +688,20 @@ const PALETTE: [[u8; 3]; 6] = [
 /// Alpha-tint an instance mask onto the frame (nearest-upsampled from the mask grid).
 fn tint_mask(buf: &mut [u8], w: usize, h: usize, inst: &Instance, color: [u8; 3]) {
     let (mw, mh) = inst.mask_size;
-    for y in 0..h {
+    // Iterate only the instance's bbox (its mask foreground lives inside it), not the
+    // whole frame — ~10× fewer pixels per mask on the serve/render hot path.
+    let [bx1, by1, bx2, by2] = inst.bbox;
+    let (x0, x1) = (
+        (bx1.max(0.0) as usize).min(w),
+        (bx2.ceil().max(0.0) as usize).min(w),
+    );
+    let (y0, y1) = (
+        (by1.max(0.0) as usize).min(h),
+        (by2.ceil().max(0.0) as usize).min(h),
+    );
+    for y in y0..y1 {
         let my = (y * mh) / h;
-        for x in 0..w {
+        for x in x0..x1 {
             let mx = (x * mw) / w;
             if inst.mask[my * mw + mx] == 1 {
                 let o = (y * w + x) * 3;
