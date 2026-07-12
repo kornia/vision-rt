@@ -165,7 +165,7 @@ fn main() -> Res<()> {
 
         if serve_port.is_some() {
             // Encode the annotated frame to JPEG (kornia-io) and hand it to the server.
-            let buf = annotate(frame.image(), &stream, &d, &tracks)?;
+            let buf = annotate(frame.image(), &stream, &d, &tracks, &intr)?;
             let img = Image::<u8, 3>::new(
                 ImageSize {
                     width: w as usize,
@@ -180,7 +180,7 @@ fn main() -> Res<()> {
             if t_start.elapsed().as_secs_f64() < rec_secs {
                 if n.is_multiple_of(2) {
                     // ~7.5 captured/s → real-time playback at 13 cs delay.
-                    let buf = annotate(frame.image(), &stream, &d, &tracks)?;
+                    let buf = annotate(frame.image(), &stream, &d, &tracks, &intr)?;
                     gif_frames.push(downscale(&buf, w as usize, h as usize, gw, gh));
                 }
             } else if let Some(path) = out_png.take() {
@@ -188,7 +188,7 @@ fn main() -> Res<()> {
                 break;
             }
         } else if let Some(path) = out_png.take_if(|_| n == 60) {
-            save_overlay(&path, frame.image(), &stream, &d, &tracks)?;
+            save_overlay(&path, frame.image(), &stream, &d, &tracks, &intr)?;
         }
 
         n += 1;
@@ -254,35 +254,129 @@ fn main() -> Res<()> {
     Ok(())
 }
 
-/// Host-copy the frame, tint instance masks (scene context), then draw each
-/// confirmed track's box coloured by id with an `<id> <depth>m` label. Returns the
-/// annotated full-resolution RGB buffer.
+/// Colour of a confirmed track by its id.
+fn track_color(id: u64) -> [u8; 3] {
+    PALETTE[(id as usize) % PALETTE.len()]
+}
+
+/// Host-copy the frame; tint each instance mask in **its track's id colour** (matched
+/// by box IoU), outline the track box + `<id> <depth>m` label, and draw a top-down
+/// **BEV mini-map** of the tracks' metric X–Z. Returns the annotated RGB buffer.
 fn annotate(
     frame: &Image<u8, 3>,
     stream: &std::sync::Arc<cudarc::driver::CudaStream>,
     d: &vrt_rfdetr_seg::SegResult,
     tracks: &[Track],
+    intr: &CameraIntrinsics,
 ) -> Res<Vec<u8>> {
     let (w, h) = (frame.width(), frame.height());
     let host = frame.to_host(stream)?;
     let mut buf = host.as_slice().to_vec();
 
-    // Faint mask tint for scene context (neutral grey — identity is the track box).
+    let confirmed: Vec<&Track> = tracks
+        .iter()
+        .filter(|t| t.state == TrackState::Confirmed)
+        .collect();
+
+    // Colour each mask by the id of the track it belongs to (best box-IoU match);
+    // unmatched masks fall back to a neutral tint.
     for inst in &d.instances()? {
-        tint_mask(&mut buf, w, h, inst, [90, 90, 90]);
+        let color = confirmed
+            .iter()
+            .map(|t| (iou(&t.bbox, &inst.bbox), t.id))
+            .filter(|&(io, _)| io > 0.2)
+            .max_by(|a, b| a.0.total_cmp(&b.0))
+            .map(|(_, id)| track_color(id))
+            .unwrap_or([110, 110, 110]);
+        tint_mask(&mut buf, w, h, inst, color);
     }
-    // Tracked boxes coloured by id + `<id> <depth>m` label.
-    for t in tracks {
-        if t.state != TrackState::Confirmed {
-            continue;
-        }
-        let color = PALETTE[(t.id as usize) % PALETTE.len()];
+    // Track boxes + `<id> <depth>m` label, coloured by id.
+    for t in &confirmed {
+        let color = track_color(t.id);
         draw_box(&mut buf, w, h, t.bbox, color);
         let [x1, y1, ..] = t.bbox;
         let label = format!("{} {:.1}m", t.id, t.position_3d[2]);
         draw_label(&mut buf, w, h, x1 as i32 + 2, y1 as i32 + 2, &label, color);
     }
+    draw_bev(&mut buf, w, h, &confirmed, intr);
     Ok(buf)
+}
+
+/// Bird's-eye-view mini-map (top-down metric X–Z) in the top-right corner: the camera
+/// sits at the bottom-centre looking "up" the panel; each track is a dot at its metric
+/// `(X, Z)` coloured by id, over a 1 m grid. Range: X ∈ [−3, 3] m, Z ∈ [0, 6] m.
+fn draw_bev(buf: &mut [u8], w: usize, h: usize, tracks: &[&Track], intr: &CameraIntrinsics) {
+    const PW: usize = 300;
+    const PH: usize = 260;
+    const MARGIN: usize = 12;
+    let (ox, oy) = (w.saturating_sub(PW + MARGIN), MARGIN);
+    let (xmin, xmax, zmax) = (-3.0f32, 3.0f32, 6.0f32);
+
+    // Darkened panel backing.
+    for y in oy..(oy + PH).min(h) {
+        for x in ox..(ox + PW).min(w) {
+            let o = (y * w + x) * 3;
+            for k in 0..3 {
+                buf[o + k] = (buf[o + k] as u16 * 2 / 10) as u8;
+            }
+        }
+    }
+    let map = |x_m: f32, z_m: f32| -> (i32, i32) {
+        let px = ox as f32 + (x_m - xmin) / (xmax - xmin) * PW as f32;
+        let py = oy as f32 + PH as f32 - (z_m / zmax) * PH as f32; // Z=0 bottom, far up
+        (px as i32, py as i32)
+    };
+    let grid = [70u8, 70, 70];
+    // Z rings (horizontal lines) every 1 m + label.
+    for zi in 1..=zmax as i32 {
+        let (_, y) = map(0.0, zi as f32);
+        draw_line(buf, w, h, ox as i32, y, (ox + PW) as i32, y, grid);
+        draw_label(buf, w, h, ox as i32 + 2, y - 8, &format!("{zi}m"), grid);
+    }
+    // X grid (vertical lines) every 1 m.
+    for xi in xmin as i32..=xmax as i32 {
+        let (x, _) = map(xi as f32, 0.0);
+        draw_line(buf, w, h, x, oy as i32, x, (oy + PH) as i32, grid);
+    }
+    // Camera marker at (0, 0) bottom-centre.
+    let (cxp, cyp) = map(0.0, 0.0);
+    fill_dot(buf, w, h, cxp, cyp - 2, 3, [230, 230, 230]);
+    // Each track: a coloured dot at its metric (X, Z) + id.
+    for t in tracks {
+        let [x_m, _, z_m] = t.metric_position(intr);
+        if z_m <= 0.0 || z_m > zmax || x_m < xmin || x_m > xmax {
+            continue;
+        }
+        let (px, py) = map(x_m, z_m);
+        let c = track_color(t.id);
+        fill_dot(buf, w, h, px, py, 4, c);
+        draw_label(buf, w, h, px + 5, py - 6, &format!("{}", t.id), c);
+    }
+}
+
+/// Fill a small square dot (radius `r`) centred at `(cx, cy)`, clipped to the frame.
+fn fill_dot(buf: &mut [u8], w: usize, h: usize, cx: i32, cy: i32, r: i32, color: [u8; 3]) {
+    for y in (cy - r).max(0)..(cy + r + 1).min(h as i32) {
+        for x in (cx - r).max(0)..(cx + r + 1).min(w as i32) {
+            let o = (y as usize * w + x as usize) * 3;
+            buf[o..o + 3].copy_from_slice(&color);
+        }
+    }
+}
+
+/// IoU of two `[x1,y1,x2,y2]` boxes (for matching masks to tracks).
+fn iou(a: &[f32; 4], b: &[f32; 4]) -> f32 {
+    let (ix1, iy1) = (a[0].max(b[0]), a[1].max(b[1]));
+    let (ix2, iy2) = (a[2].min(b[2]), a[3].min(b[3]));
+    let inter = (ix2 - ix1).max(0.0) * (iy2 - iy1).max(0.0);
+    let ua = (a[2] - a[0]).max(0.0) * (a[3] - a[1]).max(0.0);
+    let ub = (b[2] - b[0]).max(0.0) * (b[3] - b[1]).max(0.0);
+    let uni = ua + ub - inter;
+    if uni <= 0.0 {
+        0.0
+    } else {
+        inter / uni
+    }
 }
 
 /// Annotate one frame and write it as a PNG.
@@ -292,9 +386,10 @@ fn save_overlay(
     stream: &std::sync::Arc<cudarc::driver::CudaStream>,
     d: &vrt_rfdetr_seg::SegResult,
     tracks: &[Track],
+    intr: &CameraIntrinsics,
 ) -> Res<()> {
     let (w, h) = (frame.width(), frame.height());
-    let buf = annotate(frame, stream, d, tracks)?;
+    let buf = annotate(frame, stream, d, tracks, intr)?;
     let img = Image::<u8, 3>::new(
         ImageSize {
             width: w,
