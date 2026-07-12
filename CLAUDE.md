@@ -88,6 +88,21 @@ cameras without explicit multi-camera re-ID. For genlocked/same-fps cameras C is
 clean; for truly async cameras **A usually wins** (batching's launch-overhead payoff
 is small next to the model compute).
 
+**Unified multi-camera view (shared BEV / cross-camera tracking).** Patterns A/B/C
+run **independent per-camera pipelines** — each camera its own `Undistorter` (its own
+intrinsics + `k1`), models, `BotSort`, and *camera-frame* metric-3D. To fuse cameras
+into **one coordinate system** you need each camera's **pose (extrinsics)**: the
+enabler is `vrt_types::CameraExtrinsics { r, t }` (camera→world) + `Track::world_position(intr, extr)`
+(`IDENTITY` = single-camera, world == camera frame). Supply each camera's real pose
+(from a calibration/survey) → every camera's tracks live in one world frame, which is
+the basis for (a) a **shared world-frame BEV** (`render_bev` on world positions rather
+than per-camera camera-frame), and (b) **cross-camera re-ID** — match tracks across
+cameras by world-position proximity in overlapping FoV (geometry), or by appearance
+(the `appearance` ReID hook) for non-overlapping views. Per-camera IDs stay local
+until that association runs. The **crate DAG is already multi-cam-ready** (everything
+is per-instance; `vrt-types` leaf ← `vrt-track` ← `vrt-viz`) — multi-cam is a driver
+that instantiates N pipelines + supplies poses, not a rework.
+
 ## Hard constraints
 
 - **RAM 7.4 GB (Orin Nano): build with `-j2` / `CARGO_BUILD_JOBS=2`** — parallel
