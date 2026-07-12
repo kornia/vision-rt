@@ -69,6 +69,12 @@ fn main() -> Res<()> {
     let mut tracker = BotSort::new(BotSortConfig::default())?;
     // Intrinsics for the metric-3D readout (back-project px,py,pz → X,Y,Z metres).
     let intr = CameraIntrinsics::from_hfov(w as f32, h as f32, TAPO_C210_HFOV_DEG);
+
+    // Clip recording: if the out arg is a `.gif`, capture ~10 s of annotated frames
+    // (downscaled, every 2nd frame) then write an animated GIF and exit.
+    let record = out_png.as_deref().is_some_and(|p| p.ends_with(".gif"));
+    let (gw, gh, rec_secs) = (640usize, 360usize, 10.0);
+    let mut gif_frames: Vec<Vec<u8>> = Vec::new();
     // Reused per-frame detection buffer (cleared, not reallocated).
     let mut dets: Vec<Detection> = Vec::new();
 
@@ -136,7 +142,18 @@ fn main() -> Res<()> {
         let tracks = tracker.update_dt(&dets, dt);
         let t6 = Instant::now();
 
-        if let Some(path) = out_png.take_if(|_| n == 60) {
+        if record {
+            if t_start.elapsed().as_secs_f64() < rec_secs {
+                if n.is_multiple_of(2) {
+                    // ~7.5 captured/s → real-time playback at 13 cs delay.
+                    let buf = annotate(frame.image(), &stream, &d, &tracks)?;
+                    gif_frames.push(downscale(&buf, w as usize, h as usize, gw, gh));
+                }
+            } else if let Some(path) = out_png.take() {
+                write_gif(&path, &gif_frames, gw as u16, gh as u16, 13)?;
+                break;
+            }
+        } else if let Some(path) = out_png.take_if(|_| n == 60) {
             save_overlay(&path, frame.image(), &stream, &d, &tracks)?;
         }
 
@@ -169,7 +186,11 @@ fn main() -> Res<()> {
             );
             // A few live tracks with their metric 3D position + speed. `metric_velocity`
             // is per nominal frame; divide by seconds/frame (the EMA interval) for m/s.
-            let spf = if ema_dt > 0.0 { ema_dt as f32 } else { 1.0 / 15.0 };
+            let spf = if ema_dt > 0.0 {
+                ema_dt as f32
+            } else {
+                1.0 / 15.0
+            };
             let shown: Vec<String> = tracks
                 .iter()
                 .filter(|t| t.state == TrackState::Confirmed)
@@ -199,8 +220,38 @@ fn main() -> Res<()> {
     Ok(())
 }
 
-/// Host-copy the frame, tint instance masks (context), then draw each confirmed
-/// track's box coloured by id with an `<id> <depth>m` label. One PNG.
+/// Host-copy the frame, tint instance masks (scene context), then draw each
+/// confirmed track's box coloured by id with an `<id> <depth>m` label. Returns the
+/// annotated full-resolution RGB buffer.
+fn annotate(
+    frame: &Image<u8, 3>,
+    stream: &std::sync::Arc<cudarc::driver::CudaStream>,
+    d: &vrt_rfdetr_seg::SegResult,
+    tracks: &[Track],
+) -> Res<Vec<u8>> {
+    let (w, h) = (frame.width(), frame.height());
+    let host = frame.to_host(stream)?;
+    let mut buf = host.as_slice().to_vec();
+
+    // Faint mask tint for scene context (neutral grey — identity is the track box).
+    for inst in &d.instances()? {
+        tint_mask(&mut buf, w, h, inst, [90, 90, 90]);
+    }
+    // Tracked boxes coloured by id + `<id> <depth>m` label.
+    for t in tracks {
+        if t.state != TrackState::Confirmed {
+            continue;
+        }
+        let color = PALETTE[(t.id as usize) % PALETTE.len()];
+        draw_box(&mut buf, w, h, t.bbox, color);
+        let [x1, y1, ..] = t.bbox;
+        let label = format!("{} {:.1}m", t.id, t.position_3d[2]);
+        draw_label(&mut buf, w, h, x1 as i32 + 2, y1 as i32 + 2, &label, color);
+    }
+    Ok(buf)
+}
+
+/// Annotate one frame and write it as a PNG.
 fn save_overlay(
     path: &str,
     frame: &Image<u8, 3>,
@@ -209,27 +260,7 @@ fn save_overlay(
     tracks: &[Track],
 ) -> Res<()> {
     let (w, h) = (frame.width(), frame.height());
-    let host = frame.to_host(stream)?;
-    let mut buf = host.as_slice().to_vec();
-
-    // Faint mask tint for scene context (neutral grey — identity is the track box).
-    let instances = d.instances()?;
-    for inst in &instances {
-        tint_mask(&mut buf, w, h, inst, [90, 90, 90]);
-    }
-    // Tracked boxes coloured by id + `<id> <depth>m` label.
-    let mut shown = 0;
-    for t in tracks {
-        if t.state != TrackState::Confirmed {
-            continue;
-        }
-        shown += 1;
-        let color = PALETTE[(t.id as usize) % PALETTE.len()];
-        draw_box(&mut buf, w, h, t.bbox, color);
-        let [x1, y1, ..] = t.bbox;
-        let label = format!("{} {:.1}m", t.id, t.position_3d[2]);
-        draw_label(&mut buf, w, h, x1 as i32 + 2, y1 as i32 + 2, &label, color);
-    }
+    let buf = annotate(frame, stream, d, tracks)?;
     let img = Image::<u8, 3>::new(
         ImageSize {
             width: w,
@@ -238,7 +269,35 @@ fn save_overlay(
         buf,
     )?;
     write_image_png_rgb8(path, &img)?;
-    println!("     saved tracked overlay → {path} ({shown} confirmed tracks)");
+    println!("     saved tracked overlay → {path}");
+    Ok(())
+}
+
+/// Nearest-neighbour downscale an RGB buffer to `(dw, dh)` (keeps the GIF small).
+fn downscale(src: &[u8], sw: usize, sh: usize, dw: usize, dh: usize) -> Vec<u8> {
+    let mut out = vec![0u8; dw * dh * 3];
+    for y in 0..dh {
+        let sy = y * sh / dh;
+        for x in 0..dw {
+            let sx = x * sw / dw;
+            let (s, o) = ((sy * sw + sx) * 3, (y * dw + x) * 3);
+            out[o..o + 3].copy_from_slice(&src[s..s + 3]);
+        }
+    }
+    out
+}
+
+/// Encode collected RGB frames into an animated GIF (self-contained; no ffmpeg).
+fn write_gif(path: &str, frames: &[Vec<u8>], w: u16, h: u16, delay_cs: u16) -> Res<()> {
+    let file = std::fs::File::create(path)?;
+    let mut enc = gif::Encoder::new(std::io::BufWriter::new(file), w, h, &[])?;
+    enc.set_repeat(gif::Repeat::Infinite)?;
+    for rgb in frames {
+        let mut f = gif::Frame::from_rgb_speed(w, h, rgb, 10); // quantise, speed 10
+        f.delay = delay_cs;
+        enc.write_frame(&f)?;
+    }
+    println!("     saved clip → {path} ({} frames)", frames.len());
     Ok(())
 }
 
