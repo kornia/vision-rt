@@ -1,0 +1,23 @@
+# vrt-viz — CPU rendering + streaming for the tracker/perception demos: annotate a
+# frame (masks + boxes), draw a top-down floor-plan BEV, and serve/record it
+# (MJPEG-over-HTTP, animated GIF, PNG). No model / TensorRT / sensor deps — takes
+# host RGB buffers + `vrt_track::Track`s, so it stays a light leaf. TurboJPEG SIMD
+# encode is behind the `turbojpeg` feature (default is the pure-Rust encoder) so the
+# workspace/CI build needs no native libjpeg-turbo.
+[package]
+name = "vrt-viz"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+kornia-image = { workspace = true }
+kornia-io = { workspace = true }
+vrt-track = { path = "../vrt-track" }
+gif = "0.13"
+thiserror = "2.0"
+turbojpeg = { version = "1.4", optional = true }
+
+[features]
+# SIMD JPEG encode (builds libjpeg-turbo via cmake+nasm). Enable on-device for the
+# live stream; off by default so hosted CI compiles vrt-viz with no native toolchain.
+turbojpeg = ["kornia-io/turbojpeg", "dep:turbojpeg"]

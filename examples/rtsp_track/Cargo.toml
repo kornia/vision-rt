@@ -17,13 +17,11 @@ vrt-depth-anything = { path = "../../crates/vrt-depth-anything" }
 vrt-rfdetr-seg = { path = "../../crates/vrt-rfdetr-seg" }
 vrt-track = { path = "../../crates/vrt-track" }
 vrt-types = { path = "../../crates/vrt-types" }
+# CPU rendering + MJPEG/GIF/PNG viz. `turbojpeg` = SIMD JPEG for the live stream.
+vrt-viz = { path = "../../crates/vrt-viz", features = ["turbojpeg"] }
 # Private git dep (kornia/sensor-rt) — needs CARGO_NET_GIT_FETCH_WITH_CLI=true.
 sensor-rtsp = { git = "https://github.com/kornia/sensor-rt", rev = "d3b369c95b259c9b14e9b4f69581c2d609dbb2cc" }
 kornia-image = { git = "https://github.com/kornia/kornia-rs", tag = "v0.1.15-rc.4", features = ["cudarc"] }
-kornia-imgproc = { git = "https://github.com/kornia/kornia-rs", tag = "v0.1.15-rc.4", features = ["cudarc"] }
-# turbojpeg feature → SIMD JPEG encode for the live stream (builds libjpeg-turbo
-# from source via cmake+nasm). ~8× faster than the pure-Rust encoder.
-kornia-io = { git = "https://github.com/kornia/kornia-rs", tag = "v0.1.15-rc.4", features = ["turbojpeg"] }
 cudarc = { version = "0.19", default-features = false, features = [
   "cuda-version-from-build-system",
   "driver",
@@ -33,8 +31,3 @@ cudarc = { version = "0.19", default-features = false, features = [
   "fallback-latest",
 ] }
 env_logger = "0.11"
-# Self-contained animated-GIF clip encoding (no ffmpeg on the box).
-gif = "0.13"
-# Direct handle for the TurboJPEG subsampling enum (the lib is already built via
-# kornia-io's turbojpeg feature; cargo unifies to one build).
-turbojpeg = "1.4"
