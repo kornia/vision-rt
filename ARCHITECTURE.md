@@ -169,8 +169,8 @@ outside the tested 10.3.x range.
 ## Errors & safety
 
 Per-crate `thiserror` enums (`TrtError`, `HubError`, `RfDetrError`, `SegError`,
-`XFeatError`, `TrackError`, `VizError`, `TypeError`); `vrt::BoxError` for constructors
-that aggregate kinds. `Session` is `Send` but **not `Sync`** (drive one per thread from
+`KptsError`, `DepthError`, `XFeatError`, `TrackError`, `VizError`, `TypeError`);
+`vrt::BoxError` for constructors that aggregate kinds. `Session` is `Send` but **not `Sync`** (drive one per thread from
 a shared `Arc<Engine>`). Device pointers from TRT outputs are borrowed `OutputView`s
 valid until the next inference call or the session drops — the single per-frame sync
 serialises access.

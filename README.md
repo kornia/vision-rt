@@ -32,7 +32,8 @@ field-of-view cone. IDs match across both views; the BEV is world-frame, not pix
   caller-owned output buffer you reuse across frames. Threading, messaging, and
   back-pressure are the application's job — vision-rt never owns your event loop.
 - **Honest on-device numbers.** Everything below is measured on a Jetson Orin Nano at
-  `nvpmodel -m 2 + jetson_clocks` (MAXN), fp16 — not desktop extrapolations.
+  `nvpmodel -m 2 + jetson_clocks` (MAXN), fp16 — engine times via `trtexec`, pipeline
+  times via the example's built-in profiler; not desktop extrapolations.
 - **Ships to a screen.** A built-in **H.264-over-WebSocket** live view (decoded in the
   browser via WebCodecs) streams the annotated feed + BEV to a phone at **~4 Mbit/s** —
   ~5× lighter than the equivalent MJPEG, and low-latency even over a remote link.
@@ -61,12 +62,12 @@ Per-frame cost of the full detect + segment + depth + track pipeline (1280×720)
 
 | Stage (per frame) | Time | Notes |
 |---|---:|---|
-| RF-DETR-Seg — detect + instance masks | ~15 ms | the larger engine share |
-| Depth Anything V2 — metric depth (392²) | 10.1 ms | ~98 fps engine-only |
+| Depth Anything V2 — metric depth (392²) | 10.1 ms | trtexec engine-only; ~98 fps (17.9 ms @518²) |
+| RF-DETR-Seg — detect + instance masks | ~15 ms | the remaining GPU-wall share (wall − depth) |
 | mask → per-instance metric depth (GPU fusion) | 0.03 ms | one launch, ~200 masked reductions |
 | **GPU wall — seg + depth + fusion, one sync** | **25.4 ms** | the real per-frame GPU cost |
-| 3D Kalman tracker — association + update | ~0.08 ms | pure CPU, whole scene |
 | enqueue + readout (CPU, off the GPU wall) | ~4.3 ms | truly async — ≪ the sync |
+| 3D Kalman tracker — association + update | < 0.1 ms | pure CPU — negligible |
 | **End-to-end** | **29.7 ms** | **→ 33.6 fps, GPU-bound** |
 
 - **~33 fps GPU ceiling** with detection *and* a metric range for every object. Live on
@@ -75,12 +76,6 @@ Per-frame cost of the full detect + segment + depth + track pipeline (1280×720)
   headroom** for a faster sensor, a second camera, or another model.
 - **Spend less GPU:** run depth at a lower cadence and let the tracker **coast** between
   updates — the 3D Kalman fills in metric motion for free.
-- **Live view:** annotated frame + BEV as two H.264 streams, **~4 Mbit/s total**, encoded
-  on a worker thread off the hot path (Orin Nano has no NVENC → software x264, still free
-  next to the sensor cadence).
-
-Single-model engine numbers (trtexec, engine-only): Depth Anything V2 **10.1 ms @392 /
-17.9 ms @518**. See each crate's README for its own benchmarks.
 
 ## Quickstart
 
@@ -158,21 +153,10 @@ Depth Anything V2 engines (built on first run by the model crates, or with
 
 ## Compose your own
 
-The single-model idiom extends to **N models on one frame, one stream, one sync**: build
-each on the same `Arc<CudaStream>`, pass the same device image by reference to each
-`submit`, enqueue any fusion kernel last, then one `synchronize()` drains everything. The
-stream's FIFO order *is* the dependency edge — no CUDA events, no second stream. Every
+The single-model idiom extends to **N models on one frame, one stream, one sync** — every
 model decodes back to source-pixel space, so coordinates line up across models and into
-world-frame 3D. See [ARCHITECTURE.md](ARCHITECTURE.md) for the Arc chain, the async /
-caller-owned contract, and multi-camera patterns.
-
-## Models & engines
-
-- **ONNX is the portable artifact** — hosted on Hugging Face (`kornia/*`), sha256-pinned,
-  never committed to git. Private / gated repos need `HF_TOKEN`.
-- **Engines are machine-locked** (TRT version + GPU arch) and built **on-device** into
-  `~/.cache/vision-rt/engines/…` on first run; a matching prebuilt engine may instead be
-  pulled from HF. Portable ONNX in, board-specific engine out.
+world-frame 3D. See [ARCHITECTURE.md](ARCHITECTURE.md) for how (the Arc chain, the async /
+caller-owned contract, multi-model composition, and multi-camera patterns).
 
 Model credit belongs to the upstream authors — see each crate's README.
 
