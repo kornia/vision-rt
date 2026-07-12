@@ -56,6 +56,41 @@ pub fn gate_depth(
     }
 }
 
+/// Blend a **soft metric-depth consistency** term into the cost matrix, so among
+/// candidates the assignment actively *prefers* the depth-closest — 3D as a positive
+/// matching signal, not just the hard [`gate_depth`] veto. For each pair with both
+/// depths known the IoU cost becomes a weighted average with a depth cost in `[0, 1]`
+/// (0 = identical depth, 1 = at the tolerance): `cost ← (1−w)·cost + w·min(1, |Δz|/tol)`
+/// with `tol = max(abs_floor, rel·z_track)`. `w = 0` disables it; pairs with an
+/// unknown depth are left untouched. Apply **before** [`gate_depth`] (which then
+/// hard-rejects the beyond-tolerance pairs).
+pub fn fuse_depth(
+    cost: &mut [Vec<f64>],
+    track_depths: &[Option<f32>],
+    det_depths: &[Option<f32>],
+    weight: f32,
+    rel: f32,
+    abs_floor: f32,
+) {
+    if weight <= 0.0 {
+        return;
+    }
+    let w = weight as f64;
+    for (t, row) in cost.iter_mut().enumerate() {
+        let Some(zt) = track_depths.get(t).copied().flatten() else {
+            continue;
+        };
+        let tol = ((rel * zt).max(abs_floor) as f64).max(1e-3);
+        for (d, c) in row.iter_mut().enumerate() {
+            let Some(zd) = det_depths.get(d).copied().flatten() else {
+                continue;
+            };
+            let dcost = ((zt - zd).abs() as f64 / tol).min(1.0);
+            *c = (1.0 - w) * *c + w * dcost;
+        }
+    }
+}
+
 /// Intersection-over-union of two `[x1, y1, x2, y2]` boxes.
 pub fn iou(a: &[f32; 4], b: &[f32; 4]) -> f32 {
     let xx1 = a[0].max(b[0]);
@@ -320,6 +355,22 @@ mod tests {
             near[0][0] >= DEPTH_GATE_COST,
             "2 m gap exceeds 0.5 m tol at 2 m"
         );
+    }
+
+    #[test]
+    fn fuse_depth_prefers_depth_closest() {
+        // Equal IoU cost for all pairs; tracks at 2 m / 4 m, dets at 2.1 m / 3.9 m.
+        // The soft depth term must make the depth-consistent pairs cheaper.
+        let mut cost = vec![vec![0.3, 0.3], vec![0.3, 0.3]];
+        let track_d = [Some(2.0f32), Some(4.0)];
+        let det_d = [Some(2.1f32), Some(3.9)];
+        fuse_depth(&mut cost, &track_d, &det_d, 0.5, 0.25, 0.5);
+        assert!(cost[0][0] < cost[0][1], "near track prefers the near det");
+        assert!(cost[1][1] < cost[1][0], "far track prefers the far det");
+        // Weight 0 is a no-op.
+        let mut c2 = vec![vec![0.3]];
+        fuse_depth(&mut c2, &[Some(2.0)], &[Some(5.0)], 0.0, 0.25, 0.5);
+        assert_eq!(c2[0][0], 0.3);
     }
 
     #[test]
