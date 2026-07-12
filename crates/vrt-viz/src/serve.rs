@@ -23,17 +23,40 @@ use std::sync::{Arc, Mutex};
 /// JS/HTML instead of an inline Rust string).
 const INDEX_HTML: &str = include_str!("client.html");
 
-/// A stream's `(tag, avcC codec-config)`.
-type StreamConfig = (u8, Arc<Vec<u8>>);
+/// Which of the two composited views a frame belongs to.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Stream {
+    /// The main annotated camera view.
+    Main,
+    /// The top-down BEV.
+    Bev,
+}
+
+impl Stream {
+    /// Wire tag byte sent to the browser client (`M` / `B`).
+    fn tag(self) -> u8 {
+        match self {
+            Stream::Main => b'M',
+            Stream::Bev => b'B',
+        }
+    }
+    /// Dense index for per-stream arrays (`Main = 0`, `Bev = 1`).
+    fn index(self) -> usize {
+        self as usize
+    }
+}
+
+/// A stream's `(view, avcC codec-config)`.
+type StreamConfig = (Stream, Arc<Vec<u8>>);
 
 /// One H.264 message fanned out to WebSocket viewers.
 #[derive(Clone)]
 enum H264Msg {
-    /// avcC codec-config for stream `tag` (viewer configures its decoder from this).
-    Config { tag: u8, data: Arc<Vec<u8>> },
-    /// One access unit for stream `tag`; `key` marks an IDR (a viewer starts on one).
+    /// avcC codec-config for a `stream` (viewer configures its decoder from this).
+    Config { stream: Stream, data: Arc<Vec<u8>> },
+    /// One access unit for a `stream`; `key` marks an IDR (a viewer starts on one).
     Frame {
-        tag: u8,
+        stream: Stream,
         key: bool,
         data: Arc<Vec<u8>>,
     },
@@ -62,10 +85,10 @@ impl H264Cast {
     }
 
     /// Cache + broadcast a stream's codec-config, skipping an unchanged repeat.
-    fn publish_config(&self, tag: u8, data: &[u8]) {
+    fn publish_config(&self, stream: Stream, data: &[u8]) {
         let arc = {
             let mut cfgs = self.configs.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some(slot) = cfgs.iter_mut().find(|(t, _)| *t == tag) {
+            if let Some(slot) = cfgs.iter_mut().find(|(s, _)| *s == stream) {
                 if slot.1.as_slice() == data {
                     return;
                 }
@@ -73,15 +96,15 @@ impl H264Cast {
                 slot.1.clone()
             } else {
                 let arc = Arc::new(data.to_vec());
-                cfgs.push((tag, arc.clone()));
+                cfgs.push((stream, arc.clone()));
                 arc
             }
         };
-        self.broadcast(H264Msg::Config { tag, data: arc });
+        self.broadcast(H264Msg::Config { stream, data: arc });
     }
 
-    fn publish_frame(&self, tag: u8, key: bool, data: Arc<Vec<u8>>) {
-        self.broadcast(H264Msg::Frame { tag, key, data });
+    fn publish_frame(&self, stream: Stream, key: bool, data: Arc<Vec<u8>>) {
+        self.broadcast(H264Msg::Frame { stream, key, data });
     }
 
     /// Register a new viewer; returns its receiver plus the cached configs to send it
@@ -123,14 +146,14 @@ impl StreamServer {
         Ok(Self { h264 })
     }
 
-    /// Publish (or refresh) a stream's H.264 avcC codec-config. `tag` is `b'M'`/`b'B'`.
-    pub fn publish_h264_config(&self, tag: u8, avcc: &[u8]) {
-        self.h264.publish_config(tag, avcc);
+    /// Publish (or refresh) a [`Stream`]'s H.264 avcC codec-config.
+    pub fn publish_h264_config(&self, stream: Stream, avcc: &[u8]) {
+        self.h264.publish_config(stream, avcc);
     }
 
-    /// Publish one H.264 access unit for a stream. `tag` is `b'M'`/`b'B'`.
-    pub fn publish_h264_frame(&self, tag: u8, key: bool, data: Vec<u8>) {
-        self.h264.publish_frame(tag, key, Arc::new(data));
+    /// Publish one H.264 access unit for a [`Stream`].
+    pub fn publish_h264_frame(&self, stream: Stream, key: bool, data: Vec<u8>) {
+        self.h264.publish_frame(stream, key, Arc::new(data));
     }
 }
 
@@ -166,22 +189,26 @@ fn serve_ws_h264(mut s: TcpStream, key: &str, cast: &H264Cast) -> std::io::Resul
          Sec-WebSocket-Accept: {accept}\r\n\r\n"
     )?;
     let (rx, cfgs) = cast.subscribe();
-    for (tag, data) in cfgs {
-        ws_send(&mut s, &[b'C', tag], &data)?;
+    for (stream, data) in cfgs {
+        ws_send(&mut s, &[b'C', stream.tag()], &data)?;
     }
-    let mut started = [false; 2]; // per stream: seen a keyframe yet (M=0, B=1)
+    let mut started = [false; 2]; // per stream: seen a keyframe yet (indexed by Stream)
     for msg in rx {
         match msg {
-            H264Msg::Config { tag, data } => ws_send(&mut s, &[b'C', tag], &data)?,
-            H264Msg::Frame { tag, key, data } => {
-                let idx = (tag == b'B') as usize;
+            H264Msg::Config { stream, data } => ws_send(&mut s, &[b'C', stream.tag()], &data)?,
+            H264Msg::Frame { stream, key, data } => {
+                let idx = stream.index();
                 if !started[idx] {
                     if !key {
                         continue;
                     }
                     started[idx] = true;
                 }
-                ws_send(&mut s, &[if key { b'K' } else { b'D' }, tag], &data)?;
+                ws_send(
+                    &mut s,
+                    &[if key { b'K' } else { b'D' }, stream.tag()],
+                    &data,
+                )?;
             }
         }
     }
@@ -331,11 +358,11 @@ mod tests {
     #[test]
     fn h264cast_caches_and_dedups_config() {
         let cast = H264Cast::new();
-        cast.publish_config(b'M', &[1, 2, 3]);
+        cast.publish_config(Stream::Main, &[1, 2, 3]);
         let (_rx, cfgs) = cast.subscribe();
         assert_eq!(cfgs.len(), 1);
         assert_eq!(cfgs[0].1.as_slice(), &[1, 2, 3]);
-        cast.publish_config(b'M', &[1, 2, 3]);
+        cast.publish_config(Stream::Main, &[1, 2, 3]);
         assert_eq!(cast.configs.lock().unwrap().len(), 1);
     }
 }

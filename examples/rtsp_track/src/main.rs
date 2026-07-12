@@ -23,8 +23,6 @@
 //!                       `http://<jetson-ip>:PORT` in a phone browser (same LAN)
 
 use std::collections::HashSet;
-use std::io::Write;
-use std::sync::{Arc, Condvar, Mutex};
 use std::time::Instant;
 
 use cudarc::driver::CudaContext;
@@ -35,8 +33,8 @@ use vrt_rfdetr_seg::RfDetrSeg;
 use vrt_track::{CameraIntrinsics, Detection, TrackState, Tracker, TrackerConfig};
 use vrt_types::Undistorter;
 use vrt_viz::{
-    downscale, encode_png, render_bev, render_main, stack_v, write_gif, H264Encoder, MaskOverlay,
-    StreamServer, TrailStore,
+    downscale, encode_png, render_bev, render_main, stack_v, write_gif, LiveStream, MaskOverlay,
+    TrailStore,
 };
 
 type Res<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
@@ -54,90 +52,9 @@ const TAPO_C210_K1: f32 = -0.28;
 const BEV_W: usize = 1280;
 const BEV_H: usize = 640;
 
-/// A rendered `(main_rgb, bev_rgb)` pair awaiting H.264 encode.
-type FramePair = (Vec<u8>, Vec<u8>);
-/// Latest-only handoff slot: newest pair + a condvar the worker waits on.
-type FrameSlot = Arc<(Mutex<Option<FramePair>>, Condvar)>;
-
 /// Nominal stream frame rate (camera-paced); also the encoder GOP (1 s keyframe
 /// interval → a WebSocket viewer joins/re-syncs within ~1 s).
 const STREAM_FPS: i32 = 15;
-
-/// Off-thread **H.264** encoder + publisher. The render loop hands the two rendered RGB
-/// buffers through a **latest-only** slot; a worker thread owns a per-stream
-/// [`H264Encoder`] (software x264 — the Orin Nano has no NVENC) + the [`StreamServer`]
-/// and does the inter-frame encode + WebSocket broadcast off the hot path. H.264's
-/// temporal compression cuts the bitrate ~10–20× vs MJPEG, which is what fixes remote
-/// buffering; the browser decodes via WebCodecs.
-struct EncodeSink {
-    /// Newest un-encoded pair; `None` once the worker takes it.
-    slot: FrameSlot,
-}
-
-impl EncodeSink {
-    /// Bind the server and spawn the H.264 encode worker. `w`/`h` size the main view,
-    /// `bw`/`bh` the BEV; `main_kbps`/`bev_kbps` are the target bitrates.
-    fn spawn(
-        port: u16,
-        w: usize,
-        h: usize,
-        bw: usize,
-        bh: usize,
-        main_kbps: u32,
-        bev_kbps: u32,
-    ) -> Res<Self> {
-        let server = StreamServer::spawn(port)?;
-        let slot = Arc::new((Mutex::new(None), Condvar::new()));
-        let wslot = slot.clone();
-        std::thread::spawn(move || {
-            let mut menc = H264Encoder::new(w, h, STREAM_FPS, main_kbps, STREAM_FPS)
-                .expect("h264 main encoder");
-            let mut benc = H264Encoder::new(bw, bh, STREAM_FPS, bev_kbps, STREAM_FPS)
-                .expect("h264 bev encoder");
-            println!(
-                "     stream: H.264 x264 sw — main {w}x{h}@{main_kbps}k + bev {bw}x{bh}@{bev_kbps}k \
-                 (WebSocket/WebCodecs)"
-            );
-            let _ = std::io::stdout().flush();
-            let (lock, cv) = &*wslot;
-            let mut fc = 0u64;
-            loop {
-                let pair: FramePair = {
-                    let mut g = lock.lock().unwrap_or_else(|e| e.into_inner());
-                    while g.is_none() {
-                        g = cv.wait(g).unwrap_or_else(|e| e.into_inner());
-                    }
-                    g.take().unwrap()
-                };
-                let (main_rgb, bev_rgb) = pair;
-                let t = Instant::now();
-                for (enc, tag, rgb) in [(&mut menc, b'M', main_rgb), (&mut benc, b'B', bev_rgb)] {
-                    if let Ok(aus) = enc.encode(rgb) {
-                        if let Some(cd) = enc.codec_data() {
-                            server.publish_h264_config(tag, cd);
-                        }
-                        for au in aus {
-                            server.publish_h264_frame(tag, au.key, au.data);
-                        }
-                    }
-                }
-                fc += 1;
-                if fc.is_multiple_of(100) {
-                    log::debug!("h264 encode×2 {:.1} ms", t.elapsed().as_secs_f64() * 1e3);
-                }
-            }
-        });
-        Ok(Self { slot })
-    }
-
-    /// Hand the latest rendered pair to the worker, overwriting any pair not yet
-    /// encoded (drop-stale → the browser always gets the freshest frame).
-    fn submit(&self, main: Vec<u8>, bev: Vec<u8>) {
-        let (lock, cv) = &*self.slot;
-        *lock.lock().unwrap_or_else(|e| e.into_inner()) = Some((main, bev));
-        cv.notify_one();
-    }
-}
 
 fn main() -> Res<()> {
     env_logger::init();
@@ -199,9 +116,18 @@ fn main() -> Res<()> {
                 kbps("RTSP_TRACK_MAIN_KBPS", 3500),
                 kbps("RTSP_TRACK_BEV_KBPS", 1500),
             );
-            Some(EncodeSink::spawn(
-                port, w, h, BEV_W, BEV_H, main_kbps, bev_kbps,
-            )?)
+            println!(
+                "     stream: H.264 x264 sw — main {w}x{h}@{main_kbps}k + bev {BEV_W}x{BEV_H}@{bev_kbps}k (WebSocket/WebCodecs)"
+            );
+            let live = LiveStream::spawn(
+                port,
+                (w, h),
+                (BEV_W, BEV_H),
+                main_kbps,
+                bev_kbps,
+                STREAM_FPS,
+            )?;
+            Some(live)
         }
         None => None,
     };

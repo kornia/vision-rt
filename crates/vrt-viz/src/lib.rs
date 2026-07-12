@@ -18,13 +18,17 @@ pub mod encode;
 pub mod h264;
 pub mod render;
 pub mod serve;
+#[cfg(feature = "h264")]
+pub mod stream;
 pub mod trail;
 
 pub use encode::{encode_png, write_gif, JpegEncoder};
 #[cfg(feature = "h264")]
 pub use h264::{EncodedAu, H264Encoder};
 pub use render::{downscale, render_bev, render_main, stack_v};
-pub use serve::StreamServer;
+pub use serve::{Stream, StreamServer};
+#[cfg(feature = "h264")]
+pub use stream::LiveStream;
 pub use trail::TrailStore;
 
 /// Errors from rendering / encoding.
