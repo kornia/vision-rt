@@ -20,9 +20,14 @@ crate per PR.
 | `crates/trt-sys` | Raw FFI: pure-C shim over TensorRT C++ (bindgen never sees C++ headers) |
 | `crates/vrt` | Safe core: Logger→Runtime→Engine→Session Arc chain, `ModelSession`, `cuda` launch helpers |
 | `crates/vrt-hub` | Model weights (HF Hub, sha256-pinned) + on-device engine cache |
+| `crates/vrt-types` | Model-free leaf (no TRT/GPU-model): `CameraIntrinsics`/`Extrinsics`, GPU `Undistorter`, depth-at-mask sampling |
 | `crates/vrt-xfeat` | XFeat keypoints: backbone + GPU NMS/top-K/descriptor sampling/mutual-NN. Crate-local `examples/` (`xfeat_match`, `xfeat_bench`) + `scripts/export_xfeat_backbone.py` |
 | `crates/vrt-rfdetr` | RF-DETR object detector (NMS-free) + on-device GPU decode |
+| `crates/vrt-rfdetr-seg` | RF-DETR instance segmentation: boxes + per-instance masks + on-device GPU decode |
 | `crates/vrt-rfdetr-kpts` | RF-DETR human pose: box + 17 COCO keypoints + confidence (CPU decode) |
+| `crates/vrt-depth-anything` | Depth Anything V2 metric depth + depth-at-mask/box fusion kernels |
+| `crates/vrt-track` | Pure-CPU **3D multi-object tracker** (ByteTrack assoc + depth-gated 3D Kalman); no GPU/TRT — depends only on `vrt-types` |
+| `crates/vrt-viz` | Pure-CPU render (masks/boxes/BEV) + **H.264/WebSocket live view** (browser WebCodecs); no GPU/TRT |
 
 ## Architecture in one paragraph
 
@@ -52,6 +57,10 @@ during it). Coordinates line up because every model decodes back to **source pix
 space** and the full-frame `Stretch` preprocess makes cross-grid scaling a plain
 `grid/src` ratio. Worked example: `vrt-depth-anything`'s `detect_depth` (RF-DETR-Seg
 + Depth Anything V2 on one stream → per-instance mask-sampled metric depth, one sync).
+The full **flagship** — `examples/rtsp_track` — feeds that seg+depth+fusion into the
+CPU `vrt-track` 3D tracker (metric depth → `Detection::with_depth` → depth-gated
+association) and renders/streams it via `vrt-viz` (annotated view + world-frame BEV,
+live over H.264/WebSocket → browser WebCodecs).
 
 ## Multiple cameras
 
@@ -90,7 +99,7 @@ is small next to the model compute).
 
 **Unified multi-camera view (shared BEV / cross-camera tracking).** Patterns A/B/C
 run **independent per-camera pipelines** — each camera its own `Undistorter` (its own
-intrinsics + `k1`), models, `BotSort`, and *camera-frame* metric-3D. To fuse cameras
+intrinsics + `k1`), models, `Tracker`, and *camera-frame* metric-3D. To fuse cameras
 into **one coordinate system** you need each camera's **pose (extrinsics)**: the
 enabler is `vrt_types::CameraExtrinsics { r, t }` (camera→world) + `Track::world_position(intr, extr)`
 (`IDENTITY` = single-camera, world == camera frame). Supply each camera's real pose
@@ -127,5 +136,8 @@ via cudarc's `fallback-*` features (no CUDA needed to check).
 ## Detailed knowledge
 
 Project skills in `.claude/skills/` cover engine rebuilds, benchmarking
-discipline, Rust↔CUDA patterns, CUDA kernel craft, and model tensor semantics.
-They auto-activate; trust them over re-deriving from code.
+discipline, Rust↔CUDA patterns, CUDA kernel craft, model tensor semantics,
+**composing a fast pipeline** (`vrt-pipeline-compose`), **adding a model crate**
+(`vrt-add-model-crate`), **3D tracking + metric geometry** (`vrt-tracking`), and
+the **H.264/WebCodecs live-stream stack** (`vrt-live-stream`). They auto-activate;
+trust them over re-deriving from code.
