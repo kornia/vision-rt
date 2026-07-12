@@ -13,7 +13,9 @@
 //! - [`CameraIntrinsics`] — pinhole `fx,fy,cx,cy` + `unproject` (pixel+depth → metres).
 
 pub mod camera;
+pub mod undistort;
 pub use camera::CameraIntrinsics;
+pub use undistort::Undistorter;
 
 use std::ops::{Deref, DerefMut};
 use std::sync::{Arc, Mutex, OnceLock};

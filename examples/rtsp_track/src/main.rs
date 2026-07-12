@@ -26,10 +26,12 @@ use std::io::Write;
 use std::time::Instant;
 
 use cudarc::driver::CudaContext;
+use kornia_image::{Image, ImageSize};
 use sensor_rtsp::RtspSource;
 use vrt_depth_anything::DepthAnything;
 use vrt_rfdetr_seg::RfDetrSeg;
 use vrt_track::{BotSort, BotSortConfig, CameraIntrinsics, Detection, TrackState};
+use vrt_types::Undistorter;
 use vrt_viz::{
     downscale, encode_png, render_bev, render_main, stack_v, write_gif, JpegEncoder, MaskOverlay,
     MjpegServer, TrailStore,
@@ -41,6 +43,11 @@ type Res<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 /// FoV — only the 3.83 mm F/2.4 lens — so this is computed from the lens on the
 /// C210's 1/2.9" 16:9 sensor (~5.12 mm wide): `2·atan(5.12 / (2·3.83)) ≈ 67°`.
 const TAPO_C210_HFOV_DEG: f32 = 67.0;
+/// Eyeballed radial distortion coefficient for the Tapo C210 wide lens (barrel →
+/// negative). Undistort runs before seg/depth so boxes/masks/metric-3D are pinhole.
+/// Tune on a captured frame until straight edges look straight (replace with a
+/// checkerboard calibration for accuracy).
+const TAPO_C210_K1: f32 = -0.28;
 /// Standalone BEV canvas size (matches the 1280-wide main frame so they stack clean).
 const BEV_W: usize = 1280;
 const BEV_H: usize = 640;
@@ -69,6 +76,15 @@ fn main() -> Res<()> {
     let mut z = depth.alloc_result()?;
     let mut tracker = BotSort::new(BotSortConfig::default())?;
     let intr = CameraIntrinsics::from_hfov(w as f32, h as f32, TAPO_C210_HFOV_DEG);
+    // Lens undistort (before seg/depth) → rectified pinhole for the whole pipeline.
+    let undist = Undistorter::new(&intr, TAPO_C210_K1, w, h, &stream)?;
+    let mut rect = Image::<u8, 3>::zeros_cuda(
+        ImageSize {
+            width: w,
+            height: h,
+        },
+        &stream,
+    )?; // reused
 
     // Output mode from the 5th arg.
     let record = out.as_deref().is_some_and(|p| p.ends_with(".gif"));
@@ -100,8 +116,9 @@ fn main() -> Res<()> {
             break;
         };
         let t1 = Instant::now();
-        seg.submit(frame.image(), &mut d)?;
-        depth.submit(frame.image(), &mut z)?;
+        undist.apply(frame.image(), &mut rect, &stream)?; // rectify on the shared stream
+        seg.submit(&rect, &mut d)?;
+        depth.submit(&rect, &mut z)?;
         let t2 = Instant::now();
         let zs = z.depth_image().sample_masks(
             d.masks_slice(),
@@ -150,7 +167,7 @@ fn main() -> Res<()> {
         // ── viz (vrt-viz): render main + BEV, then serve / record / dump ──
         // Only one of the three sinks is active per run; each renders the same pair.
         if let Some((server, jenc)) = &server {
-            let (main, bev) = render_pair(&frame, &stream, &d, w, h, &tracks, &intr, &trails)?;
+            let (main, bev) = render_pair(&rect, &stream, &d, w, h, &tracks, &intr, &trails)?;
             let r = Instant::now();
             server.publish(jenc.encode(main, w, h)?, jenc.encode(bev, BEV_W, BEV_H)?);
             a_render += ms(r - t6);
@@ -159,7 +176,7 @@ fn main() -> Res<()> {
             if t_start.elapsed().as_secs_f64() < rec_secs {
                 if n.is_multiple_of(2) {
                     let (main, bev) =
-                        render_pair(&frame, &stream, &d, w, h, &tracks, &intr, &trails)?;
+                        render_pair(&rect, &stream, &d, w, h, &tracks, &intr, &trails)?;
                     let (st, sw, sh) = stack_v(&main, w, h, &bev, BEV_W, BEV_H);
                     gif_frames.push(downscale(&st, sw, sh, gw, gh));
                 }
@@ -169,7 +186,7 @@ fn main() -> Res<()> {
                 break;
             }
         } else if let Some(path) = out.take_if(|_| n == 60) {
-            let (main, bev) = render_pair(&frame, &stream, &d, w, h, &tracks, &intr, &trails)?;
+            let (main, bev) = render_pair(&rect, &stream, &d, w, h, &tracks, &intr, &trails)?;
             let (st, sw, sh) = stack_v(&main, w, h, &bev, BEV_W, BEV_H);
             encode_png(&path, &st, sw, sh)?;
             println!("     saved overlay → {path}");
@@ -236,7 +253,7 @@ fn main() -> Res<()> {
 /// instance masks, and render the main + BEV pair (owned buffers the caller consumes).
 #[allow(clippy::too_many_arguments)]
 fn render_pair(
-    frame: &sensor_rtsp::Frame,
+    rect: &Image<u8, 3>,
     stream: &std::sync::Arc<cudarc::driver::CudaStream>,
     d: &vrt_rfdetr_seg::SegResult,
     w: usize,
@@ -245,7 +262,7 @@ fn render_pair(
     intr: &CameraIntrinsics,
     trails: &TrailStore,
 ) -> Res<(Vec<u8>, Vec<u8>)> {
-    let host = frame.image().to_host(stream)?;
+    let host = rect.to_host(stream)?;
     let insts = d.instances()?;
     let masks: Vec<MaskOverlay> = insts
         .iter()
