@@ -16,3 +16,6 @@ models/
 
 # Environment variables
 .env
+
+# nested / workspace-excluded example crates build into their own target/
+**/target/
