@@ -97,10 +97,12 @@ impl Tracklet {
         }
     }
 
-    /// Kalman predict + advance the "missed" counters. Called once per frame before
-    /// association; [`update`](Self::update) resets the counters on a match.
-    pub fn predict(&mut self) {
-        self.kf.predict();
+    /// Kalman predict over `dt` time units + advance the "missed" counters. Called
+    /// once per frame before association; [`update`](Self::update) resets the counters
+    /// on a match. The lifecycle counters advance per *frame* (they gate re-id/removal
+    /// in frames), independent of `dt` which only scales the motion prediction.
+    pub fn predict(&mut self, dt: f64) {
+        self.kf.predict(dt);
         self.age += 1;
         self.time_since_update += 1;
         self.matched_this_frame = false;

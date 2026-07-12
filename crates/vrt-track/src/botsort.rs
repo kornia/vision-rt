@@ -163,19 +163,41 @@ impl BotSort {
         self.len() == 0
     }
 
-    /// Advance one frame with no camera-motion compensation.
+    /// Advance one frame (fixed cadence, `dt = 1`) with no camera-motion compensation.
     pub fn update(&mut self, detections: &[Detection]) -> Vec<Track> {
-        self.update_with_motion(detections, &mut NoCameraMotion)
+        self.update_with_motion_dt(detections, &mut NoCameraMotion, 1.0)
     }
 
-    /// Advance one frame, re-anchoring track predictions through the affine warp
-    /// from `gmc` (global/camera motion compensation).
+    /// Advance by a real inter-frame interval `dt` (no camera motion). Pass the
+    /// elapsed time since the previous frame in the same units the [`KalmanParams`]
+    /// are tuned for (nominal frames — e.g. `actual_interval / nominal_interval`), so
+    /// the constant-velocity prediction stays consistent under variable fps and
+    /// dropped frames. `dt = 1.0` is identical to [`update`](Self::update).
+    pub fn update_dt(&mut self, detections: &[Detection], dt: f64) -> Vec<Track> {
+        self.update_with_motion_dt(detections, &mut NoCameraMotion, dt)
+    }
+
+    /// Advance one frame (`dt = 1`), re-anchoring track predictions through the
+    /// affine warp from `gmc` (global/camera motion compensation).
     ///
     /// Returns the tracks that are **confirmed and matched this frame**.
     pub fn update_with_motion(
         &mut self,
         detections: &[Detection],
         gmc: &mut dyn CameraMotion,
+    ) -> Vec<Track> {
+        self.update_with_motion_dt(detections, gmc, 1.0)
+    }
+
+    /// Advance by `dt` time units with camera-motion compensation — the full entry
+    /// point ([`update`](Self::update) / [`update_dt`](Self::update_dt) /
+    /// [`update_with_motion`](Self::update_with_motion) delegate here). `dt` scales
+    /// the Kalman predict; the lifecycle counters still advance per frame.
+    pub fn update_with_motion_dt(
+        &mut self,
+        detections: &[Detection],
+        gmc: &mut dyn CameraMotion,
+        dt: f64,
     ) -> Vec<Track> {
         self.frame_id += 1;
         let cfg = self.config.clone();
@@ -195,7 +217,7 @@ impl BotSort {
         let affine = gmc.warp(self.frame_id);
         for t in &mut self.tracks {
             if t.state != TrackState::Removed {
-                t.predict();
+                t.predict(dt);
                 t.kf.apply_affine(&affine);
             }
         }

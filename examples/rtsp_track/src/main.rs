@@ -70,6 +70,10 @@ fn main() -> Res<()> {
     let (mut n, t_start) = (0u64, Instant::now());
     let (mut a_src, mut a_enq, mut a_fus, mut a_sync, mut a_read, mut a_trk) =
         (0.0f64, 0.0, 0.0, 0.0, 0.0, 0.0);
+    // Real per-frame dt in *nominal-frame units*: interval / EMA(interval). ≈1 at
+    // steady fps, >1 after a dropped frame — keeps the Kalman predict consistent
+    // under RTSP jitter without retuning the per-frame KalmanParams.
+    let (mut prev, mut ema_dt, mut a_dt) = (Instant::now(), 0.0f64, 0.0f64);
     loop {
         let t0 = Instant::now();
         let Some(frame) = source.next_frame() else {
@@ -105,7 +109,23 @@ fn main() -> Res<()> {
             }
             dets.push(det);
         }
-        let tracks = tracker.update(&dets);
+        // Real inter-frame interval → dt in nominal-frame units (EMA-calibrated,
+        // clamped). First frames run at dt=1 until the cadence is learned.
+        let interval = t0.duration_since(prev).as_secs_f64();
+        prev = t0;
+        let dt = if ema_dt > 0.0 {
+            (interval / ema_dt).clamp(0.25, 4.0)
+        } else {
+            1.0
+        };
+        if interval > 1e-3 {
+            ema_dt = if ema_dt > 0.0 {
+                0.9 * ema_dt + 0.1 * interval
+            } else {
+                interval
+            };
+        }
+        let tracks = tracker.update_dt(&dets, dt);
         let t6 = Instant::now();
 
         if let Some(path) = out_png.take_if(|_| n == 60) {
@@ -119,6 +139,7 @@ fn main() -> Res<()> {
         a_sync += ms(t4 - t3);
         a_read += ms(t5 - t4);
         a_trk += ms(t6 - t5);
+        a_dt += dt;
         if n.is_multiple_of(100) {
             let k = 100.0;
             let confirmed = tracks
@@ -128,7 +149,7 @@ fn main() -> Res<()> {
             println!(
                 "── {n} frames | {:.1} fps | source {:.2} ms | enqueue {:.3} ms | \
                  fusion {:.3} ms | sync(GPU) {:.2} ms | readout {:.3} ms | track {:.3} ms | \
-                 {inst_n} det → {confirmed} confirmed",
+                 dt {:.2} | {inst_n} det → {confirmed} confirmed",
                 n as f64 / t_start.elapsed().as_secs_f64(),
                 a_src / k,
                 a_enq / k,
@@ -136,6 +157,7 @@ fn main() -> Res<()> {
                 a_sync / k,
                 a_read / k,
                 a_trk / k,
+                a_dt / k,
             );
             // A few live tracks with their tracked metric depth + approach velocity.
             let shown: Vec<String> = tracks
@@ -167,6 +189,7 @@ fn main() -> Res<()> {
             a_sync = 0.0;
             a_read = 0.0;
             a_trk = 0.0;
+            a_dt = 0.0;
         }
     }
     Ok(())

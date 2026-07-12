@@ -152,12 +152,13 @@ impl KalmanFilter3D {
         Self { x, p, params }
     }
 
-    /// State-transition matrix `F` (constant velocity, `dt = 1`).
-    fn transition() -> StateCov {
+    /// State-transition matrix `F` for a step of `dt` time units (constant
+    /// velocity: `p ← p + v·dt`). `dt = 1` is one nominal frame.
+    fn transition(dt: f64) -> StateCov {
         let mut f = StateCov::identity();
-        f[(0, 5)] = 1.0; // px += vx
-        f[(1, 6)] = 1.0; // py += vy
-        f[(2, 7)] = 1.0; // pz += vz
+        f[(0, 5)] = dt; // px += vx·dt
+        f[(1, 6)] = dt; // py += vy·dt
+        f[(2, 7)] = dt; // pz += vz·dt
         f
     }
 
@@ -170,8 +171,11 @@ impl KalmanFilter3D {
         h
     }
 
-    /// Diagonal process-noise covariance `Q`.
-    fn process_noise(&self) -> StateCov {
+    /// Diagonal process-noise covariance `Q` for a `dt`-length step. The per-axis
+    /// variances accumulate linearly with `dt` (random-walk), so `dt = 1` reproduces
+    /// the per-frame `Q` exactly and a longer interval injects proportionally more
+    /// uncertainty (a dropped frame → a wider predict).
+    fn process_noise(&self, dt: f64) -> StateCov {
         let p = &self.params;
         let diag = [
             p.std_position.powi(2),
@@ -183,7 +187,7 @@ impl KalmanFilter3D {
             p.std_velocity.powi(2),
             p.std_velocity_depth.powi(2),
         ];
-        StateCov::from_diagonal(&SVector::<f64, NX>::from_column_slice(&diag))
+        StateCov::from_diagonal(&(SVector::<f64, NX>::from_column_slice(&diag) * dt))
     }
 
     /// Measurement covariance `R`. `depth_present` picks the small vs. huge depth
@@ -205,11 +209,14 @@ impl KalmanFilter3D {
         MeasCov::from_diagonal(&SVector::<f64, NZ>::from_column_slice(&diag))
     }
 
-    /// Predict one frame forward: `x ← Fx`, `P ← F P Fᵀ + Q`.
-    pub fn predict(&mut self) {
-        let f = Self::transition();
+    /// Predict `dt` time units forward: `x ← Fx`, `P ← F P Fᵀ + Q`, both built for
+    /// `dt`. Pass `dt = 1.0` for the fixed-cadence case; pass the real inter-frame
+    /// interval (in the same units the [`KalmanParams`] were tuned for, e.g. nominal
+    /// frames) to stay consistent under variable fps / dropped frames.
+    pub fn predict(&mut self, dt: f64) {
+        let f = Self::transition(dt);
         self.x = f * self.x;
-        self.p = f * self.p * f.transpose() + self.process_noise();
+        self.p = f * self.p * f.transpose() + self.process_noise(dt);
     }
 
     /// Correct with a measurement `[cx, cy, w, h]` plus optional depth.
@@ -317,11 +324,11 @@ mod tests {
         for i in 1..=5 {
             let cx = 100.0 + 10.0 * i as f64;
             kf.update(cx, 50.0, 20.0, 40.0, None);
-            kf.predict();
+            kf.predict(1.0);
         }
         // After learning ~+10 px/frame, one more predict should move right, not left.
         let (cx0, _) = kf.center();
-        kf.predict();
+        kf.predict(1.0);
         let (cx1, _) = kf.center();
         assert!(cx1 > cx0, "velocity not tracked: {cx0} -> {cx1}");
         assert!(
@@ -329,6 +336,30 @@ mod tests {
             "velocity off: {}",
             cx1 - cx0
         );
+    }
+
+    #[test]
+    fn dt_scales_prediction_and_matches_unit_steps() {
+        // A single predict(2.0) advances position by 2× the velocity — same position
+        // as two predict(1.0) steps (constant velocity), so a dropped frame is
+        // predicted correctly instead of lagging.
+        let mut a = KalmanFilter3D::new(0.0, 0.0, 20.0, 20.0, Some(4.0), params());
+        for i in 1..=6 {
+            a.update(10.0 * i as f64, 0.0, 20.0, 20.0, Some(4.0));
+            a.predict(1.0);
+        }
+        let mut b = a.clone();
+        let (x0, _) = a.center();
+        a.predict(1.0);
+        a.predict(1.0);
+        let (x_two, _) = a.center();
+        b.predict(2.0);
+        let (x_dt2, _) = b.center();
+        assert!(
+            (x_two - x_dt2).abs() < 1e-9,
+            "predict(2) != two predict(1): {x_two} vs {x_dt2}"
+        );
+        assert!(x_dt2 > x0, "dt=2 should advance forward");
     }
 
     #[test]
@@ -350,7 +381,7 @@ mod tests {
         let mut kf = KalmanFilter3D::new(0.0, 0.0, 10.0, 10.0, None, params());
         let z0 = kf.position_3d()[2];
         for _ in 0..20 {
-            kf.predict();
+            kf.predict(1.0);
             kf.update(5.0, 5.0, 10.0, 10.0, None);
         }
         let z1 = kf.position_3d()[2];
@@ -365,7 +396,7 @@ mod tests {
         // With real depth measurements the estimate converges to the measured value.
         let mut kf = KalmanFilter3D::new(0.0, 0.0, 10.0, 10.0, None, params());
         for _ in 0..30 {
-            kf.predict();
+            kf.predict(1.0);
             kf.update(0.0, 0.0, 10.0, 10.0, Some(7.5));
         }
         let z = kf.position_3d()[2];
@@ -376,7 +407,7 @@ mod tests {
     fn covariance_stays_symmetric() {
         let mut kf = KalmanFilter3D::new(0.0, 0.0, 10.0, 10.0, Some(3.0), params());
         for _ in 0..10 {
-            kf.predict();
+            kf.predict(1.0);
             kf.update(1.0, 1.0, 10.0, 10.0, Some(3.0));
         }
         let p = &kf.p;
