@@ -30,22 +30,23 @@ const INDEX_HTML: &str = "<!doctype html><html><head><meta name=viewport \
 content='width=device-width,initial-scale=1'><style>body{margin:0;background:#111}\
 canvas{display:block;width:100%;height:auto}#e{color:#f66;font:13px monospace;padding:6px}\
 </style></head><body><canvas id=m></canvas><canvas id=b></canvas><div id=e></div><script>\
-const MAXBUF=30,MINBUF=6;\
+const MAXBUF=30,MINBUF=8;\
 function mk(id){const c=document.getElementById(id);return{c,x:c.getContext('2d'),q:[],dec:null,cfg:null,started:false,waitkey:true};}\
 const S={M:mk('m'),B:mk('b')};\
 function codecStr(a){return 'avc1.'+[a[1],a[2],a[3]].map(b=>b.toString(16).padStart(2,'0')).join('');}\
+function reset(s){if(s.dec){try{s.dec.close();}catch(_){}}s.dec=null;s.waitkey=true;}\
 function ensureDec(s){if(s.dec&&s.dec.state!=='closed')return;\
 s.dec=new VideoDecoder({output:f=>{s.q.push(f);while(s.q.length>MAXBUF)s.q.shift().close();},\
-error:e=>{document.getElementById('e').textContent=''+e;s.dec=null;s.waitkey=true;}});\
+error:e=>{document.getElementById('e').textContent=''+e;reset(s);}});\
 const cfg={optimizeForLatency:true,codec:s.cfg?codecStr(s.cfg):'avc1.42e01f'};\
 if(s.cfg)cfg.description=s.cfg;try{s.dec.configure(cfg);}catch(err){document.getElementById('e').textContent=''+err;}}\
 let ws;function connect(){ws=new WebSocket((location.protocol==='https:'?'wss://':'ws://')+location.host+'/ws');\
 ws.binaryType='arraybuffer';\
 ws.onmessage=e=>{const d=new Uint8Array(e.data);const kind=d[0],tag=d[1]===66?'B':'M';const s=S[tag];const pl=d.subarray(2);\
-if(kind===67){s.cfg=pl.slice();if(s.dec){try{s.dec.close();}catch(_){}}s.dec=null;s.waitkey=true;ensureDec(s);return;}\
+if(kind===67){s.cfg=pl.slice();reset(s);ensureDec(s);return;}\
 ensureDec(s);const key=kind===75;if(s.waitkey){if(!key)return;s.waitkey=false;}\
 try{s.dec.decode(new EncodedVideoChunk({type:key?'key':'delta',timestamp:performance.now()*1000,data:pl}));}catch(_){}}; \
-ws.onclose=()=>{for(const t in S)S[t].waitkey=true;setTimeout(connect,500);};}\
+ws.onclose=()=>{for(const t in S)reset(S[t]);setTimeout(connect,500);};}\
 connect();\
 function tick(){for(const t of['M','B']){const s=S[t];if(!s.started&&s.q.length>=MINBUF)s.started=true;\
 if(s.started&&s.q.length){const f=s.q.shift();if(s.c.width!==f.displayWidth){s.c.width=f.displayWidth;s.c.height=f.displayHeight;}\
