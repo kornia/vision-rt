@@ -4,7 +4,7 @@
 //! copies + decode) and produces annotated views:
 //! - [`render_main`] — tint instance masks in their track's id colour + draw boxes.
 //! - [`render_bev`] — a top-down **floor-plan** of the tracks' metric `(X, Z)`.
-//! - [`MjpegServer`] — stream the two views to a phone browser (MJPEG-over-HTTP).
+//! - [`StreamServer`] — stream the two views to a phone browser (H.264/WebSocket).
 //! - [`JpegEncoder`] / [`encode_png`] / [`write_gif`] — encode/record.
 //!
 //! No model / TensorRT / sensor dependencies — a light leaf that model demos compose.
@@ -24,7 +24,7 @@ pub use encode::{encode_png, write_gif, JpegEncoder};
 #[cfg(feature = "h264")]
 pub use h264::{EncodedAu, H264Encoder};
 pub use render::{downscale, render_bev, render_main, stack_v};
-pub use serve::MjpegServer;
+pub use serve::StreamServer;
 pub use trail::TrailStore;
 
 /// Errors from rendering / encoding.

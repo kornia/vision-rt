@@ -24,7 +24,6 @@
 
 use std::collections::HashSet;
 use std::io::Write;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Instant;
 
@@ -37,7 +36,7 @@ use vrt_track::{CameraIntrinsics, Detection, TrackState, Tracker, TrackerConfig}
 use vrt_types::Undistorter;
 use vrt_viz::{
     downscale, encode_png, render_bev, render_main, stack_v, write_gif, H264Encoder, MaskOverlay,
-    MjpegServer, TrailStore,
+    StreamServer, TrailStore,
 };
 
 type Res<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
@@ -66,15 +65,13 @@ const STREAM_FPS: i32 = 15;
 
 /// Off-thread **H.264** encoder + publisher. The render loop hands the two rendered RGB
 /// buffers through a **latest-only** slot; a worker thread owns a per-stream
-/// [`H264Encoder`] (software x264 — the Orin Nano has no NVENC) + the [`MjpegServer`]
+/// [`H264Encoder`] (software x264 — the Orin Nano has no NVENC) + the [`StreamServer`]
 /// and does the inter-frame encode + WebSocket broadcast off the hot path. H.264's
 /// temporal compression cuts the bitrate ~10–20× vs MJPEG, which is what fixes remote
 /// buffering; the browser decodes via WebCodecs.
 struct EncodeSink {
     /// Newest un-encoded pair; `None` once the worker takes it.
     slot: FrameSlot,
-    /// Worker's last measured encode×2 time (µs), for the profiling line.
-    enc_us: Arc<AtomicU32>,
 }
 
 impl EncodeSink {
@@ -89,10 +86,9 @@ impl EncodeSink {
         main_kbps: u32,
         bev_kbps: u32,
     ) -> Res<Self> {
-        let server = MjpegServer::spawn(port)?;
+        let server = StreamServer::spawn(port)?;
         let slot = Arc::new((Mutex::new(None), Condvar::new()));
-        let enc_us = Arc::new(AtomicU32::new(0));
-        let (wslot, wenc) = (slot.clone(), enc_us.clone());
+        let wslot = slot.clone();
         std::thread::spawn(move || {
             let mut menc = H264Encoder::new(w, h, STREAM_FPS, main_kbps, STREAM_FPS)
                 .expect("h264 main encoder");
@@ -104,6 +100,7 @@ impl EncodeSink {
             );
             let _ = std::io::stdout().flush();
             let (lock, cv) = &*wslot;
+            let mut fc = 0u64;
             loop {
                 let pair: FramePair = {
                     let mut g = lock.lock().unwrap_or_else(|e| e.into_inner());
@@ -115,7 +112,7 @@ impl EncodeSink {
                 let (main_rgb, bev_rgb) = pair;
                 let t = Instant::now();
                 for (enc, tag, rgb) in [(&mut menc, b'M', main_rgb), (&mut benc, b'B', bev_rgb)] {
-                    if let Ok(aus) = enc.encode(&rgb) {
+                    if let Ok(aus) = enc.encode(rgb) {
                         if let Some(cd) = enc.codec_data() {
                             server.publish_h264_config(tag, cd);
                         }
@@ -124,10 +121,13 @@ impl EncodeSink {
                         }
                     }
                 }
-                wenc.store(t.elapsed().as_micros() as u32, Ordering::Relaxed);
+                fc += 1;
+                if fc.is_multiple_of(100) {
+                    log::debug!("h264 encode×2 {:.1} ms", t.elapsed().as_secs_f64() * 1e3);
+                }
             }
         });
-        Ok(Self { slot, enc_us })
+        Ok(Self { slot })
     }
 
     /// Hand the latest rendered pair to the worker, overwriting any pair not yet
@@ -365,12 +365,10 @@ fn main() -> Res<()> {
                     })
                     .collect();
                 log::debug!("tracks: {}", shown.join(", "));
-                if let Some(sink) = &enc_sink {
-                    let enc_ms = sink.enc_us.load(Ordering::Relaxed) as f64 / 1000.0;
-                    log::debug!(
-                        "serve: render {:.1} ms | encode×2 {enc_ms:.1} ms (worker, off hot path)",
-                        a_render / k,
-                    );
+                if enc_sink.is_some() {
+                    // Encode time is logged by the worker thread; this is the main-thread
+                    // render cost.
+                    log::debug!("serve render {:.1} ms", a_render / k);
                 }
             }
             window_ids.clear();
@@ -405,7 +403,7 @@ fn render_pair(
             bbox: i.bbox,
         })
         .collect();
-    let main = render_main(host.as_slice().to_vec(), w, h, &masks, tracks, fps);
+    let main = render_main(host.into_vec(), w, h, &masks, tracks, fps);
     let bev = render_bev(tracks, intr, BEV_W, BEV_H, Some(trails));
     Ok((main, bev))
 }

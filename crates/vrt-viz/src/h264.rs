@@ -104,9 +104,11 @@ impl H264Encoder {
         self.codec_data.as_deref()
     }
 
-    /// Encode one RGB frame, returning any access units produced (usually one).
-    pub fn encode(&mut self, rgb: &[u8]) -> Result<Vec<EncodedAu>, VizError> {
-        let mut buffer = gstreamer::Buffer::from_mut_slice(rgb.to_vec());
+    /// Encode one RGB frame, returning any access units produced (usually one). Takes
+    /// the buffer by value and wraps it zero-copy (`Buffer::from_slice`) — no per-frame
+    /// copy of the ~2.7 MB frame.
+    pub fn encode(&mut self, rgb: Vec<u8>) -> Result<Vec<EncodedAu>, VizError> {
+        let mut buffer = gstreamer::Buffer::from_slice(rgb);
         {
             let bref = buffer
                 .get_mut()
