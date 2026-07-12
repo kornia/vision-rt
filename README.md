@@ -2,43 +2,36 @@
 
 **Real-time spatial & physical AI on NVIDIA Jetson Orin — in Rust.**
 
-Turn a camera into **metric 3D perception**: detect, segment, range, and **track
-objects in world coordinates** on-device, at the sensor frame rate. TensorRT
-inference + GPU pre/post-processing exposed as plain Rust types — no orchestration
-framework, no Python in the loop, no host round-trips mid-pipeline. GPU image/tensor
-types come from [`kornia-rs`](https://github.com/kornia/kornia-rs); each model is its
-own crate over a shared safe core.
+Turn a camera into **metric 3D perception**: detect, segment, range, and **track objects
+in world coordinates**, on-device, at the sensor frame rate. TensorRT + GPU pre/post-
+processing as plain Rust types — no orchestration framework, no Python in the loop, no
+host round-trips mid-pipeline. GPU image/tensor types come from
+[`kornia-rs`](https://github.com/kornia/kornia-rs); each model is its own crate.
 
 ![RF-DETR-Seg + Depth Anything V2 + a 3D tracker on one CUDA stream](assets/rtsp_track.png)
 
-*One camera → instance masks, a **metric range for every object**, stable track IDs,
-and a live **top-down bird's-eye view** — the whole loop is **25.4 ms of GPU** per
-frame on an Orin Nano. Top: per-instance masks with `id  depth`. Bottom: each tracked
-object placed at its real `(X, Z)` on a metre grid, camera at the apex of the
-field-of-view cone. IDs match across both views; the BEV is world-frame, not pixels.*
+*One camera → instance masks, a **metric range per object**, stable track IDs, and a live
+**top-down BEV** — the whole loop is **25.4 ms of GPU** per frame on an Orin Nano. Top:
+masks with `id depth`. Bottom: each track at its real `(X, Z)` on a metre grid, camera at
+the apex of the FoV cone. IDs match across views; the BEV is world-frame, not pixels.*
 
 ---
 
 ## Why vision-rt
 
-- **Metric, not just pixels.** Depth Anything V2 gives a real range per pixel;
-  per-instance mask sampling turns each detection into a metric `(X, Y, Z)`. The
-  tracker's Kalman state is **3D** (`px, py, pz` + velocity), so objects live in world
-  coordinates — the substrate for BEV, collision / keep-out zones, and multi-camera fusion.
-- **Built for Orin, not ported to it.** One CUDA stream, **one `synchronize()` per
-  frame**: enqueue every model + the fusion kernels, sync once, read. No hidden syncs,
-  no mid-pipeline host copies. The API is VPI-shaped for the unified-memory GPU.
-- **Production-shaped libraries, not a framework.** Each model is a plain type with a
-  caller-owned output buffer you reuse across frames. Threading, messaging, and
-  back-pressure are the application's job — vision-rt never owns your event loop.
-- **Honest on-device numbers.** Everything below is measured on a Jetson Orin Nano at
-  `nvpmodel -m 2 + jetson_clocks` (MAXN), fp16 — engine times via `trtexec`, pipeline
-  times via the example's built-in profiler; not desktop extrapolations.
-- **Ships to a screen.** A built-in **H.264-over-WebSocket** live view (decoded in the
-  browser via WebCodecs) streams the annotated feed + BEV to a phone at **~4 Mbit/s** —
-  ~5× lighter than the equivalent MJPEG, and low-latency even over a remote link.
-- **Rust end to end.** Memory-safe orchestration, no GC pauses in the hot loop; the only
-  unsafe surface is a thin, audited C shim over TensorRT.
+- **Metric, not pixels.** Depth Anything V2 → a real range per pixel; mask-sampling → a
+  metric `(X, Y, Z)` per object; the tracker's Kalman state is **3D**. Objects live in
+  world coordinates — the substrate for BEV, keep-out zones, and multi-camera fusion.
+- **Built for Orin.** One CUDA stream, **one `synchronize()` per frame**: enqueue every
+  model + fusion kernel, sync once, read. No hidden syncs, no mid-pipeline host copies.
+- **Libraries, not a framework.** Each model is a plain type with a caller-owned output
+  buffer you reuse; threading, messaging, and back-pressure stay yours.
+- **Honest numbers.** All timings are on a Jetson Orin Nano at MAXN, fp16 — engines via
+  `trtexec`, pipeline via the example profiler; not desktop extrapolations.
+- **Ships to a screen.** A built-in **H.264-over-WebSocket** live view (browser WebCodecs)
+  streams the annotated feed + BEV to a phone at **~4 Mbit/s**, low-latency even remote.
+- **Rust end to end.** No GC pauses in the hot loop; the only unsafe is a thin, audited C
+  shim over TensorRT.
 
 ## The flagship pipeline — `examples/rtsp_track`
 
@@ -46,15 +39,34 @@ field-of-view cone. IDs match across both views; the BEV is world-frame, not pix
 RTSP camera ─▶ GPU undistort ─▶ ┌ RF-DETR-Seg  (boxes + instance masks) ┐
                                 │ Depth Anything V2 (metric depth)       │─▶ ONE sync
                                 └ mask → per-instance metric depth       ┘
-        ─▶ 3D Kalman tracker (depth-gated association, NSA noise) ─▶ stable world-frame tracks
+        ─▶ 3D Kalman tracker (depth-gated) ─▶ stable world-frame tracks
         ─▶ annotated view + top-down BEV ─▶ H.264 / WebCodecs live stream
 ```
 
-Two heavy nets and the depth-at-mask fusion all enqueue on **one** CUDA stream and
-resolve in a **single** `synchronize()`; the tracker and rendering are CPU and free by
-comparison. Every detection comes out with a metric range and a stable ID, placed in a
-world-frame bird's-eye view — 14–16 objects/frame with coherent depths (chairs 2.0–2.9 m,
-table 2.7 m, fridge 4.1 m, oven 4.9 m in the shot above).
+```rust
+let stream = CudaContext::new(0)?.default_stream();          // one shared CUDA stream
+let mut seg     = RfDetrSeg::from_engine_file(seg_engine, stream.clone(), 0.4)?;
+let mut depth   = DepthAnything::from_engine_file(depth_engine, stream.clone())?;
+let mut tracker = Tracker::new(TrackerConfig::default())?;
+let (mut d, mut z) = (seg.alloc_result()?, depth.alloc_result()?);
+
+for frame in camera {                          // frame: device Image<u8,3>
+    seg.submit(frame, &mut d)?;                // detect + instance masks  ┐ enqueued
+    depth.submit(frame, &mut z)?;              // metric depth map         │ async —
+    let zs = z.depth_image().sample_masks(     // mask → per-object depth  ┘ no sync yet
+        d.masks_slice(), d.mask_size(), d.count_slice(), &stream)?;
+    stream.synchronize()?;                     // ONE sync drains every GPU stage above
+
+    let depth_m = stream.clone_dtoh(&zs.slice(0..d.count()))?;
+    let dets: Vec<_> = d.detections()?.into_iter().zip(depth_m)
+        .map(|(o, z)| Detection::new(o.bbox, o.score, o.class_id).with_depth(z))
+        .collect();
+    let tracks = tracker.update(&dets);        // stable, world-frame 3D tracks
+}
+```
+
+Two nets + the depth-at-mask fusion enqueue on one stream and resolve in **one** sync; the
+tracker and rendering are CPU and free by comparison.
 
 ## Benchmarks — Jetson Orin Nano, MAXN, fp16
 
@@ -63,122 +75,82 @@ Per-frame cost of the full detect + segment + depth + track pipeline (1280×720)
 | Stage (per frame) | Time | Notes |
 |---|---:|---|
 | Depth Anything V2 — metric depth (392²) | 10.1 ms | trtexec engine-only; ~98 fps (17.9 ms @518²) |
-| RF-DETR-Seg — detect + instance masks | ~15 ms | the remaining GPU-wall share (wall − depth) |
-| mask → per-instance metric depth (GPU fusion) | 0.03 ms | one launch, ~200 masked reductions |
+| RF-DETR-Seg — detect + instance masks | ~15 ms | remaining GPU-wall share (wall − depth) |
+| mask → per-instance metric depth (GPU) | 0.03 ms | one launch, ~200 masked reductions |
 | **GPU wall — seg + depth + fusion, one sync** | **25.4 ms** | the real per-frame GPU cost |
-| enqueue + readout (CPU, off the GPU wall) | ~4.3 ms | truly async — ≪ the sync |
-| 3D Kalman tracker — association + update | < 0.1 ms | pure CPU — negligible |
+| enqueue + readout (CPU, off the wall) | ~4.3 ms | truly async — ≪ the sync |
+| 3D Kalman tracker — assoc + update | < 0.1 ms | pure CPU — negligible |
 | **End-to-end** | **29.7 ms** | **→ 33.6 fps, GPU-bound** |
 
-- **~33 fps GPU ceiling** with detection *and* a metric range for every object. Live on
-  a 1280×720 RTSP camera the loop held **~14.8 fps — sensor-capped** at the camera's
-  15 fps, not GPU-bound (the blocking RTSP receive is ~36 ms/frame), i.e. **~2× GPU
-  headroom** for a faster sensor, a second camera, or another model.
-- **Spend less GPU:** run depth at a lower cadence and let the tracker **coast** between
-  updates — the 3D Kalman fills in metric motion for free.
+**~33 fps GPU ceiling** with a metric range for every object. Live on a 1280×720 RTSP
+camera it held **~14.8 fps — sensor-capped** at 15 fps (RTSP receive ~36 ms/frame), i.e.
+**~2× GPU headroom** for a faster sensor, a second camera, or another model. Spend less
+GPU by running depth at a lower cadence and letting the tracker **coast** between updates.
 
 ## Quickstart
 
-### Requirements
-
-- **Hardware:** NVIDIA Jetson Orin (aarch64, SM87) — Nano / NX / AGX. Benchmarks above
-  are on an Orin Nano (Super).
-- **System:** JetPack 6.x — **TensorRT 10.3.x, CUDA 12.6**. Rust stable (aarch64).
-- **For the live tracking demo only:** GStreamer + a software H.264 encoder
-  (`x264` / `openh264`), an RTSP camera, and access to the `kornia/sensor-rt` git dep
-  (`export CARGO_NET_GIT_FETCH_WITH_CLI=true`).
-- **Model weights:** portable ONNX from Hugging Face (`kornia/*`), sha256-pinned;
-  `export HF_TOKEN=…` for gated repos. Engines are **machine-locked** (TRT version + SM87)
-  and built **on-device** on first run into `~/.cache/vision-rt/engines/` (or pulled
-  prebuilt when TRT + SM match).
-- **Memory:** the Orin Nano OOM-kills parallel template builds — cap jobs with `-j2`.
-  Benchmark only at MAXN: `sudo nvpmodel -m 2 && sudo jetson_clocks`.
-
-### Build
+**Requirements** — NVIDIA Jetson Orin (aarch64, SM87; Nano / NX / AGX), JetPack 6.x
+(**TensorRT 10.3.x, CUDA 12.6**), Rust stable. Cap builds with `-j2` (the Orin Nano
+OOM-kills parallel template builds); benchmark at MAXN (`sudo nvpmodel -m 2 && sudo
+jetson_clocks`). The live demo also needs GStreamer + a software H.264 encoder
+(`x264`/`openh264`), an RTSP camera, and `CARGO_NET_GIT_FETCH_WITH_CLI=true` for the
+`kornia/sensor-rt` dep. Models are ONNX from HF (`kornia/*`, `HF_TOKEN` for gated repos);
+engines are machine-locked (TRT + SM87) and built on-device on first run.
 
 ```bash
-cargo build --release -j2                          # capped jobs (Orin Nano RAM)
-TRT_STUB=1 cargo clippy --all-targets              # off-Jetson: committed bindings, no CUDA/TRT
+cargo build --release -j2                     # capped jobs (Orin Nano RAM)
+TRT_STUB=1 cargo clippy --all-targets         # off-Jetson: committed bindings, no CUDA/TRT
 ```
 
-### Run a model in ~10 lines
-
-```rust
-let stream = vrt::Stream::new_standalone()?.cuda_stream().clone();
-let mut det = RfDetr::from_hub(stream.clone(), 0.5)?; // conf threshold; ONNX → on-device engine, cached
-
-let mut res = det.alloc_result()?;   // reuse across frames
-det.submit(&image, &mut res)?;       // enqueue preprocess → engine → GPU decode, no sync
-stream.synchronize()?;               // you own the one sync per frame
-let objects: Vec<Detection> = res.detections()?; // boxes in original-image pixels
-```
-
-Construct any model with `from_hub` (pull ONNX from HF), `from_onnx` (local ONNX),
-`from_engine_file` (prebuilt engine), or `new(engine, …)`.
-
-### Run the flagship tracking pipeline
-
-The `rtsp_track` example is kept out of the workspace (it needs GStreamer + the private
-`sensor-rtsp` dep):
+Run the flagship tracking pipeline (a workspace-excluded example — needs GStreamer + the
+private `sensor-rtsp` dep):
 
 ```bash
 export CARGO_NET_GIT_FETCH_WITH_CLI=true
 cargo run --release --manifest-path examples/rtsp_track/Cargo.toml -- \
-    <rfdetr-seg.engine> <depth-anything.engine> \
-    rtsp://user:pass@camera/stream1 0.4 serve
-# then open http://<jetson-ip>:8080 in a browser (or your phone on the same network):
-# the annotated view + top-down BEV, live over H.264 / WebCodecs.
+    <rfdetr-seg.engine> <depth-anything.engine> rtsp://user:pass@camera/stream1 0.4 serve
+# open http://<jetson-ip>:8080 (or your phone on the same network) — annotated view + BEV
 ```
 
-The 5th arg selects the sink: `serve` (or `:PORT`) for the live stream, `out.png` for a
-single annotated frame, `out.gif` for a ~10 s clip. Point it at your RF-DETR-Seg +
-Depth Anything V2 engines (built on first run by the model crates, or with
-`/usr/src/tensorrt/bin/trtexec`).
+The 5th arg picks the sink: `serve` / `:PORT` (live stream), `out.png` (one frame),
+`out.gif` (~10 s clip). Engines are built on first run by the model crates, or with
+`/usr/src/tensorrt/bin/trtexec`.
 
 ## Workspace
 
 | Crate | Role |
 |---|---|
 | `trt-sys` | Raw FFI: pure-C shim over TensorRT (bindgen never sees C++) |
-| `vrt` | Safe core: `Logger→Runtime→Engine→Session`, `ModelSession`, CUDA launch helpers |
+| `vrt` | Safe core: `Logger→Runtime→Engine→Session`, `ModelSession`, CUDA helpers |
 | `vrt-hub` | Model weights (HF Hub, sha256-pinned) + on-device engine cache |
 | `vrt-types` | Shared leaf: `CameraIntrinsics`/`Extrinsics`, GPU `Undistorter`, depth-at-mask sampling |
-| `vrt-rfdetr` | RF-DETR object detector (NMS-free) + on-device GPU decode |
+| `vrt-rfdetr` | RF-DETR object detector (NMS-free) + GPU decode |
 | `vrt-rfdetr-seg` | RF-DETR **instance segmentation** — boxes + per-instance masks |
 | `vrt-rfdetr-kpts` | RF-DETR human pose: box + 17 COCO keypoints |
 | `vrt-depth-anything` | Depth Anything V2 **metric depth** + depth-at-mask/box fusion |
 | `vrt-xfeat` | XFeat keypoints + descriptors + GPU mutual-NN matching |
 | `vrt-track` | Pure-CPU **3D multi-object tracker** (ByteTrack assoc + depth-gated 3D Kalman) |
-| `vrt-viz` | CPU render (masks / boxes / BEV) + **H.264 / WebSocket live view** (WebCodecs client) |
+| `vrt-viz` | CPU render (masks / boxes / BEV) + **H.264 / WebSocket live view** (WebCodecs) |
 
-## Compose your own
-
-The single-model idiom extends to **N models on one frame, one stream, one sync** — every
-model decodes back to source-pixel space, so coordinates line up across models and into
-world-frame 3D. See [ARCHITECTURE.md](ARCHITECTURE.md) for how (the Arc chain, the async /
-caller-owned contract, multi-model composition, and multi-camera patterns).
-
-Model credit belongs to the upstream authors — see each crate's README.
+`vrt-track` / `vrt-types` / `vrt-viz` are model-free and GPU-free — see
+[ARCHITECTURE.md](ARCHITECTURE.md) for the crate DAG, the async / caller-owned contract,
+multi-model composition, and multi-camera patterns. Model credit belongs to the upstream
+authors — see each crate's README.
 
 ## Roadmap
 
-- **Upstream the reusable pieces to [`kornia-rs`](https://github.com/kornia/kornia-rs).**
-  Several crates are model-free, GPU-free algorithms (the 3D tracker, the camera model /
-  undistort types) — a natural fit to land in kornia so the wider ecosystem gets them.
-- **More cameras.** Beyond RTSP: USB **webcams**, Luxonis **OAK-D** (onboard stereo depth),
-  automotive **GMSL** sensors, and **D-Robotics RDK** — plugged in behind the `sensor-rt`
-  source layer, same one-stream pipeline downstream.
-- **Feature-reuse ReID.** Re-identify objects from the detector/segmentation backbone's
-  own features instead of a separate embedding network — the tracker already exposes the
-  appearance-fusion hook, so this drops in without a second model on the GPU wall.
-- **Quantization.** INT8 / lower-precision builds for the heavier engines to buy more GPU
-  headroom (a second camera, higher fps) and to fit the smaller Orin modules.
+- **Upstream reusable pieces to [`kornia-rs`](https://github.com/kornia/kornia-rs)** — the
+  3D tracker and camera/undistort types are model-free algorithms.
+- **More cameras** — beyond RTSP: USB **webcams**, Luxonis **OAK-D**, automotive **GMSL**,
+  **D-Robotics RDK**, behind the `sensor-rt` layer.
+- **Feature-reuse ReID** — re-identify from the detector/seg backbone's own features via
+  the tracker's appearance hook, no second model on the GPU wall.
+- **Quantization** — INT8 / lower-precision engines for more headroom and smaller Orins.
 
 ## Testing & feedback
 
-vision-rt is early and moving fast — **we'd love for you to try it** on your Jetson +
-camera and tell us how it goes. Open an issue with your board, sensor, models, and
-numbers; share what works and what's missing. Feedback directly shapes the roadmap above.
+vision-rt is early and moving fast — **try it** on your Jetson + camera and tell us how it
+goes. Open an issue with your board, sensor, models, and numbers. Feedback shapes the roadmap.
 
 ## License
 
