@@ -73,28 +73,63 @@ struct EncodeSink {
     enc_us: Arc<AtomicU32>,
 }
 
+/// Round `x·scale` down to an even pixel count (≥2) — turbojpeg 4:2:0 wants even dims.
+fn scaled_even(x: usize, scale: f32) -> usize {
+    (((x as f32 * scale) as usize).max(2)) & !1
+}
+
 impl EncodeSink {
-    /// Bind the MJPEG server and spawn the encode worker. `w`/`h` size the main
-    /// stream, `bw`/`bh` the BEV.
-    fn spawn(port: u16, w: usize, h: usize, bw: usize, bh: usize) -> Res<Self> {
+    /// Bind the MJPEG server and spawn the encode worker. `w`/`h` size the main view,
+    /// `bw`/`bh` the BEV. The streamed JPEGs are downscaled by `scale` and encoded at
+    /// `quality` — render/track stay full-res, only the bytes on the wire shrink, which
+    /// is what keeps a remote (e.g. cellular Tailscale) link from buffering.
+    fn spawn(
+        port: u16,
+        w: usize,
+        h: usize,
+        bw: usize,
+        bh: usize,
+        scale: f32,
+        quality: u8,
+    ) -> Res<Self> {
         let server = MjpegServer::spawn(port)?;
-        let _ = JpegEncoder::new(72)?; // fail fast on the main thread if turbojpeg is absent
+        let _ = JpegEncoder::new(quality)?; // fail fast on the main thread if turbojpeg is absent
+        let down = scale < 0.999;
+        let (sw, sh) = (scaled_even(w, scale), scaled_even(h, scale));
+        let (sbw, sbh) = (scaled_even(bw, scale), scaled_even(bh, scale));
+        if down {
+            println!(
+                "     stream: main {sw}x{sh} + bev {sbw}x{sbh} @ q{quality} (downscaled {scale})"
+            );
+        }
         let slot = Arc::new((Mutex::new(None), Condvar::new()));
         let enc_us = Arc::new(AtomicU32::new(0));
         let (wslot, wenc) = (slot.clone(), enc_us.clone());
         std::thread::spawn(move || {
-            let jenc = JpegEncoder::new(72).expect("jpeg encoder");
+            let jenc = JpegEncoder::new(quality).expect("jpeg encoder");
             let (lock, cv) = &*wslot;
             loop {
-                let (main, bev) = {
+                let pair: FramePair = {
                     let mut g = lock.lock().unwrap_or_else(|e| e.into_inner());
                     while g.is_none() {
                         g = cv.wait(g).unwrap_or_else(|e| e.into_inner());
                     }
                     g.take().unwrap()
                 };
+                let (main_rgb, bev_rgb) = pair;
                 let t = Instant::now();
-                if let (Ok(mj), Ok(bj)) = (jenc.encode(main, w, h), jenc.encode(bev, bw, bh)) {
+                // Downscale the streamed copy on the worker (off the hot path).
+                let (mbuf, mw, mh) = if down {
+                    (downscale(main_rgb.as_slice(), w, h, sw, sh), sw, sh)
+                } else {
+                    (main_rgb, w, h)
+                };
+                let (bbuf, bw2, bh2) = if down {
+                    (downscale(bev_rgb.as_slice(), bw, bh, sbw, sbh), sbw, sbh)
+                } else {
+                    (bev_rgb, bw, bh)
+                };
+                if let (Ok(mj), Ok(bj)) = (jenc.encode(mbuf, mw, mh), jenc.encode(bbuf, bw2, bh2)) {
                     server.publish(mj, bj);
                 }
                 wenc.store(t.elapsed().as_micros() as u32, Ordering::Relaxed);
@@ -159,7 +194,20 @@ fn main() -> Res<()> {
     let enc_sink = match serve_port {
         Some(port) => {
             println!("live: open http://<this-jetson-ip>:{port} in a phone browser (same Wi-Fi)");
-            Some(EncodeSink::spawn(port, w, h, BEV_W, BEV_H)?)
+            // Streamed JPEGs are downscaled for bandwidth (remote/cellular links buffer
+            // on the full 1280-wide feed). Tune with RTSP_TRACK_STREAM_SCALE (0<s≤1) /
+            // RTSP_TRACK_STREAM_Q; defaults 0.5 + q65 suit a phone over Tailscale.
+            let scale = std::env::var("RTSP_TRACK_STREAM_SCALE")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .filter(|s: &f32| *s > 0.0 && *s <= 1.0)
+                .unwrap_or(0.5);
+            let quality = std::env::var("RTSP_TRACK_STREAM_Q")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .filter(|q: &u8| *q >= 10 && *q <= 95)
+                .unwrap_or(65);
+            Some(EncodeSink::spawn(port, w, h, BEV_W, BEV_H, scale, quality)?)
         }
         None => None,
     };
