@@ -3,7 +3,7 @@
 
 use crate::kalman::{KalmanFilter3D, KalmanParams};
 use crate::Detection;
-use vrt_types::CameraIntrinsics;
+use vrt_types::{CameraExtrinsics, CameraIntrinsics};
 
 /// Lifecycle stage of a track.
 ///
@@ -58,6 +58,15 @@ impl Track {
     pub fn metric_position(&self, k: &CameraIntrinsics) -> [f32; 3] {
         let [px, py, pz] = self.position_3d;
         k.unproject(px, py, pz)
+    }
+
+    /// Metric **3D position in a shared WORLD frame** — back-project through `k`, then
+    /// apply the camera pose `e`. With [`CameraExtrinsics::IDENTITY`] this equals
+    /// [`metric_position`](Self::metric_position) (single-camera). Supplying each
+    /// camera's real pose puts every camera's tracks in one coordinate system — the
+    /// basis for a shared multi-camera BEV / cross-camera association.
+    pub fn world_position(&self, k: &CameraIntrinsics, e: &CameraExtrinsics) -> [f32; 3] {
+        e.to_world(self.metric_position(k))
     }
 
     /// Metric **velocity per nominal frame** (metres/frame, camera frame): the

@@ -49,8 +49,8 @@ pub use association::iou;
 pub use botsort::{BotSort, BotSortConfig};
 pub use kalman::{KalmanFilter3D, KalmanParams};
 pub use track::{Track, TrackState};
-// Camera intrinsics live in the shared `vrt-types` leaf; re-exported for convenience.
-pub use vrt_types::CameraIntrinsics;
+// Camera model lives in the shared `vrt-types` leaf; re-exported for convenience.
+pub use vrt_types::{CameraExtrinsics, CameraIntrinsics};
 
 /// Errors from tracker construction / configuration.
 #[derive(Debug, thiserror::Error)]

@@ -14,7 +14,7 @@
 
 pub mod camera;
 pub mod undistort;
-pub use camera::CameraIntrinsics;
+pub use camera::{CameraExtrinsics, CameraIntrinsics};
 pub use undistort::Undistorter;
 
 use std::ops::{Deref, DerefMut};

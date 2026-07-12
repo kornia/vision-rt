@@ -45,6 +45,55 @@ impl CameraIntrinsics {
     }
 }
 
+/// Camera **pose** (extrinsics): a rotation `r` + translation `t` mapping a point from
+/// the **camera** frame into a shared **world** frame — the enabler for fusing
+/// multiple cameras into one coordinate system (a shared world BEV, cross-camera
+/// association). [`IDENTITY`](CameraExtrinsics::IDENTITY) means the camera *is* the
+/// world, i.e. the single-camera default where world == camera frame.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CameraExtrinsics {
+    /// Camera→world rotation (row-major 3×3).
+    pub r: [[f32; 3]; 3],
+    /// Camera position in the world frame (metres).
+    pub t: [f32; 3],
+}
+
+impl CameraExtrinsics {
+    /// Camera == world (no transform).
+    pub const IDENTITY: Self = Self {
+        r: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+        t: [0.0, 0.0, 0.0],
+    };
+
+    /// Explicit pose.
+    pub fn new(r: [[f32; 3]; 3], t: [f32; 3]) -> Self {
+        Self { r, t }
+    }
+
+    /// Pure translation — the camera sits at `t` in the world, axes aligned.
+    pub fn from_translation(t: [f32; 3]) -> Self {
+        Self {
+            r: Self::IDENTITY.r,
+            t,
+        }
+    }
+
+    /// Map a camera-frame point to the world frame: `world = R · p + t`.
+    pub fn to_world(&self, p: [f32; 3]) -> [f32; 3] {
+        [
+            self.r[0][0] * p[0] + self.r[0][1] * p[1] + self.r[0][2] * p[2] + self.t[0],
+            self.r[1][0] * p[0] + self.r[1][1] * p[1] + self.r[1][2] * p[2] + self.t[1],
+            self.r[2][0] * p[0] + self.r[2][1] * p[1] + self.r[2][2] * p[2] + self.t[2],
+        ]
+    }
+}
+
+impl Default for CameraExtrinsics {
+    fn default() -> Self {
+        Self::IDENTITY
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -63,5 +112,13 @@ mod tests {
         assert!((k.fx - 640.0).abs() < 1e-3);
         assert_eq!((k.cx, k.cy), (640.0, 360.0));
         assert_eq!(k.fx, k.fy);
+    }
+
+    #[test]
+    fn extrinsics_identity_and_translation() {
+        let p = [1.0, 2.0, 3.0];
+        assert_eq!(CameraExtrinsics::IDENTITY.to_world(p), p); // world == camera
+        let e = CameraExtrinsics::from_translation([10.0, 0.0, -5.0]);
+        assert_eq!(e.to_world(p), [11.0, 2.0, -2.0]);
     }
 }
