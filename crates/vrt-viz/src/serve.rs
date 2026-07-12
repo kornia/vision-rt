@@ -1,55 +1,63 @@
-//! A tiny MJPEG + WebSocket server for live viewing on a phone browser.
+//! A tiny live-view server: H.264-over-WebSocket (WebCodecs) + MJPEG fallback.
 //!
 //! Endpoints:
-//! - `/` — index page: a `<canvas>` client that pulls frames over **WebSocket** and
-//!   plays them through a small **jitter buffer** (paced render + drop-stale) so
-//!   uneven network arrival (cellular / Tailscale) doesn't look choppy.
-//! - `/ws` — one WebSocket stream carrying both views; each binary message is a
-//!   1-byte tag (`M`/`B`) + a JPEG.
-//! - `/main`, `/bev` — plain `multipart/x-mixed-replace` MJPEG (fallback / direct).
+//! - `/` — index page: a `<canvas>` client that decodes an **H.264** WebSocket stream
+//!   with the browser's WebCodecs `VideoDecoder` and plays it through a small **jitter
+//!   buffer** (paced render + drop-stale), so uneven network arrival doesn't look
+//!   choppy. H.264 is inter-frame compressed → ~10–20× less bandwidth than MJPEG.
+//! - `/ws` — one WebSocket carrying both views. Each binary message is `[kind, tag] +
+//!   payload`: `kind` ∈ `C`(avcC config) / `K`(keyframe) / `D`(delta), `tag` ∈ `M`/`B`.
+//! - `/main`, `/bev` — plain `multipart/x-mixed-replace` MJPEG fallback (only live if
+//!   the producer also calls [`MjpegServer::publish`]).
 //!
-//! The render loop calls [`MjpegServer::publish`] with the latest encoded frames;
-//! every client is pushed the newest JPEG the instant it is published.
+//! The producer calls [`MjpegServer::publish_h264_frame`] / `publish_h264_config` with
+//! encoded access units; each viewer is pushed frames in order the instant they land,
+//! and a viewer that falls a full buffer behind is dropped (its browser reconnects and
+//! re-syncs on the next keyframe).
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
-/// Index page: a WebSocket + canvas client with a jitter buffer. Two canvases (main
-/// over BEV); frames are decoded off-thread (`createImageBitmap`) into per-stream
-/// queues and drawn on a fixed ~15 fps tick once `MINBUF` frames are buffered, dropping
-/// the oldest beyond `MAXBUF` so latency stays bounded. Falls back nowhere — if the
-/// socket drops the canvas just holds the last frame.
+/// Index page: a WebSocket + WebCodecs canvas client with a jitter buffer. Two canvases
+/// (main over BEV); each stream has its own `VideoDecoder` configured from the avcC
+/// `description`, and decoded frames are drawn on a fixed ~15 fps tick once `MINBUF` are
+/// buffered, dropping past `MAXBUF` so latency stays bounded. Auto-reconnects and
+/// re-syncs on the next keyframe if the socket drops.
 const INDEX_HTML: &str = "<!doctype html><html><head><meta name=viewport \
 content='width=device-width,initial-scale=1'><style>body{margin:0;background:#111}\
-canvas{display:block;width:100%;height:auto}</style></head><body>\
-<canvas id=m></canvas><canvas id=b></canvas><script>\
-const cv={M:document.getElementById('m'),B:document.getElementById('b')};\
-const cx={M:cv.M.getContext('2d'),B:cv.B.getContext('2d')};\
-const q={M:[],B:[]},started={M:false,B:false},MAXBUF=5,MINBUF=2;\
-const ws=new WebSocket((location.protocol==='https:'?'wss://':'ws://')+location.host+'/ws');\
+canvas{display:block;width:100%;height:auto}#e{color:#f66;font:13px monospace;padding:6px}\
+</style></head><body><canvas id=m></canvas><canvas id=b></canvas><div id=e></div><script>\
+const MAXBUF=30,MINBUF=6;\
+function mk(id){const c=document.getElementById(id);return{c,x:c.getContext('2d'),q:[],dec:null,cfg:null,started:false,waitkey:true};}\
+const S={M:mk('m'),B:mk('b')};\
+function codecStr(a){return 'avc1.'+[a[1],a[2],a[3]].map(b=>b.toString(16).padStart(2,'0')).join('');}\
+function ensureDec(s){if(s.dec&&s.dec.state!=='closed')return;\
+s.dec=new VideoDecoder({output:f=>{s.q.push(f);while(s.q.length>MAXBUF)s.q.shift().close();},\
+error:e=>{document.getElementById('e').textContent=''+e;s.dec=null;s.waitkey=true;}});\
+const cfg={optimizeForLatency:true,codec:s.cfg?codecStr(s.cfg):'avc1.42e01f'};\
+if(s.cfg)cfg.description=s.cfg;try{s.dec.configure(cfg);}catch(err){document.getElementById('e').textContent=''+err;}}\
+let ws;function connect(){ws=new WebSocket((location.protocol==='https:'?'wss://':'ws://')+location.host+'/ws');\
 ws.binaryType='arraybuffer';\
-ws.onmessage=async e=>{const d=new Uint8Array(e.data);const tag=d[0]===77?'M':'B';\
-const bmp=await createImageBitmap(new Blob([d.subarray(1)],{type:'image/jpeg'}));\
-const qq=q[tag];qq.push(bmp);while(qq.length>MAXBUF){const o=qq.shift();o.close&&o.close();}};\
-function tick(){for(const tag of ['M','B']){const qq=q[tag];\
-if(!started[tag]&&qq.length>=MINBUF)started[tag]=true;\
-if(started[tag]&&qq.length){const bmp=qq.shift(),c=cv[tag];\
-if(c.width!==bmp.width){c.width=bmp.width;c.height=bmp.height;}\
-cx[tag].drawImage(bmp,0,0);bmp.close&&bmp.close();if(!qq.length)started[tag]=false;}}}\
+ws.onmessage=e=>{const d=new Uint8Array(e.data);const kind=d[0],tag=d[1]===66?'B':'M';const s=S[tag];const pl=d.subarray(2);\
+if(kind===67){s.cfg=pl.slice();if(s.dec){try{s.dec.close();}catch(_){}}s.dec=null;s.waitkey=true;ensureDec(s);return;}\
+ensureDec(s);const key=kind===75;if(s.waitkey){if(!key)return;s.waitkey=false;}\
+try{s.dec.decode(new EncodedVideoChunk({type:key?'key':'delta',timestamp:performance.now()*1000,data:pl}));}catch(_){}}; \
+ws.onclose=()=>{for(const t in S)S[t].waitkey=true;setTimeout(connect,500);};}\
+connect();\
+function tick(){for(const t of['M','B']){const s=S[t];if(!s.started&&s.q.length>=MINBUF)s.started=true;\
+if(s.started&&s.q.length){const f=s.q.shift();if(s.c.width!==f.displayWidth){s.c.width=f.displayWidth;s.c.height=f.displayHeight;}\
+s.x.drawImage(f,0,0);f.close();if(!s.q.length)s.started=false;}}}\
 setInterval(tick,66);</script></body></html>";
 
-/// A shared latest-JPEG slot: the newest encoded frame plus a monotonically
-/// increasing version. A consumer waits on the [`Condvar`] until the version moves
-/// past the one it last sent, so it delivers each frame **exactly once, when it is
-/// published** — no fixed-timer polling that would beat against the producer's cadence
-/// and duplicate/drop frames. The inner `Arc<Vec<u8>>` lets a consumer clone the frame
-/// with a refcount bump (not a deep copy) and drop the lock immediately.
+// ─────────────────────────── MJPEG (fallback) ───────────────────────────
+
+/// A shared latest-JPEG slot with a monotonic version; a consumer waits on the
+/// [`Condvar`] until the version advances, delivering each frame exactly once.
 struct Shared {
-    /// `(latest JPEG, version)`; `version == 0` means nothing published yet.
     frame: Mutex<(Arc<Vec<u8>>, u64)>,
-    /// Signalled on every [`publish`](MjpegServer::publish).
     cv: Condvar,
 }
 
@@ -61,7 +69,6 @@ impl Shared {
         })
     }
 
-    /// Swap in a new JPEG, bump the version, and wake every waiting consumer.
     fn publish(&self, jpeg: Vec<u8>) {
         {
             let mut g = self.frame.lock().unwrap_or_else(|e| e.into_inner());
@@ -71,10 +78,6 @@ impl Shared {
         self.cv.notify_all();
     }
 
-    /// Block until a version newer than `last` is available (bounded so a stalled
-    /// producer doesn't wedge the thread forever), then return `(jpeg, version)`. A
-    /// spurious timeout returns the current pair; the caller re-checks `version` and
-    /// only sends when it actually advanced.
     fn wait_newer(&self, last: u64) -> (Arc<Vec<u8>>, u64) {
         let g = self.frame.lock().unwrap_or_else(|e| e.into_inner());
         let (g, _) = self
@@ -83,75 +86,154 @@ impl Shared {
             .unwrap_or_else(|e| e.into_inner());
         (g.0.clone(), g.1)
     }
-
-    /// The current JPEG without waiting (for pairing the other stream on a WS push).
-    fn latest(&self) -> Arc<Vec<u8>> {
-        self.frame
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .0
-            .clone()
-    }
 }
 
 type Slot = Arc<Shared>;
 
-/// A running MJPEG + WebSocket server. Clone-free handle over the two shared
-/// latest-JPEG slots.
+// ─────────────────────────── H.264 broadcast ───────────────────────────
+
+/// A stream's `(tag, avcC codec-config)`.
+type StreamConfig = (u8, Arc<Vec<u8>>);
+
+/// One H.264 message fanned out to WebSocket viewers.
+#[derive(Clone)]
+enum H264Msg {
+    /// avcC codec-config for stream `tag` (viewer configures its decoder from this).
+    Config { tag: u8, data: Arc<Vec<u8>> },
+    /// One access unit for stream `tag`; `key` marks an IDR (a viewer starts on one).
+    Frame {
+        tag: u8,
+        key: bool,
+        data: Arc<Vec<u8>>,
+    },
+}
+
+/// Fan-out of H.264 access units to connected viewers, caching the latest per-stream
+/// codec-config so a new viewer can configure its decoder before the next keyframe. A
+/// viewer whose bounded queue fills (a full buffer behind) is dropped — its browser
+/// reconnects and re-syncs on the next keyframe.
+struct H264Cast {
+    clients: Mutex<Vec<SyncSender<H264Msg>>>,
+    configs: Mutex<Vec<StreamConfig>>,
+}
+
+impl H264Cast {
+    fn new() -> Self {
+        Self {
+            clients: Mutex::new(Vec::new()),
+            configs: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn broadcast(&self, msg: H264Msg) {
+        let mut cs = self.clients.lock().unwrap_or_else(|e| e.into_inner());
+        cs.retain(|tx| tx.try_send(msg.clone()).is_ok());
+    }
+
+    /// Cache + broadcast a stream's codec-config, skipping an unchanged repeat.
+    fn publish_config(&self, tag: u8, data: &[u8]) {
+        let arc = {
+            let mut cfgs = self.configs.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(slot) = cfgs.iter_mut().find(|(t, _)| *t == tag) {
+                if slot.1.as_slice() == data {
+                    return;
+                }
+                slot.1 = Arc::new(data.to_vec());
+                slot.1.clone()
+            } else {
+                let arc = Arc::new(data.to_vec());
+                cfgs.push((tag, arc.clone()));
+                arc
+            }
+        };
+        self.broadcast(H264Msg::Config { tag, data: arc });
+    }
+
+    fn publish_frame(&self, tag: u8, key: bool, data: Arc<Vec<u8>>) {
+        self.broadcast(H264Msg::Frame { tag, key, data });
+    }
+
+    /// Register a new viewer; returns its receiver plus the cached configs to send it
+    /// first (so its decoder is configured before the first keyframe arrives).
+    fn subscribe(&self) -> (Receiver<H264Msg>, Vec<StreamConfig>) {
+        let (tx, rx) = sync_channel(120);
+        self.clients
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(tx);
+        let cfgs = self
+            .configs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        (rx, cfgs)
+    }
+}
+
+// ─────────────────────────── server ───────────────────────────
+
+/// A running live-view server. Clone-free handle over the JPEG slots + H.264 cast.
 pub struct MjpegServer {
     main: Slot,
     bev: Slot,
+    h264: Arc<H264Cast>,
 }
 
 impl MjpegServer {
-    /// Bind `0.0.0.0:port` and spawn the accept loop. Returns once bound; serving runs
-    /// on background threads.
+    /// Bind `0.0.0.0:port` and spawn the accept loop. Returns once bound.
     pub fn spawn(port: u16) -> std::io::Result<Self> {
         let listener = TcpListener::bind(("0.0.0.0", port))?;
-        let (main, bev) = (Shared::new(), Shared::new());
-        let (m, b) = (main.clone(), bev.clone());
+        let (main, bev, h264) = (Shared::new(), Shared::new(), Arc::new(H264Cast::new()));
+        let (m, b, h) = (main.clone(), bev.clone(), h264.clone());
         std::thread::spawn(move || {
             for stream in listener.incoming().flatten() {
-                let (m, b) = (m.clone(), b.clone());
+                let (m, b, h) = (m.clone(), b.clone(), h.clone());
                 std::thread::spawn(move || {
-                    let _ = serve_client(stream, &m, &b);
+                    let _ = serve_client(stream, &m, &b, &h);
                 });
             }
         });
-        Ok(Self { main, bev })
+        Ok(Self { main, bev, h264 })
     }
 
-    /// Publish the latest encoded JPEG for each stream (call every frame). Swaps in a
-    /// new `Arc` + bumps the version and wakes waiting consumers — no copy.
+    /// Publish the latest JPEG for each stream (MJPEG fallback path).
     pub fn publish(&self, main_jpeg: Vec<u8>, bev_jpeg: Vec<u8>) {
         self.main.publish(main_jpeg);
         self.bev.publish(bev_jpeg);
     }
+
+    /// Publish (or refresh) a stream's H.264 avcC codec-config. `tag` is `b'M'`/`b'B'`.
+    pub fn publish_h264_config(&self, tag: u8, avcc: &[u8]) {
+        self.h264.publish_config(tag, avcc);
+    }
+
+    /// Publish one H.264 access unit for a stream. `tag` is `b'M'`/`b'B'`.
+    pub fn publish_h264_frame(&self, tag: u8, key: bool, data: Vec<u8>) {
+        self.h264.publish_frame(tag, key, Arc::new(data));
+    }
 }
 
-/// Route one client by request path: `/ws` upgrades to WebSocket, `/main` / `/bev`
-/// stream MJPEG, else the index page.
-fn serve_client(mut s: TcpStream, main: &Slot, bev: &Slot) -> std::io::Result<()> {
-    let _ = s.set_nodelay(true); // flush each JPEG immediately — no Nagle coalescing latency
+/// Route one client by request path: `/ws` upgrades to the H.264 WebSocket, `/main` /
+/// `/bev` stream MJPEG, else the index page.
+fn serve_client(mut s: TcpStream, main: &Slot, bev: &Slot, h264: &H264Cast) -> std::io::Result<()> {
+    let _ = s.set_nodelay(true); // flush frames immediately — no Nagle coalescing latency
     let mut req = [0u8; 2048];
     let n = s.read(&mut req).unwrap_or(0);
     let reqs = std::str::from_utf8(&req[..n]).unwrap_or("");
     let path = reqs.split_whitespace().nth(1).unwrap_or("/");
     match path {
         "/ws" => match ws_key(reqs) {
-            Some(key) => serve_ws(s, &key, main, bev),
+            Some(key) => serve_ws_h264(s, &key, h264),
             None => Ok(()),
         },
         "/main" => serve_mjpeg(s, main),
         "/bev" => serve_mjpeg(s, bev),
-        _ => {
-            write!(
-                s,
-                "HTTP/1.0 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                INDEX_HTML.len(),
-                INDEX_HTML
-            )
-        }
+        _ => write!(
+            s,
+            "HTTP/1.0 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            INDEX_HTML.len(),
+            INDEX_HTML
+        ),
     }
 }
 
@@ -165,7 +247,7 @@ fn serve_mjpeg(mut s: TcpStream, latest: &Slot) -> std::io::Result<()> {
     loop {
         let (jpeg, version) = latest.wait_newer(last);
         if version == last {
-            continue; // spurious wake / producer stalled — keep waiting, don't resend
+            continue;
         }
         last = version;
         if !jpeg.is_empty() {
@@ -180,10 +262,9 @@ fn serve_mjpeg(mut s: TcpStream, latest: &Slot) -> std::io::Result<()> {
     }
 }
 
-/// Complete the WebSocket handshake, then push both streams as binary frames tagged
-/// with a leading `M`/`B` byte. Cadence is driven by the main slot; the BEV's latest is
-/// paired on each tick (they are published back-to-back).
-fn serve_ws(mut s: TcpStream, key: &str, main: &Slot, bev: &Slot) -> std::io::Result<()> {
+/// Complete the WebSocket handshake, then relay H.264: cached configs first, then each
+/// access unit in order (skipping deltas until the first keyframe per stream).
+fn serve_ws_h264(mut s: TcpStream, key: &str, cast: &H264Cast) -> std::io::Result<()> {
     let accept = base64(&sha1(
         format!("{key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11").as_bytes(),
     ));
@@ -192,27 +273,33 @@ fn serve_ws(mut s: TcpStream, key: &str, main: &Slot, bev: &Slot) -> std::io::Re
         "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\
          Sec-WebSocket-Accept: {accept}\r\n\r\n"
     )?;
-    let mut last = 0u64;
-    loop {
-        let (mj, version) = main.wait_newer(last);
-        if version == last {
-            continue;
-        }
-        last = version;
-        let bj = bev.latest();
-        if !mj.is_empty() {
-            ws_send(&mut s, b'M', &mj)?;
-        }
-        if !bj.is_empty() {
-            ws_send(&mut s, b'B', &bj)?;
+    let (rx, cfgs) = cast.subscribe();
+    for (tag, data) in cfgs {
+        ws_send(&mut s, &[b'C', tag], &data)?;
+    }
+    let mut started = [false; 2]; // per stream: seen a keyframe yet (M=0, B=1)
+    for msg in rx {
+        match msg {
+            H264Msg::Config { tag, data } => ws_send(&mut s, &[b'C', tag], &data)?,
+            H264Msg::Frame { tag, key, data } => {
+                let idx = (tag == b'B') as usize;
+                if !started[idx] {
+                    if !key {
+                        continue;
+                    }
+                    started[idx] = true;
+                }
+                ws_send(&mut s, &[if key { b'K' } else { b'D' }, tag], &data)?;
+            }
         }
     }
+    Ok(())
 }
 
-/// Send one unmasked binary WebSocket frame: `tag` byte + `payload`.
-fn ws_send(s: &mut TcpStream, tag: u8, payload: &[u8]) -> std::io::Result<()> {
-    let len = payload.len() + 1; // + the tag byte
-    let mut hdr = Vec::with_capacity(11);
+/// Send one unmasked binary WebSocket frame: `header` bytes + `payload`.
+fn ws_send(s: &mut TcpStream, header: &[u8], payload: &[u8]) -> std::io::Result<()> {
+    let len = header.len() + payload.len();
+    let mut hdr = Vec::with_capacity(10 + header.len());
     hdr.push(0x82); // FIN + binary opcode
     if len < 126 {
         hdr.push(len as u8);
@@ -223,7 +310,7 @@ fn ws_send(s: &mut TcpStream, tag: u8, payload: &[u8]) -> std::io::Result<()> {
         hdr.push(127);
         hdr.extend_from_slice(&(len as u64).to_be_bytes());
     }
-    hdr.push(tag);
+    hdr.extend_from_slice(header);
     s.write_all(&hdr)?;
     s.write_all(payload)
 }
@@ -336,7 +423,6 @@ mod tests {
 
     #[test]
     fn ws_accept_rfc6455_example() {
-        // RFC 6455 §1.3: key "dGhlIHNhbXBsZSBub25jZQ==" → accept below.
         let acc = base64(&sha1(
             b"dGhlIHNhbXBsZSBub25jZQ==258EAFA5-E914-47DA-95CA-C5AB0DC85B11",
         ));
@@ -347,5 +433,17 @@ mod tests {
     fn ws_key_parse_case_insensitive() {
         let req = "GET /ws HTTP/1.1\r\nHost: x\r\nSec-WebSocket-Key: abc123==\r\n\r\n";
         assert_eq!(ws_key(req).as_deref(), Some("abc123=="));
+    }
+
+    #[test]
+    fn h264cast_caches_and_dedups_config() {
+        let cast = H264Cast::new();
+        cast.publish_config(b'M', &[1, 2, 3]);
+        let (_rx, cfgs) = cast.subscribe();
+        assert_eq!(cfgs.len(), 1);
+        assert_eq!(cfgs[0].1.as_slice(), &[1, 2, 3]);
+        // Same bytes → no new config entry / no duplicate.
+        cast.publish_config(b'M', &[1, 2, 3]);
+        assert_eq!(cast.configs.lock().unwrap().len(), 1);
     }
 }

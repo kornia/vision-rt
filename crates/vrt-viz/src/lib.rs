@@ -14,11 +14,15 @@ use kornia_image::ImageError;
 
 pub mod draw;
 pub mod encode;
+#[cfg(feature = "h264")]
+pub mod h264;
 pub mod render;
 pub mod serve;
 pub mod trail;
 
 pub use encode::{encode_png, write_gif, JpegEncoder};
+#[cfg(feature = "h264")]
+pub use h264::{EncodedAu, H264Encoder};
 pub use render::{downscale, render_bev, render_main, stack_v};
 pub use serve::MjpegServer;
 pub use trail::TrailStore;
