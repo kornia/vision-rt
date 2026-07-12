@@ -1,6 +1,7 @@
 //! Track lifecycle: the internal [`Tracklet`] (Kalman + bookkeeping) and the
 //! public [`Track`] snapshot returned to callers.
 
+use crate::camera::CameraIntrinsics;
 use crate::kalman::{KalmanFilter3D, KalmanParams};
 use crate::Detection;
 
@@ -48,6 +49,29 @@ pub struct Track {
     pub hits: u32,
     /// Frames since the last match (0 on the frame it was updated).
     pub time_since_update: u32,
+}
+
+impl Track {
+    /// Metric **3D position** (metres, camera frame) — back-project the filtered
+    /// image-plane centre + depth through `k`. `pz` is meaningful only once the track
+    /// has had a real depth measurement (otherwise it is the coasting nominal).
+    pub fn metric_position(&self, k: &CameraIntrinsics) -> [f32; 3] {
+        let [px, py, pz] = self.position_3d;
+        k.unproject(px, py, pz)
+    }
+
+    /// Metric **velocity per nominal frame** (metres/frame, camera frame): the
+    /// change in [`metric_position`](Self::metric_position) over one state-velocity
+    /// step. Divide by the real seconds-per-frame to get m/s. Uses a finite
+    /// difference through `unproject` so depth motion (`vz`) and the depth-scaled
+    /// image motion both contribute.
+    pub fn metric_velocity(&self, k: &CameraIntrinsics) -> [f32; 3] {
+        let [px, py, pz] = self.position_3d;
+        let [vx, vy, vz] = self.velocity_3d;
+        let a = k.unproject(px, py, pz);
+        let b = k.unproject(px + vx, py + vy, pz + vz);
+        [b[0] - a[0], b[1] - a[1], b[2] - a[2]]
+    }
 }
 
 /// Internal mutable track: owns the Kalman filter and lifecycle counters.

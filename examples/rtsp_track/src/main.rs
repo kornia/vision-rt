@@ -31,7 +31,13 @@ use kornia_io::png::write_image_png_rgb8;
 use sensor_rtsp::RtspSource;
 use vrt_depth_anything::DepthAnything;
 use vrt_rfdetr_seg::{Instance, RfDetrSeg};
-use vrt_track::{BotSort, BotSortConfig, Detection, Track, TrackState};
+use vrt_track::{BotSort, BotSortConfig, CameraIntrinsics, Detection, Track, TrackState};
+
+/// Approximate horizontal FoV of the Tapo C210 (deg). TP-Link publishes no angular
+/// FoV — only the 3.83 mm F/2.4 lens — so this is computed from the lens on the
+/// C210's 1/2.9" 16:9 sensor (~5.12 mm wide): `2·atan(5.12 / (2·3.83)) ≈ 67°`.
+/// Replace with a checkerboard calibration for accurate metres.
+const TAPO_C210_HFOV_DEG: f32 = 67.0;
 
 type Res<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
@@ -61,6 +67,8 @@ fn main() -> Res<()> {
     let mut z = depth.alloc_result()?; // reused depth output
                                        // The tracker: pure CPU, reused across frames. Metric depth feeds `pz`.
     let mut tracker = BotSort::new(BotSortConfig::default())?;
+    // Intrinsics for the metric-3D readout (back-project px,py,pz → X,Y,Z metres).
+    let intr = CameraIntrinsics::from_hfov(w as f32, h as f32, TAPO_C210_HFOV_DEG);
     // Reused per-frame detection buffer (cleared, not reallocated).
     let mut dets: Vec<Detection> = Vec::new();
 
@@ -159,25 +167,21 @@ fn main() -> Res<()> {
                 a_trk / k,
                 a_dt / k,
             );
-            // A few live tracks with their tracked metric depth + approach velocity.
+            // A few live tracks with their metric 3D position + speed. `metric_velocity`
+            // is per nominal frame; divide by seconds/frame (the EMA interval) for m/s.
+            let spf = if ema_dt > 0.0 { ema_dt as f32 } else { 1.0 / 15.0 };
             let shown: Vec<String> = tracks
                 .iter()
                 .filter(|t| t.state == TrackState::Confirmed)
                 .take(6)
                 .map(|t| {
-                    let vz = t.velocity_3d[2];
-                    let dir = if vz < -0.02 {
-                        "→near"
-                    } else if vz > 0.02 {
-                        "→far"
-                    } else {
-                        ""
-                    };
+                    let [x, y, zz] = t.metric_position(&intr);
+                    let mv = t.metric_velocity(&intr);
+                    let speed = (mv[0].powi(2) + mv[1].powi(2) + mv[2].powi(2)).sqrt() / spf;
                     format!(
-                        "#{} {} @ {:.2} m{dir}",
+                        "#{} {} [X{x:+.1} Y{y:+.1} Z{zz:.1}]m {speed:.1}m/s",
                         t.id,
                         coco_name(t.class_id),
-                        t.position_3d[2]
                     )
                 })
                 .collect();

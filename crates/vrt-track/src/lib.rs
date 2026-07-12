@@ -41,11 +41,13 @@
 
 pub mod association;
 pub mod botsort;
+pub mod camera;
 pub mod gmc;
 pub mod kalman;
 pub mod track;
 
 pub use botsort::{BotSort, BotSortConfig};
+pub use camera::CameraIntrinsics;
 pub use kalman::{KalmanFilter3D, KalmanParams};
 pub use track::{Track, TrackState};
 
