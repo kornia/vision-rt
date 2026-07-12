@@ -17,16 +17,23 @@
 //! Everything GPU stays async / caller-owned; the tracker is pure CPU (µs). Build:
 //!   export CARGO_NET_GIT_FETCH_WITH_CLI=true
 //!   cargo run --release --manifest-path examples/rtsp_track/Cargo.toml \
-//!       -- <seg.engine> <depth.engine> rtsp://<camera>/stream [conf] [out.png]
+//!       -- <seg.engine> <depth.engine> rtsp://<camera>/stream [conf] [out]
 //!
-//! A 5th arg dumps ONE annotated frame (masks tinted + tracked boxes coloured by id,
-//! each labelled `<id> <depth>m`) to that PNG.
+//! The optional 5th arg picks the output (annotated = masks tinted + tracked boxes
+//! coloured by id, each labelled `<id> <depth>m`):
+//!   `out.png`      — dump ONE annotated frame to that PNG
+//!   `out.gif`      — record a ~10 s animated-GIF clip, then exit
+//!   `serve` | `:PORT` — MJPEG-over-HTTP live stream; open `http://<jetson-ip>:PORT`
+//!                       in a phone browser on the same LAN (no app, no ffmpeg)
 
-use std::io::Write;
+use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use cudarc::driver::CudaContext;
 use kornia_image::{Image, ImageSize};
+use kornia_io::jpeg::encode_image_jpeg_rgb8;
 use kornia_io::png::write_image_png_rgb8;
 use sensor_rtsp::RtspSource;
 use vrt_depth_anything::DepthAnything;
@@ -45,7 +52,10 @@ fn main() -> Res<()> {
     env_logger::init();
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 4 {
-        eprintln!("Usage: rtsp_track <seg.engine> <depth.engine> <rtsp://url> [conf] [out.png]");
+        eprintln!(
+            "Usage: rtsp_track <seg.engine> <depth.engine> <rtsp://url> [conf] \
+             [out.png | out.gif | serve | :PORT]"
+        );
         std::process::exit(1);
     }
     let seg_engine = &args[1];
@@ -70,11 +80,22 @@ fn main() -> Res<()> {
     // Intrinsics for the metric-3D readout (back-project px,py,pz → X,Y,Z metres).
     let intr = CameraIntrinsics::from_hfov(w as f32, h as f32, TAPO_C210_HFOV_DEG);
 
-    // Clip recording: if the out arg is a `.gif`, capture ~10 s of annotated frames
-    // (downscaled, every 2nd frame) then write an animated GIF and exit.
+    // Output mode from the 5th arg:
+    //   *.gif    → record a ~10 s animated-GIF clip, then exit
+    //   serve | :PORT → MJPEG-over-HTTP live stream (open http://<jetson-ip>:PORT
+    //                   from a phone browser on the same LAN)
+    //   *.png    → dump one annotated frame at frame 60
     let record = out_png.as_deref().is_some_and(|p| p.ends_with(".gif"));
+    let serve_port = out_png.as_deref().and_then(parse_port);
     let (gw, gh, rec_secs) = (640usize, 360usize, 10.0);
     let mut gif_frames: Vec<Vec<u8>> = Vec::new();
+    // Live-stream shared frame: the loop writes the latest annotated JPEG here, the
+    // HTTP server thread(s) push it to connected phones as multipart MJPEG.
+    let latest_jpeg: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+    if let Some(port) = serve_port {
+        spawn_mjpeg_server(port, latest_jpeg.clone());
+        println!("live: open http://<this-jetson-ip>:{port} in a phone browser (same Wi-Fi)");
+    }
     // Reused per-frame detection buffer (cleared, not reallocated).
     let mut dets: Vec<Detection> = Vec::new();
 
@@ -142,7 +163,20 @@ fn main() -> Res<()> {
         let tracks = tracker.update_dt(&dets, dt);
         let t6 = Instant::now();
 
-        if record {
+        if serve_port.is_some() {
+            // Encode the annotated frame to JPEG (kornia-io) and hand it to the server.
+            let buf = annotate(frame.image(), &stream, &d, &tracks)?;
+            let img = Image::<u8, 3>::new(
+                ImageSize {
+                    width: w as usize,
+                    height: h as usize,
+                },
+                buf,
+            )?;
+            let mut jpeg = Vec::new();
+            encode_image_jpeg_rgb8(&img, 70, &mut jpeg)?;
+            *latest_jpeg.lock().unwrap_or_else(|e| e.into_inner()) = jpeg;
+        } else if record {
             if t_start.elapsed().as_secs_f64() < rec_secs {
                 if n.is_multiple_of(2) {
                     // ~7.5 captured/s → real-time playback at 13 cs delay.
@@ -271,6 +305,58 @@ fn save_overlay(
     write_image_png_rgb8(path, &img)?;
     println!("     saved tracked overlay → {path}");
     Ok(())
+}
+
+/// Parse the output arg into an MJPEG server port: `serve` → 8080, `:PORT` → PORT.
+fn parse_port(s: &str) -> Option<u16> {
+    if s == "serve" {
+        Some(8080)
+    } else {
+        s.strip_prefix(':').and_then(|p| p.parse().ok())
+    }
+}
+
+/// Spawn a background MJPEG-over-HTTP server. Every connected client is streamed the
+/// latest annotated JPEG as `multipart/x-mixed-replace` — open `http://<ip>:port`
+/// in a phone browser (same LAN) for a live view. No app, no ffmpeg.
+fn spawn_mjpeg_server(port: u16, latest: Arc<Mutex<Vec<u8>>>) {
+    std::thread::spawn(move || {
+        let listener = match TcpListener::bind(("0.0.0.0", port)) {
+            Ok(l) => l,
+            Err(e) => {
+                eprintln!("mjpeg: bind :{port} failed: {e}");
+                return;
+            }
+        };
+        for stream in listener.incoming().flatten() {
+            let latest = latest.clone();
+            std::thread::spawn(move || {
+                let _ = serve_client(stream, &latest);
+            });
+        }
+    });
+}
+
+/// Serve one client the MJPEG stream until it disconnects.
+fn serve_client(mut s: TcpStream, latest: &Arc<Mutex<Vec<u8>>>) -> std::io::Result<()> {
+    let _ = s.read(&mut [0u8; 1024]); // consume the HTTP request line
+    s.write_all(
+        b"HTTP/1.0 200 OK\r\nConnection: close\r\nCache-Control: no-cache\r\n\
+          Content-Type: multipart/x-mixed-replace; boundary=frame\r\n\r\n",
+    )?;
+    loop {
+        let jpeg = latest.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        if !jpeg.is_empty() {
+            write!(
+                s,
+                "--frame\r\nContent-Type: image/jpeg\r\nContent-Length: {}\r\n\r\n",
+                jpeg.len()
+            )?;
+            s.write_all(&jpeg)?;
+            s.write_all(b"\r\n")?;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(66)); // ~15 fps push
+    }
 }
 
 /// Nearest-neighbour downscale an RGB buffer to `(dw, dh)` (keeps the GIF small).
