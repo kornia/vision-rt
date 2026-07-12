@@ -33,7 +33,7 @@ use std::time::Instant;
 
 use cudarc::driver::CudaContext;
 use kornia_image::{Image, ImageSize};
-use kornia_io::jpeg::encode_image_jpeg_rgb8;
+use kornia_io::jpegturbo::JpegTurboEncoder;
 use kornia_io::png::write_image_png_rgb8;
 use sensor_rtsp::RtspSource;
 use vrt_depth_anything::DepthAnything;
@@ -101,6 +101,9 @@ fn main() -> Res<()> {
     // its own MJPEG endpoint (`/main`, `/bev`) and an index page stacks them.
     let latest_main: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
     let latest_bev: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+    let jenc = JpegTurboEncoder::new()?; // SIMD JPEG, reused every frame
+    jenc.set_quality(72)?;
+    jenc.set_subsamp(turbojpeg::Subsamp::Sub2x2)?; // 4:2:0 → ~2× faster + smaller
     if let Some(port) = serve_port {
         spawn_mjpeg_server(port, latest_main.clone(), latest_bev.clone());
         println!("live: open http://<this-jetson-ip>:{port} in a phone browser (same Wi-Fi)");
@@ -180,8 +183,8 @@ fn main() -> Res<()> {
             let r1 = Instant::now();
             let bev = render_bev(&tracks, &intr);
             let r2 = Instant::now();
-            let jm = encode_jpeg(&main, w as usize, h as usize)?;
-            let jb = encode_jpeg(&bev, BEV_W, BEV_H)?;
+            let jm = encode_jpeg(&jenc, &main, w as usize, h as usize)?;
+            let jb = encode_jpeg(&jenc, &bev, BEV_W, BEV_H)?;
             let r3 = Instant::now();
             *latest_main.lock().unwrap_or_else(|e| e.into_inner()) = jm;
             *latest_bev.lock().unwrap_or_else(|e| e.into_inner()) = jb;
@@ -324,124 +327,141 @@ fn render_main(
     Ok(buf)
 }
 
-/// Render the **BEV** as a standalone `BEV_W×BEV_H` radar-style image: the camera at
-/// bottom-centre, its field-of-view drawn as a shaded cone with concentric range arcs
-/// (metres), and each confirmed track a glowing puck at its metric `(X, Z)` coloured
-/// by id. Modern dark theme; all text is digit+`m`/id (the bitmap font has no letters).
+/// Render the **BEV** as a standalone `BEV_W×BEV_H` top-down **floor plan**: an
+/// orthographic metre grid (blueprint style) with the camera at the bottom edge
+/// looking "up" into the room, and each track drawn as a **footprint rectangle**
+/// sized by its real-world width (box width × depth ÷ fx), coloured by id.
 fn render_bev(tracks: &[Track], intr: &CameraIntrinsics) -> Vec<u8> {
     let (w, h) = (BEV_W, BEV_H);
-    // Vertical gradient background (a touch lighter near the camera at the bottom).
     let mut buf = vec![0u8; w * h * 3];
-    for y in 0..h {
-        let t = 1.0 - y as f32 / h as f32; // 1 at bottom
-        let base = [
-            (9.0 + 5.0 * t) as u8,
-            (13.0 + 7.0 * t) as u8,
-            (20.0 + 11.0 * t) as u8,
-        ];
-        for x in 0..w {
-            let o = (y * w + x) * 3;
-            buf[o..o + 3].copy_from_slice(&base);
-        }
+    let bg = [14u8, 18, 26];
+    for p in buf.chunks_exact_mut(3) {
+        p.copy_from_slice(&bg);
     }
 
-    let rmax = 6.0f32; // metres (scene is ~2–5 m; keeps the cone filled, not cramped)
-    let ax = w as f32 / 2.0;
-    let ay = h as f32 - 28.0; // camera apex
-    let ppm = (ay - 26.0) / rmax; // pixels per metre
-    let k = (intr.cx / intr.fx).max(0.05); // tan(half-FoV)
-    let half = k.atan();
-    let rpx = rmax * ppm;
-    let map = |x_m: f32, z_m: f32| ((ax + x_m * ppm) as i32, (ay - z_m * ppm) as i32);
+    let zmax = 6.0f32; // depth into the room (metres)
+    let margin = 34.0f32;
+    let ppm = (h as f32 - 2.0 * margin) / zmax; // isotropic px/m (no distortion)
+    let (ax, az) = (w as f32 / 2.0, h as f32 - margin); // camera at bottom-centre
+    let xspan = (ax - 6.0) / ppm; // half-width visible (metres)
+    let map = |x: f32, z: f32| ((ax + x * ppm) as i32, (az - z * ppm) as i32);
 
-    // Shade the FoV cone (wedge ∩ range circle), scanline by scanline.
-    let wedge = [19u8, 28, 43];
-    for y in 20..ay as usize {
-        let dy = ay - y as f32;
-        let hw = (dy * k).min((rpx * rpx - dy * dy).max(0.0).sqrt());
-        let (x0, x1) = (
-            (ax - hw).max(0.0) as usize,
-            (ax + hw).min(w as f32 - 1.0) as usize,
-        );
-        for x in x0..=x1 {
-            let o = (y * w + x) * 3;
-            buf[o..o + 3].copy_from_slice(&wedge);
-        }
-    }
-
-    // Concentric range arcs (every 2 m) as polylines within the cone + a labels.
-    let arc = [44u8, 64, 84];
-    for r_m in [2.0f32, 4.0, 6.0] {
-        let rr = r_m * ppm;
-        let mut prev: Option<(i32, i32)> = None;
-        for i in 0..=64 {
-            let th = -half + 2.0 * half * (i as f32 / 64.0);
-            let p = ((ax + rr * th.sin()) as i32, (ay - rr * th.cos()) as i32);
-            if let Some(q) = prev {
-                draw_line(&mut buf, w, h, q.0, q.1, p.0, p.1, arc);
-            }
-            prev = Some(p);
-        }
-        let (lx, ly) = map(0.0, r_m);
-        draw_label(
+    // Metre grid (Z depth lines + labels, X lateral lines); axes brighter.
+    let (grid, axis) = ([30u8, 38, 52], [64u8, 80, 104]);
+    let ztop = (az - zmax * ppm) as i32;
+    for zi in 0..=zmax as i32 {
+        let (_, y) = map(0.0, zi as f32);
+        draw_line(
             &mut buf,
             w,
             h,
-            lx + 5,
-            ly - 4,
-            &format!("{r_m:.0}m"),
-            [90, 120, 145],
+            0,
+            y,
+            w as i32,
+            y,
+            if zi == 0 { axis } else { grid },
+        );
+        draw_label(&mut buf, w, h, 6, y - 8, &format!("{zi}m"), [96, 116, 140]);
+    }
+    for xi in -(xspan as i32)..=xspan as i32 {
+        let (x, _) = map(xi as f32, 0.0);
+        draw_line(
+            &mut buf,
+            w,
+            h,
+            x,
+            ztop,
+            x,
+            az as i32,
+            if xi == 0 { axis } else { grid },
         );
     }
-    // Cone edge rays + faint centre line.
-    let ray = [62u8, 94, 122];
-    for s in [-1.0f32, 1.0] {
-        let (ex, ey) = (
-            (ax + rpx * (s * half).sin()) as i32,
-            (ay - rpx * (s * half).cos()) as i32,
-        );
-        draw_line(&mut buf, w, h, ax as i32, ay as i32, ex, ey, ray);
-    }
-    draw_line(
-        &mut buf,
-        w,
-        h,
-        ax as i32,
-        ay as i32,
-        ax as i32,
-        (ay - rpx) as i32,
-        [26, 38, 52],
-    );
 
-    // Camera marker: a cyan chevron at the apex.
-    let (cx, cy) = (ax as i32, ay as i32);
+    // Faint FoV cone outline for orientation (what the camera actually sees).
+    let k = (intr.cx / intr.fx).max(0.05); // tan(half-FoV)
+    for s in [-1.0f32, 1.0] {
+        let (ex, ey) = map(s * k * zmax, zmax);
+        draw_line(&mut buf, w, h, ax as i32, az as i32, ex, ey, [40, 58, 78]);
+    }
+    // Camera chevron.
+    let (cx, cy) = (ax as i32, az as i32);
     fill_tri(
         &mut buf,
         w,
         h,
         (cx, cy - 12),
-        (cx - 8, cy + 2),
-        (cx + 8, cy + 2),
+        (cx - 8, cy + 3),
+        (cx + 8, cy + 3),
         [92, 212, 236],
     );
 
-    // Track pucks: soft glow → white ring → coloured core, id label.
+    // Object footprints: a metre-scaled rectangle per track at its (X, Z).
     for t in tracks {
         if t.state != TrackState::Confirmed {
             continue;
         }
         let [x_m, _, z_m] = t.metric_position(intr);
-        if z_m <= 0.05 || z_m > rmax || x_m.abs() > z_m * k + 0.6 {
+        if z_m <= 0.1 || z_m > zmax || x_m.abs() > xspan {
             continue;
         }
-        let (px, py) = map(x_m, z_m);
+        let box_w = (t.bbox[2] - t.bbox[0]).max(1.0);
+        let wm = (box_w * z_m / intr.fx).clamp(0.15, 3.0); // real width (m)
+        let dm = (wm * 0.6).clamp(0.2, 1.5); // footprint depth guess
+        let (fw, fd) = ((wm * ppm) as i32, (dm * ppm) as i32);
+        let (mx, my) = map(x_m, z_m);
         let c = track_color(t.id);
-        fill_circle(&mut buf, w, h, px, py, 11, [c[0] / 3, c[1] / 3, c[2] / 3]); // glow
-        fill_circle(&mut buf, w, h, px, py, 7, [238, 240, 248]); // ring
-        fill_circle(&mut buf, w, h, px, py, 5, c); // core
-        draw_label(&mut buf, w, h, px + 10, py - 7, &format!("{}", t.id), c);
+        fill_rect_alpha(&mut buf, w, h, mx - fw / 2, my - fd / 2, fw, fd, c, 90);
+        rect_outline(&mut buf, w, h, mx - fw / 2, my - fd / 2, fw, fd, c);
+        draw_label(
+            &mut buf,
+            w,
+            h,
+            mx - 3,
+            my - 3,
+            &format!("{}", t.id),
+            [240, 240, 248],
+        );
     }
     buf
+}
+
+/// Alpha-blend a filled rectangle (`a` in 0..=255) at `(x, y)` size `rw×rh`.
+fn fill_rect_alpha(
+    buf: &mut [u8],
+    w: usize,
+    h: usize,
+    x: i32,
+    y: i32,
+    rw: i32,
+    rh: i32,
+    color: [u8; 3],
+    a: u16,
+) {
+    for yy in y.max(0)..(y + rh).min(h as i32) {
+        for xx in x.max(0)..(x + rw).min(w as i32) {
+            let o = (yy as usize * w + xx as usize) * 3;
+            for k in 0..3 {
+                buf[o + k] = ((buf[o + k] as u16 * (255 - a) + color[k] as u16 * a) / 255) as u8;
+            }
+        }
+    }
+}
+
+/// Draw a rectangle outline at `(x, y)` size `rw×rh`.
+fn rect_outline(
+    buf: &mut [u8],
+    w: usize,
+    h: usize,
+    x: i32,
+    y: i32,
+    rw: i32,
+    rh: i32,
+    color: [u8; 3],
+) {
+    draw_line(buf, w, h, x, y, x + rw, y, color);
+    draw_line(buf, w, h, x, y + rh, x + rw, y + rh, color);
+    draw_line(buf, w, h, x, y, x, y + rh, color);
+    draw_line(buf, w, h, x + rw, y, x + rw, y + rh, color);
 }
 
 /// Stack `top` (`tw×th`) over `bot` (`bw×bh`) into one RGB buffer of
@@ -462,8 +482,8 @@ fn stack_v(top: &[u8], tw: usize, th: usize, bot: &[u8], bw: usize, bh: usize) -
     out
 }
 
-/// Encode an RGB buffer to JPEG (kornia-io, quality 70).
-fn encode_jpeg(rgb: &[u8], w: usize, h: usize) -> Res<Vec<u8>> {
+/// Encode an RGB buffer to JPEG with kornia-io's SIMD TurboJPEG encoder (reused).
+fn encode_jpeg(enc: &JpegTurboEncoder, rgb: &[u8], w: usize, h: usize) -> Res<Vec<u8>> {
     let img = Image::<u8, 3>::new(
         ImageSize {
             width: w,
@@ -471,24 +491,7 @@ fn encode_jpeg(rgb: &[u8], w: usize, h: usize) -> Res<Vec<u8>> {
         },
         rgb.to_vec(),
     )?;
-    let mut jpeg = Vec::new();
-    encode_image_jpeg_rgb8(&img, 70, &mut jpeg)?;
-    Ok(jpeg)
-}
-
-/// Fill a disc of radius `r` centred at `(cx, cy)`, clipped to the frame.
-fn fill_circle(buf: &mut [u8], w: usize, h: usize, cx: i32, cy: i32, r: i32, color: [u8; 3]) {
-    for dy in -r..=r {
-        let y = cy + dy;
-        if y < 0 || y >= h as i32 {
-            continue;
-        }
-        let dx = ((r * r - dy * dy) as f32).sqrt() as i32;
-        for x in (cx - dx).max(0)..=(cx + dx).min(w as i32 - 1) {
-            let o = (y as usize * w + x as usize) * 3;
-            buf[o..o + 3].copy_from_slice(&color);
-        }
-    }
+    Ok(enc.encode_rgb8(&img)?)
 }
 
 /// Fill a triangle (barycentric sign test), clipped to the frame.
