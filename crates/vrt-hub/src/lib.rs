@@ -184,6 +184,25 @@ pub static REGISTRY: &[ModelSpec] = &[
             sm: "87",
         }],
     },
+    ModelSpec {
+        // Depth Anything V2 Metric-Small, indoor (Hypersim, ~20 m) — dense metric
+        // depth. Fixed-resolution export (input [1,3,392,392]) + a prebuilt engine
+        // for this Orin config (trt+sm guarded; other boxes build from the ONNX
+        // on-device).
+        name: "depth-anything-v2-metric-small",
+        hf_repo: "kornia/depth-anything",
+        revision: "main",
+        files: &[ModelFile {
+            filename: "depth-anything-v2-metric-small-indoor.onnx",
+            sha256: "50dbcac7a6d667e365a3ceffdf51cc497aa5e06b6d2c1d5824c252640fbf5bf3",
+        }],
+        engines: &[EngineArtifact {
+            filename: "depth-anything-v2-metric-small-indoor-trt10.3.0.30-sm87-fp16.engine",
+            sha256: "a6255e66b01b11239dff9045df25e278f06afc7c2d63691ced8be1eecafca655",
+            trt_version: "10.3.0.30",
+            sm: "87",
+        }],
+    },
 ];
 
 /// Look up a model spec by name.
