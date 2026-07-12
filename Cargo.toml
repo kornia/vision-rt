@@ -16,7 +16,7 @@ members = [
 # + GStreamer. Excluded from the workspace so hosted CI never clones a private repo
 # to resolve, and GStreamer stays out of the pure-algorithm crates. Build it
 # directly: `cargo run --manifest-path examples/rtsp_rfdetr/Cargo.toml`.
-exclude = ["examples/rtsp_rfdetr", "examples/rtsp_rfdetr_seg", "examples/rtsp_depth"]
+exclude = ["examples/rtsp_rfdetr", "examples/rtsp_rfdetr_seg", "examples/rtsp_depth", "examples/rtsp_track"]
 
 [workspace.dependencies]
 # One cudarc across the workspace, matching kornia-rs's cudarc feature set so cargo

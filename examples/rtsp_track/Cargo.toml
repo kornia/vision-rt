@@ -1,0 +1,33 @@
+# Standalone example: RTSP → RF-DETR-Seg + Depth Anything V2 + BoT-SORT tracking,
+# device end-to-end. The mask-sampled metric depth feeds each detection's `pz`, so
+# the 3D Kalman tracks metric depth + approach velocity (not just an image-plane box).
+# Kept OUT of the vision-rt workspace (private `sensor-rtsp` git dep + GStreamer).
+[package]
+name = "rtsp_track"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "rtsp_track"
+path = "src/main.rs"
+
+[dependencies]
+vrt-depth-anything = { path = "../../crates/vrt-depth-anything" }
+vrt-rfdetr-seg = { path = "../../crates/vrt-rfdetr-seg" }
+vrt-track = { path = "../../crates/vrt-track" }
+vrt-types = { path = "../../crates/vrt-types" }
+# Private git dep (kornia/sensor-rt) — needs CARGO_NET_GIT_FETCH_WITH_CLI=true.
+sensor-rtsp = { git = "https://github.com/kornia/sensor-rt", rev = "d3b369c95b259c9b14e9b4f69581c2d609dbb2cc" }
+kornia-image = { git = "https://github.com/kornia/kornia-rs", tag = "v0.1.15-rc.4", features = ["cudarc"] }
+kornia-imgproc = { git = "https://github.com/kornia/kornia-rs", tag = "v0.1.15-rc.4", features = ["cudarc"] }
+kornia-io = { git = "https://github.com/kornia/kornia-rs", tag = "v0.1.15-rc.4" }
+cudarc = { version = "0.19", default-features = false, features = [
+  "cuda-version-from-build-system",
+  "driver",
+  "nvrtc",
+  "std",
+  "fallback-dynamic-loading",
+  "fallback-latest",
+] }
+env_logger = "0.11"
