@@ -1,0 +1,28 @@
+[package]
+name = "vrt-track"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+description = "BoT-SORT multi-object tracker for vision-rt — ByteTrack two-stage association over a 3D-aware constant-velocity Kalman filter (CPU, no TRT)"
+readme = "README.md"
+
+[lib]
+name = "vrt_track"
+
+[features]
+default = []
+# Appearance / ReID hook: cosine-distance fusion + per-track EMA feature bank.
+# Purely optional — no hard dependency on any embedding model. Feed embeddings
+# yourself (e.g. from a future vrt-reid crate) via `Detection::feature`.
+appearance = []
+
+[dependencies]
+# Fixed-size (SMatrix/SVector) linear algebra for the 8-state / 5-measurement
+# Kalman filter. Statically-sized => no heap in the hot path, one instantiation,
+# and a well-tested `try_inverse` for the 5x5 innovation covariance. Already in
+# the workspace lock (pulled by kornia), so it adds no new download.
+nalgebra = { version = "0.35", default-features = false, features = ["std"] }
+thiserror = "2.0"
+# Shared `CameraIntrinsics` (and the rest of the vision-rt type vocabulary).
+vrt-types = { path = "../vrt-types" }
