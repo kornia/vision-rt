@@ -22,6 +22,7 @@
 //!   `serve` | `:PORT` — MJPEG-over-HTTP live stream (main + BEV); open
 //!                       `http://<jetson-ip>:PORT` in a phone browser (same LAN)
 
+use std::collections::HashSet;
 use std::io::Write;
 use std::time::Instant;
 
@@ -74,7 +75,14 @@ fn main() -> Res<()> {
     let mut depth = DepthAnything::from_engine_file(depth_engine, stream.clone())?;
     let mut d = seg.alloc_result()?;
     let mut z = depth.alloc_result()?;
-    let mut tracker = BotSort::new(BotSortConfig::default())?;
+    // Diagnostic A/B: `RTSP_TRACK_NO_DEPTH=1` disables the depth gate + soft cost so
+    // ID stability can be compared with vs without the 3D association terms.
+    let mut cfg = BotSortConfig::default();
+    if std::env::var("RTSP_TRACK_NO_DEPTH").is_ok() {
+        cfg.depth_gate = false; // A/B toggle for the depth-gate's effect on ID stability
+        println!("(depth gate DISABLED for A/B)");
+    }
+    let mut tracker = BotSort::new(cfg)?;
     let intr = CameraIntrinsics::from_hfov(w as f32, h as f32, TAPO_C210_HFOV_DEG);
     // Lens undistort (before seg/depth) → rectified pinhole for the whole pipeline.
     let undist = Undistorter::new(&intr, TAPO_C210_K1, w, h, &stream)?;
@@ -104,6 +112,7 @@ fn main() -> Res<()> {
 
     let mut dets: Vec<Detection> = Vec::new();
     let mut trails = TrailStore::new(); // per-track metric path for the BEV
+    let mut window_ids: HashSet<u64> = HashSet::new(); // distinct ids per 100-frame window
     let ms = |dur: std::time::Duration| dur.as_secs_f64() * 1e3;
     let (mut n, t_start) = (0u64, Instant::now());
     let (mut a_src, mut a_enq, mut a_fus, mut a_sync, mut a_read, mut a_trk) =
@@ -163,6 +172,9 @@ fn main() -> Res<()> {
         let tracks = tracker.update_dt(&dets, dt);
         let t6 = Instant::now();
         trails.update(&tracks, &intr); // accumulate BEV motion trails
+        for t in tracks.iter().filter(|t| t.state == TrackState::Confirmed) {
+            window_ids.insert(t.id); // churn: distinct ids over the window vs live count
+        }
 
         // ── viz (vrt-viz): render main + BEV, then serve / record / dump ──
         // Only one of the three sinks is active per run; each renders the same pair.
@@ -206,11 +218,22 @@ fn main() -> Res<()> {
                 .iter()
                 .filter(|t| t.state == TrackState::Confirmed)
                 .count();
+            // Churn: distinct confirmed ids seen this window vs the live count. If the
+            // scene is static, distinct ≈ live; distinct ≫ live ⇒ ids are switching.
+            let distinct = window_ids.len();
+            window_ids.clear();
             println!(
                 "── {n} frames | {:.1} fps | source {:.2} | enqueue {:.3} | fusion {:.3} | \
-                 sync(GPU) {:.2} | readout {:.3} | track {:.3} | dt {:.2} | {inst_n} det → {confirmed} conf",
+                 sync(GPU) {:.2} | readout {:.3} | track {:.3} | dt {:.2} | {inst_n} det → \
+                 {confirmed} conf | {distinct} distinct-ids/100f",
                 n as f64 / t_start.elapsed().as_secs_f64(),
-                a_src / k, a_enq / k, a_fus / k, a_sync / k, a_read / k, a_trk / k, a_dt / k,
+                a_src / k,
+                a_enq / k,
+                a_fus / k,
+                a_sync / k,
+                a_read / k,
+                a_trk / k,
+                a_dt / k,
             );
             let spf = if ema_dt > 0.0 {
                 ema_dt as f32

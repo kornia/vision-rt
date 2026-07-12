@@ -1,7 +1,7 @@
 //! The [`BotSort`] tracker: ByteTrack two-stage association over the 3D Kalman
 //! motion model, with optional appearance fusion and a camera-motion hook.
 
-use crate::association::{fuse_depth, gate_depth, iou_cost_matrix, linear_assignment};
+use crate::association::{gate_depth, iou_cost_matrix, linear_assignment};
 use crate::gmc::{CameraMotion, NoCameraMotion};
 use crate::kalman::KalmanParams;
 use crate::track::{Track, TrackState, Tracklet};
@@ -48,18 +48,14 @@ pub struct BotSortConfig {
     /// [`Detection::depth`]: crate::Detection::depth
     pub depth_gate: bool,
     /// Relative depth tolerance for the gate: a pair is rejected when
-    /// `|z_track − z_det| > max(depth_gate_abs, depth_gate_rel · z_track)`. `0.25`
-    /// = allow 25 % — loose enough for monocular-depth noise, tight enough to split
-    /// foreground from background.
+    /// `|z_track − z_det| > max(depth_gate_abs, depth_gate_rel · z_track)`. Kept
+    /// **loose** (`0.35` = 35 %) so ordinary monocular-depth noise on a static object
+    /// doesn't false-reject a valid match (which would churn its ID); genuine
+    /// foreground/background separation is far larger and still vetoes a swap.
     pub depth_gate_rel: f32,
     /// Absolute floor (metres) for the depth tolerance, so nearby objects aren't
     /// gated too aggressively when `rel · z` is tiny.
     pub depth_gate_abs: f32,
-    /// **Soft** depth-consistency weight `[0, 1]` blended into the association cost
-    /// (on top of the hard gate): among candidates the assignment prefers the
-    /// depth-closest, making 3D a positive matching signal. `0` = gate only. See
-    /// [`crate::association::fuse_depth`].
-    pub depth_weight: f32,
 }
 
 impl Default for BotSortConfig {
@@ -80,9 +76,8 @@ impl Default for BotSortConfig {
             #[cfg(feature = "appearance")]
             feature_momentum: 0.9,
             depth_gate: true,
-            depth_gate_rel: 0.25,
-            depth_gate_abs: 0.5,
-            depth_weight: 0.2,
+            depth_gate_rel: 0.35,
+            depth_gate_abs: 0.7,
         }
     }
 }
@@ -104,9 +99,6 @@ impl BotSortConfig {
         }
         if self.depth_gate && (self.depth_gate_rel < 0.0 || self.depth_gate_abs < 0.0) {
             return bad("depth_gate_rel / depth_gate_abs must be >= 0");
-        }
-        if !(0.0..=1.0).contains(&self.depth_weight) {
-            return bad("depth_weight must be in [0, 1]");
         }
         Ok(())
     }
@@ -198,11 +190,13 @@ impl BotSort {
         self.update_with_motion_dt(detections, gmc, 1.0)
     }
 
-    /// Fold **3D depth** into one stage's cost matrix in place: blend the soft
-    /// depth-consistency cost (`depth_weight`) so the assignment prefers depth-closest
-    /// pairs, then hard-reject depth-mismatched pairs (`depth_gate`). Builds the track
-    /// (measured pz) + detection depth vectors from the two index slices once. Shared
-    /// by all three association stages; no-op when both are disabled.
+    /// Depth-gate one stage's cost matrix in place (no-op when `depth_gate` is off):
+    /// build the track (measured pz) + detection depth vectors from the two index
+    /// slices, then hard-reject depth-mismatched pairs. The single 3D-association
+    /// mechanism, shared by all three stages. The tolerance is deliberately loose
+    /// (`depth_gate_rel`/`abs`) so ordinary monocular-depth noise on a static object
+    /// doesn't false-reject a valid match, while genuine cross-depth separation still
+    /// vetoes an ID swap.
     fn gate_stage(
         &self,
         cost: &mut [Vec<f64>],
@@ -211,7 +205,7 @@ impl BotSort {
         detections: &[Detection],
     ) {
         let cfg = &self.config;
-        if !cfg.depth_gate && cfg.depth_weight <= 0.0 {
+        if !cfg.depth_gate {
             return;
         }
         let track_d: Vec<Option<f32>> = track_idx
@@ -219,23 +213,13 @@ impl BotSort {
             .map(|&ti| self.tracks[ti].measured_depth())
             .collect();
         let det_d: Vec<Option<f32>> = det_idx.iter().map(|&i| detections[i].depth).collect();
-        fuse_depth(
+        gate_depth(
             cost,
             &track_d,
             &det_d,
-            cfg.depth_weight,
             cfg.depth_gate_rel,
             cfg.depth_gate_abs,
         );
-        if cfg.depth_gate {
-            gate_depth(
-                cost,
-                &track_d,
-                &det_d,
-                cfg.depth_gate_rel,
-                cfg.depth_gate_abs,
-            );
-        }
     }
 
     /// Advance by `dt` time units with camera-motion compensation — the full entry
