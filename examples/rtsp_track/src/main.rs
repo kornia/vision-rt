@@ -305,55 +305,122 @@ fn render_main(
     Ok(buf)
 }
 
-/// Render the **BEV** as a standalone `BEV_W×BEV_H` image: a top-down metric map with
-/// the camera at bottom-centre looking "up", each confirmed track a dot at its metric
-/// `(X, Z)` coloured by id, over a 1 m grid. Range: X ∈ [−4, 4] m, Z ∈ [0, 8] m.
+/// Render the **BEV** as a standalone `BEV_W×BEV_H` radar-style image: the camera at
+/// bottom-centre, its field-of-view drawn as a shaded cone with concentric range arcs
+/// (metres), and each confirmed track a glowing puck at its metric `(X, Z)` coloured
+/// by id. Modern dark theme; all text is digit+`m`/id (the bitmap font has no letters).
 fn render_bev(tracks: &[Track], intr: &CameraIntrinsics) -> Vec<u8> {
     let (w, h) = (BEV_W, BEV_H);
-    let mut buf = vec![20u8; w * h * 3]; // dark background
-    let (xmin, xmax, zmax) = (-4.0f32, 4.0f32, 8.0f32);
-    let map = |x_m: f32, z_m: f32| -> (i32, i32) {
-        let px = (x_m - xmin) / (xmax - xmin) * w as f32;
-        let py = h as f32 - (z_m / zmax) * h as f32; // Z=0 bottom (camera), far = top
-        (px as i32, py as i32)
-    };
-    let grid = [60u8, 60, 60];
-    // Z rings (depth) every 1 m + label down the left edge.
-    for zi in 1..=zmax as i32 {
-        let (_, y) = map(0.0, zi as f32);
-        draw_line(&mut buf, w, h, 0, y, w as i32, y, grid);
-        draw_label(&mut buf, w, h, 4, y + 2, &format!("{zi}m"), [120, 120, 120]);
+    // Vertical gradient background (a touch lighter near the camera at the bottom).
+    let mut buf = vec![0u8; w * h * 3];
+    for y in 0..h {
+        let t = 1.0 - y as f32 / h as f32; // 1 at bottom
+        let base = [
+            (9.0 + 5.0 * t) as u8,
+            (13.0 + 7.0 * t) as u8,
+            (20.0 + 11.0 * t) as u8,
+        ];
+        for x in 0..w {
+            let o = (y * w + x) * 3;
+            buf[o..o + 3].copy_from_slice(&base);
+        }
     }
-    // X grid (lateral) every 1 m.
-    for xi in xmin as i32..=xmax as i32 {
-        let (x, _) = map(xi as f32, 0.0);
-        draw_line(&mut buf, w, h, x, 0, x, h as i32, grid);
+
+    let rmax = 8.0f32; // metres
+    let ax = w as f32 / 2.0;
+    let ay = h as f32 - 22.0; // camera apex
+    let ppm = (ay - 20.0) / rmax; // pixels per metre
+    let k = (intr.cx / intr.fx).max(0.05); // tan(half-FoV)
+    let half = k.atan();
+    let rpx = rmax * ppm;
+    let map = |x_m: f32, z_m: f32| ((ax + x_m * ppm) as i32, (ay - z_m * ppm) as i32);
+
+    // Shade the FoV cone (wedge ∩ range circle), scanline by scanline.
+    let wedge = [19u8, 28, 43];
+    for y in 20..ay as usize {
+        let dy = ay - y as f32;
+        let hw = (dy * k).min((rpx * rpx - dy * dy).max(0.0).sqrt());
+        let (x0, x1) = (
+            (ax - hw).max(0.0) as usize,
+            (ax + hw).min(w as f32 - 1.0) as usize,
+        );
+        for x in x0..=x1 {
+            let o = (y * w + x) * 3;
+            buf[o..o + 3].copy_from_slice(&wedge);
+        }
     }
-    draw_label(
+
+    // Concentric range arcs (every 2 m) as polylines within the cone + a labels.
+    let arc = [44u8, 64, 84];
+    for r_m in [2.0f32, 4.0, 6.0, 8.0] {
+        let rr = r_m * ppm;
+        let mut prev: Option<(i32, i32)> = None;
+        for i in 0..=64 {
+            let th = -half + 2.0 * half * (i as f32 / 64.0);
+            let p = ((ax + rr * th.sin()) as i32, (ay - rr * th.cos()) as i32);
+            if let Some(q) = prev {
+                draw_line(&mut buf, w, h, q.0, q.1, p.0, p.1, arc);
+            }
+            prev = Some(p);
+        }
+        let (lx, ly) = map(0.0, r_m);
+        draw_label(
+            &mut buf,
+            w,
+            h,
+            lx + 5,
+            ly - 4,
+            &format!("{r_m:.0}m"),
+            [90, 120, 145],
+        );
+    }
+    // Cone edge rays + faint centre line.
+    let ray = [62u8, 94, 122];
+    for s in [-1.0f32, 1.0] {
+        let (ex, ey) = (
+            (ax + rpx * (s * half).sin()) as i32,
+            (ay - rpx * (s * half).cos()) as i32,
+        );
+        draw_line(&mut buf, w, h, ax as i32, ay as i32, ex, ey, ray);
+    }
+    draw_line(
         &mut buf,
         w,
         h,
-        4,
-        4,
-        "BEV top-down (metres)",
-        [150, 150, 150],
+        ax as i32,
+        ay as i32,
+        ax as i32,
+        (ay - rpx) as i32,
+        [26, 38, 52],
     );
-    // Camera marker at (0, 0) bottom-centre.
-    let (cxp, cyp) = map(0.0, 0.0);
-    fill_dot(&mut buf, w, h, cxp, cyp - 4, 5, [235, 235, 235]);
-    // Each confirmed track: a coloured dot at its metric (X, Z) + `<id> <name>`.
+
+    // Camera marker: a cyan chevron at the apex.
+    let (cx, cy) = (ax as i32, ay as i32);
+    fill_tri(
+        &mut buf,
+        w,
+        h,
+        (cx, cy - 12),
+        (cx - 8, cy + 2),
+        (cx + 8, cy + 2),
+        [92, 212, 236],
+    );
+
+    // Track pucks: soft glow → white ring → coloured core, id label.
     for t in tracks {
         if t.state != TrackState::Confirmed {
             continue;
         }
         let [x_m, _, z_m] = t.metric_position(intr);
-        if z_m <= 0.0 || z_m > zmax || x_m < xmin || x_m > xmax {
+        if z_m <= 0.05 || z_m > rmax || x_m.abs() > z_m * k + 0.6 {
             continue;
         }
         let (px, py) = map(x_m, z_m);
         let c = track_color(t.id);
-        fill_dot(&mut buf, w, h, px, py, 7, c);
-        draw_label(&mut buf, w, h, px + 9, py - 7, &format!("{}", t.id), c);
+        fill_circle(&mut buf, w, h, px, py, 11, [c[0] / 3, c[1] / 3, c[2] / 3]); // glow
+        fill_circle(&mut buf, w, h, px, py, 7, [238, 240, 248]); // ring
+        fill_circle(&mut buf, w, h, px, py, 5, c); // core
+        draw_label(&mut buf, w, h, px + 10, py - 7, &format!("{}", t.id), c);
     }
     buf
 }
@@ -390,12 +457,50 @@ fn encode_jpeg(rgb: &[u8], w: usize, h: usize) -> Res<Vec<u8>> {
     Ok(jpeg)
 }
 
-/// Fill a small square dot (radius `r`) centred at `(cx, cy)`, clipped to the frame.
-fn fill_dot(buf: &mut [u8], w: usize, h: usize, cx: i32, cy: i32, r: i32, color: [u8; 3]) {
-    for y in (cy - r).max(0)..(cy + r + 1).min(h as i32) {
-        for x in (cx - r).max(0)..(cx + r + 1).min(w as i32) {
+/// Fill a disc of radius `r` centred at `(cx, cy)`, clipped to the frame.
+fn fill_circle(buf: &mut [u8], w: usize, h: usize, cx: i32, cy: i32, r: i32, color: [u8; 3]) {
+    for dy in -r..=r {
+        let y = cy + dy;
+        if y < 0 || y >= h as i32 {
+            continue;
+        }
+        let dx = ((r * r - dy * dy) as f32).sqrt() as i32;
+        for x in (cx - dx).max(0)..=(cx + dx).min(w as i32 - 1) {
             let o = (y as usize * w + x as usize) * 3;
             buf[o..o + 3].copy_from_slice(&color);
+        }
+    }
+}
+
+/// Fill a triangle (barycentric sign test), clipped to the frame.
+fn fill_tri(
+    buf: &mut [u8],
+    w: usize,
+    h: usize,
+    a: (i32, i32),
+    b: (i32, i32),
+    c: (i32, i32),
+    color: [u8; 3],
+) {
+    let e = |p: (i32, i32), q: (i32, i32), r: (i32, i32)| {
+        (q.0 - p.0) * (r.1 - p.1) - (q.1 - p.1) * (r.0 - p.0)
+    };
+    let (minx, maxx) = (
+        a.0.min(b.0).min(c.0).max(0),
+        a.0.max(b.0).max(c.0).min(w as i32 - 1),
+    );
+    let (miny, maxy) = (
+        a.1.min(b.1).min(c.1).max(0),
+        a.1.max(b.1).max(c.1).min(h as i32 - 1),
+    );
+    for y in miny..=maxy {
+        for x in minx..=maxx {
+            let p = (x, y);
+            let (w0, w1, w2) = (e(b, c, p), e(c, a, p), e(a, b, p));
+            if (w0 >= 0 && w1 >= 0 && w2 >= 0) || (w0 <= 0 && w1 <= 0 && w2 <= 0) {
+                let o = (y as usize * w + x as usize) * 3;
+                buf[o..o + 3].copy_from_slice(&color);
+            }
         }
     }
 }
