@@ -8,13 +8,15 @@ use crate::{track_color, MaskOverlay};
 
 /// Render the **main** view onto the host `rgb` frame (consumed in place, no copy):
 /// tint each mask in its track's id colour (matched by box IoU; unmatched → grey),
-/// outline the track box + `<id> <depth>m` label. Returns the annotated buffer.
+/// outline the track box + `<id> <depth>m` label, and stamp the system frame rate
+/// (`fps`, end-to-end loop rate) as a top-left HUD. Returns the annotated buffer.
 pub fn render_main(
     rgb: Vec<u8>,
     w: usize,
     h: usize,
     masks: &[MaskOverlay],
     tracks: &[Track],
+    fps: f32,
 ) -> Vec<u8> {
     let mut buf = rgb;
     let confirmed: Vec<&Track> = tracks
@@ -44,6 +46,19 @@ pub fn render_main(
             y1 as i32 + 2,
             &format!("{} {:.1}m", t.id, t.position_3d[2]),
             color,
+        );
+    }
+    // System frame-rate HUD, top-left, on top of everything. Skipped until the rate is
+    // seeded (fps > 0) so warm-up frames don't stamp a placeholder "0.0 FPS".
+    if fps > 0.0 {
+        draw_label(
+            &mut buf,
+            w,
+            h,
+            8,
+            8,
+            &format!("{fps:.1} FPS"),
+            [120, 255, 120],
         );
     }
     buf

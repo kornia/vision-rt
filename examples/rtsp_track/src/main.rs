@@ -1,4 +1,4 @@
-//! RTSP → RF-DETR-Seg + Depth Anything V2 + **BoT-SORT tracking**, device end-to-end.
+//! RTSP → RF-DETR-Seg + Depth Anything V2 + **3D tracking**, device end-to-end.
 //!
 //! The seg + depth pipeline is the one-stream / one-sync flow of `rtsp_depth`; this
 //! example adds the tracker on top. The mask-sampled metric depth feeds each
@@ -69,7 +69,7 @@ fn main() -> Res<()> {
     let stream = CudaContext::new(0)?.default_stream();
     let mut source = RtspSource::connect_resized(url, 1280, 720, stream.clone())?;
     let (w, h) = (source.width() as usize, source.height() as usize);
-    println!("stream {w}x{h} → RF-DETR-Seg (conf ≥ {conf}) + Depth Anything V2 + BoT-SORT");
+    println!("stream {w}x{h} → RF-DETR-Seg (conf ≥ {conf}) + Depth Anything V2 + 3D tracker");
 
     let mut seg = RfDetrSeg::from_engine_file(seg_engine, stream.clone(), conf)?;
     let mut depth = DepthAnything::from_engine_file(depth_engine, stream.clone())?;
@@ -178,8 +178,10 @@ fn main() -> Res<()> {
 
         // ── viz (vrt-viz): render main + BEV, then serve / record / dump ──
         // Only one of the three sinks is active per run; each renders the same pair.
+        // Smoothed end-to-end loop rate for the on-frame HUD (EMA of the frame interval).
+        let fps = if ema_dt > 0.0 { (1.0 / ema_dt) as f32 } else { 0.0 };
         if let Some((server, jenc)) = &server {
-            let (main, bev) = render_pair(&rect, &stream, &d, w, h, &tracks, &intr, &trails)?;
+            let (main, bev) = render_pair(&rect, &stream, &d, w, h, &tracks, &intr, &trails, fps)?;
             let r = Instant::now();
             server.publish(jenc.encode(main, w, h)?, jenc.encode(bev, BEV_W, BEV_H)?);
             a_render += ms(r - t6);
@@ -188,7 +190,7 @@ fn main() -> Res<()> {
             if t_start.elapsed().as_secs_f64() < rec_secs {
                 if n.is_multiple_of(2) {
                     let (main, bev) =
-                        render_pair(&rect, &stream, &d, w, h, &tracks, &intr, &trails)?;
+                        render_pair(&rect, &stream, &d, w, h, &tracks, &intr, &trails, fps)?;
                     let (st, sw, sh) = stack_v(&main, w, h, &bev, BEV_W, BEV_H);
                     gif_frames.push(downscale(&st, sw, sh, gw, gh));
                 }
@@ -198,7 +200,7 @@ fn main() -> Res<()> {
                 break;
             }
         } else if let Some(path) = out.take_if(|_| n == 60) {
-            let (main, bev) = render_pair(&rect, &stream, &d, w, h, &tracks, &intr, &trails)?;
+            let (main, bev) = render_pair(&rect, &stream, &d, w, h, &tracks, &intr, &trails, fps)?;
             let (st, sw, sh) = stack_v(&main, w, h, &bev, BEV_W, BEV_H);
             encode_png(&path, &st, sw, sh)?;
             println!("     saved overlay → {path}");
@@ -284,6 +286,7 @@ fn render_pair(
     tracks: &[vrt_track::Track],
     intr: &CameraIntrinsics,
     trails: &TrailStore,
+    fps: f32,
 ) -> Res<(Vec<u8>, Vec<u8>)> {
     let host = rect.to_host(stream)?;
     let insts = d.instances()?;
@@ -295,7 +298,7 @@ fn render_pair(
             bbox: i.bbox,
         })
         .collect();
-    let main = render_main(host.as_slice().to_vec(), w, h, &masks, tracks);
+    let main = render_main(host.as_slice().to_vec(), w, h, &masks, tracks, fps);
     let bev = render_bev(tracks, intr, BEV_W, BEV_H, Some(trails));
     Ok((main, bev))
 }
