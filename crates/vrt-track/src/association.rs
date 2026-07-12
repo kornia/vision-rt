@@ -13,6 +13,49 @@
 /// A large finite cost used to pad rectangular assignment problems to square.
 const PAD_COST: f64 = 1.0e6;
 
+/// Cost stamped on a depth-inconsistent pair by [`gate_depth`]: large enough that
+/// the assignment never accepts it (`> match_thresh`), yet below [`PAD_COST`] so a
+/// forced pick still loses to real padding and is dropped as unmatched.
+const DEPTH_GATE_COST: f64 = 1.0e3;
+
+/// Reject track↔detection pairs whose **metric depth** disagrees, in place.
+///
+/// For every pair where *both* the track and the detection carry a known metric
+/// depth, if `|z_track − z_det|` exceeds a relative tolerance
+/// `max(abs_floor, rel · z_track)` the pair's cost is stamped to [`DEPTH_GATE_COST`]
+/// so the assignment never accepts it — killing the ID swap between two objects that
+/// overlap in the image but sit at different depths (a person walking in front of a
+/// chair, two people crossing). A pair with an unknown depth on either side is left
+/// untouched, so the tracker degrades gracefully to pure IoU. Apply this **after**
+/// [`fuse_appearance`] so a depth-inconsistent pair is rejected even when appearance
+/// would have rescued it. `rel`/`abs_floor` are
+/// [`BotSortConfig::depth_gate_rel`]/[`depth_gate_abs`].
+///
+/// [`BotSortConfig::depth_gate_rel`]: crate::BotSortConfig::depth_gate_rel
+/// [`depth_gate_abs`]: crate::BotSortConfig::depth_gate_abs
+pub fn gate_depth(
+    cost: &mut [Vec<f64>],
+    track_depths: &[Option<f32>],
+    det_depths: &[Option<f32>],
+    rel: f32,
+    abs_floor: f32,
+) {
+    for (t, row) in cost.iter_mut().enumerate() {
+        let Some(zt) = track_depths.get(t).copied().flatten() else {
+            continue;
+        };
+        let tol = (rel * zt).max(abs_floor);
+        for (d, c) in row.iter_mut().enumerate() {
+            let Some(zd) = det_depths.get(d).copied().flatten() else {
+                continue;
+            };
+            if (zt - zd).abs() > tol {
+                *c = DEPTH_GATE_COST;
+            }
+        }
+    }
+}
+
 /// Intersection-over-union of two `[x1, y1, x2, y2]` boxes.
 pub fn iou(a: &[f32; 4], b: &[f32; 4]) -> f32 {
     let xx1 = a[0].max(b[0]);
@@ -249,6 +292,34 @@ mod tests {
         assert_eq!(m.len(), 2);
         assert_eq!(ur, vec![2]);
         assert!(uc.is_empty());
+    }
+
+    #[test]
+    fn depth_gate_rejects_mismatch_only() {
+        // track0 @ 2 m, track1 depth unknown; det0 ~2 m (consistent), det1 @ 5 m.
+        let mut cost = vec![vec![0.1, 0.1], vec![0.1, 0.1]];
+        let track_d = [Some(2.0f32), None];
+        let det_d = [Some(2.1f32), Some(5.0f32)];
+        gate_depth(&mut cost, &track_d, &det_d, 0.25, 0.5);
+        assert!(cost[0][0] < 1.0, "consistent depth pair kept");
+        assert!(cost[0][1] >= DEPTH_GATE_COST, "3 m mismatch gated");
+        // Unknown track depth → whole row untouched (graceful fallback to IoU).
+        assert!(cost[1][0] < 1.0 && cost[1][1] < 1.0);
+    }
+
+    #[test]
+    fn depth_gate_tolerance_scales_with_distance() {
+        // At 10 m the 25% relative tol is 2.5 m, so a 2 m gap is allowed; the same
+        // 2 m gap at 2 m distance (tol = max(0.5, 0.5) = 0.5 m) is rejected.
+        let mut far = vec![vec![0.2]];
+        gate_depth(&mut far, &[Some(10.0)], &[Some(12.0)], 0.25, 0.5);
+        assert!(far[0][0] < 1.0, "2 m gap within 2.5 m tol at 10 m");
+        let mut near = vec![vec![0.2]];
+        gate_depth(&mut near, &[Some(2.0)], &[Some(4.0)], 0.25, 0.5);
+        assert!(
+            near[0][0] >= DEPTH_GATE_COST,
+            "2 m gap exceeds 0.5 m tol at 2 m"
+        );
     }
 
     #[test]

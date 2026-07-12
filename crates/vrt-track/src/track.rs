@@ -63,6 +63,9 @@ pub(crate) struct Tracklet {
     /// Whether this track was matched on the current frame (drives second-stage
     /// pool selection and output filtering).
     pub matched_this_frame: bool,
+    /// Whether a **real** depth measurement has ever corrected this track. Until it
+    /// has, `pz` is the birth nominal (coasting) and must not gate association.
+    pub depth_measured: bool,
     #[cfg(feature = "appearance")]
     pub smooth_feat: Option<Vec<f32>>,
 }
@@ -88,6 +91,7 @@ impl Tracklet {
             hits: 1,
             time_since_update: 0,
             matched_this_frame: true,
+            depth_measured: det.depth.is_some(),
             #[cfg(feature = "appearance")]
             smooth_feat: det.feature.clone(),
         }
@@ -111,6 +115,7 @@ impl Tracklet {
         self.hits += 1;
         self.time_since_update = 0;
         self.matched_this_frame = true;
+        self.depth_measured |= det.depth.is_some(); // once measured, pz stays anchored
 
         // Tentative -> Confirmed after enough support; a re-found Lost track is
         // immediately re-confirmed.
@@ -163,6 +168,13 @@ impl Tracklet {
             (cx + w * 0.5) as f32,
             (cy + h * 0.5) as f32,
         ]
+    }
+
+    /// Current metric depth (`pz`) **iff a real depth measurement has ever corrected
+    /// this track** — else `None` (its `pz` is the coasting birth nominal and must
+    /// not gate association). Consumed by [`crate::association::gate_depth`].
+    pub fn measured_depth(&self) -> Option<f32> {
+        self.depth_measured.then(|| self.kf.position_3d()[2] as f32)
     }
 
     /// Build the public snapshot.

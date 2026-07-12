@@ -155,6 +155,49 @@ mod tests {
         assert!(id_a.is_some() && id_b.is_some() && id_a != id_b);
     }
 
+    /// Two **same-class** targets crossing with fully-overlapping boxes but distinct
+    /// metric depths: IoU (and constant-velocity motion) can't tell them apart at the
+    /// crossing, so only the **depth gate** keeps their ids from swapping. Tracks are
+    /// identified by their depth estimate (near < far), which must stay separated and
+    /// keep constant ids.
+    #[test]
+    fn depth_gate_prevents_id_swap_on_crossing() {
+        let mut t = BotSort::new(BotSortConfig::default()).unwrap();
+        let (mut near_id, mut far_id) = (None, None);
+        for f in 0..16 {
+            let ax = 20.0 + f as f32 * 10.0; // near object, L->R, 2 m
+            let bx = 170.0 - f as f32 * 10.0; // far object, R->L, 5 m (boxes coincide ~f=8)
+            let da = Detection::new([ax, 100.0, ax + 40.0, 170.0], 0.9, 0).with_depth(2.0);
+            let db = Detection::new([bx, 100.0, bx + 40.0, 170.0], 0.9, 0).with_depth(5.0);
+            let out = t.update(&[da, db]);
+            if f >= 4 {
+                let near = out
+                    .iter()
+                    .min_by(|x, y| x.position_3d[2].total_cmp(&y.position_3d[2]));
+                let far = out
+                    .iter()
+                    .max_by(|x, y| x.position_3d[2].total_cmp(&y.position_3d[2]));
+                if let (Some(n), Some(fr)) = (near, far) {
+                    assert!(
+                        n.position_3d[2] < 3.5 && fr.position_3d[2] > 3.5,
+                        "depths collapsed at frame {f}: near {:.2} far {:.2}",
+                        n.position_3d[2],
+                        fr.position_3d[2]
+                    );
+                    match near_id {
+                        None => near_id = Some(n.id),
+                        Some(p) => assert_eq!(n.id, p, "near id swapped at frame {f}"),
+                    }
+                    match far_id {
+                        None => far_id = Some(fr.id),
+                        Some(p) => assert_eq!(fr.id, p, "far id swapped at frame {f}"),
+                    }
+                }
+            }
+        }
+        assert!(near_id.is_some() && far_id.is_some() && near_id != far_id);
+    }
+
     /// A target that vanishes for a few frames should be re-acquired with the SAME
     /// id (Lost → Confirmed), exercising the Kalman coast + re-id path.
     #[test]

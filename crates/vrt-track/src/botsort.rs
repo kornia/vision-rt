@@ -1,7 +1,7 @@
 //! The [`BotSort`] tracker: ByteTrack two-stage association over the 3D Kalman
 //! motion model, with optional appearance fusion and a camera-motion hook.
 
-use crate::association::{iou_cost_matrix, linear_assignment};
+use crate::association::{gate_depth, iou_cost_matrix, linear_assignment};
 use crate::gmc::{CameraMotion, NoCameraMotion};
 use crate::kalman::KalmanParams;
 use crate::track::{Track, TrackState, Tracklet};
@@ -40,6 +40,21 @@ pub struct BotSortConfig {
     /// EMA momentum for the per-track feature bank (`appearance`).
     #[cfg(feature = "appearance")]
     pub feature_momentum: f32,
+    /// Enable **depth-gated association**: reject a track↔detection match whose
+    /// metric depth disagrees beyond the tolerance below, when both sides carry a
+    /// depth (e.g. a depth crate feeding [`Detection::depth`]). No effect on
+    /// depth-less detections. See [`crate::association::gate_depth`].
+    ///
+    /// [`Detection::depth`]: crate::Detection::depth
+    pub depth_gate: bool,
+    /// Relative depth tolerance for the gate: a pair is rejected when
+    /// `|z_track − z_det| > max(depth_gate_abs, depth_gate_rel · z_track)`. `0.25`
+    /// = allow 25 % — loose enough for monocular-depth noise, tight enough to split
+    /// foreground from background.
+    pub depth_gate_rel: f32,
+    /// Absolute floor (metres) for the depth tolerance, so nearby objects aren't
+    /// gated too aggressively when `rel · z` is tiny.
+    pub depth_gate_abs: f32,
 }
 
 impl Default for BotSortConfig {
@@ -59,6 +74,9 @@ impl Default for BotSortConfig {
             proximity_thresh: 0.5,
             #[cfg(feature = "appearance")]
             feature_momentum: 0.9,
+            depth_gate: true,
+            depth_gate_rel: 0.25,
+            depth_gate_abs: 0.5,
         }
     }
 }
@@ -77,6 +95,9 @@ impl BotSortConfig {
         }
         if self.min_hits == 0 {
             return bad("min_hits must be >= 1");
+        }
+        if self.depth_gate && (self.depth_gate_rel < 0.0 || self.depth_gate_abs < 0.0) {
+            return bad("depth_gate_rel / depth_gate_abs must be >= 0");
         }
         Ok(())
     }
@@ -215,6 +236,22 @@ impl BotSort {
                 cfg.proximity_thresh,
             );
         }
+        // Depth gate last, so it overrides an appearance rescue on a depth-mismatched
+        // pair (two similar-looking objects at different distances).
+        if cfg.depth_gate {
+            let track_d: Vec<Option<f32>> = pool
+                .iter()
+                .map(|&ti| self.tracks[ti].measured_depth())
+                .collect();
+            let det_d: Vec<Option<f32>> = high_det.iter().map(|&i| detections[i].depth).collect();
+            gate_depth(
+                &mut cost1,
+                &track_d,
+                &det_d,
+                cfg.depth_gate_rel,
+                cfg.depth_gate_abs,
+            );
+        }
         let (m1, u_pool, u_high) =
             linear_assignment(&cost1, pool.len(), high_det.len(), cfg.match_thresh as f64);
         for (pi, di) in m1 {
@@ -237,7 +274,21 @@ impl BotSort {
             .collect();
         let low_boxes: Vec<[f32; 4]> = low_det.iter().map(|&i| detections[i].bbox).collect();
         let r_boxes: Vec<[f32; 4]> = r_tracked.iter().map(|&ti| self.tracks[ti].bbox()).collect();
-        let cost2 = iou_cost_matrix(&r_boxes, &low_boxes);
+        let mut cost2 = iou_cost_matrix(&r_boxes, &low_boxes);
+        if cfg.depth_gate {
+            let track_d: Vec<Option<f32>> = r_tracked
+                .iter()
+                .map(|&ti| self.tracks[ti].measured_depth())
+                .collect();
+            let det_d: Vec<Option<f32>> = low_det.iter().map(|&i| detections[i].depth).collect();
+            gate_depth(
+                &mut cost2,
+                &track_d,
+                &det_d,
+                cfg.depth_gate_rel,
+                cfg.depth_gate_abs,
+            );
+        }
         let (m2, _u_r, _u_low) = linear_assignment(
             &cost2,
             r_tracked.len(),
@@ -281,6 +332,23 @@ impl BotSort {
                 &det_feats,
                 cfg.appearance_thresh,
                 cfg.proximity_thresh,
+            );
+        }
+        if cfg.depth_gate {
+            let track_d: Vec<Option<f32>> = unconfirmed
+                .iter()
+                .map(|&ti| self.tracks[ti].measured_depth())
+                .collect();
+            let det_d: Vec<Option<f32>> = remaining_high
+                .iter()
+                .map(|&i| detections[i].depth)
+                .collect();
+            gate_depth(
+                &mut cost3,
+                &track_d,
+                &det_d,
+                cfg.depth_gate_rel,
+                cfg.depth_gate_abs,
             );
         }
         let (m3, u_unconf, u_rem) = linear_assignment(
