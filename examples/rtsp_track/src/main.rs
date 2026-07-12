@@ -46,6 +46,10 @@ use vrt_track::{BotSort, BotSortConfig, CameraIntrinsics, Detection, Track, Trac
 /// Replace with a checkerboard calibration for accurate metres.
 const TAPO_C210_HFOV_DEG: f32 = 67.0;
 
+/// Standalone BEV canvas size (matches the 1280-wide main frame so they stack clean).
+const BEV_W: usize = 1280;
+const BEV_H: usize = 420;
+
 type Res<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
 fn main() -> Res<()> {
@@ -87,13 +91,18 @@ fn main() -> Res<()> {
     //   *.png    → dump one annotated frame at frame 60
     let record = out_png.as_deref().is_some_and(|p| p.ends_with(".gif"));
     let serve_port = out_png.as_deref().and_then(parse_port);
-    let (gw, gh, rec_secs) = (640usize, 360usize, 10.0);
+    // GIF = main stacked over the BEV, downscaled to `gw` wide (height keeps aspect).
+    let (gw, rec_secs) = (640usize, 10.0);
+    let (stack_w, stack_h) = ((w as usize).max(BEV_W), h as usize + BEV_H);
+    let gh = gw * stack_h / stack_w;
     let mut gif_frames: Vec<Vec<u8>> = Vec::new();
-    // Live-stream shared frame: the loop writes the latest annotated JPEG here, the
-    // HTTP server thread(s) push it to connected phones as multipart MJPEG.
-    let latest_jpeg: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+    // Live-stream shared frames: the loop writes the latest **main** (camera + masks
+    // + boxes) and **BEV** (top-down map) JPEGs here; the HTTP server pushes each on
+    // its own MJPEG endpoint (`/main`, `/bev`) and an index page stacks them.
+    let latest_main: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+    let latest_bev: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
     if let Some(port) = serve_port {
-        spawn_mjpeg_server(port, latest_jpeg.clone());
+        spawn_mjpeg_server(port, latest_main.clone(), latest_bev.clone());
         println!("live: open http://<this-jetson-ip>:{port} in a phone browser (same Wi-Fi)");
     }
     // Reused per-frame detection buffer (cleared, not reallocated).
@@ -164,24 +173,21 @@ fn main() -> Res<()> {
         let t6 = Instant::now();
 
         if serve_port.is_some() {
-            // Encode the annotated frame to JPEG (kornia-io) and hand it to the server.
-            let buf = annotate(frame.image(), &stream, &d, &tracks, &intr)?;
-            let img = Image::<u8, 3>::new(
-                ImageSize {
-                    width: w as usize,
-                    height: h as usize,
-                },
-                buf,
-            )?;
-            let mut jpeg = Vec::new();
-            encode_image_jpeg_rgb8(&img, 70, &mut jpeg)?;
-            *latest_jpeg.lock().unwrap_or_else(|e| e.into_inner()) = jpeg;
+            // Two independent JPEG streams: main (camera + masks + boxes) and the BEV.
+            let main = render_main(frame.image(), &stream, &d, &tracks)?;
+            let bev = render_bev(&tracks, &intr);
+            *latest_main.lock().unwrap_or_else(|e| e.into_inner()) =
+                encode_jpeg(&main, w as usize, h as usize)?;
+            *latest_bev.lock().unwrap_or_else(|e| e.into_inner()) =
+                encode_jpeg(&bev, BEV_W, BEV_H)?;
         } else if record {
             if t_start.elapsed().as_secs_f64() < rec_secs {
                 if n.is_multiple_of(2) {
-                    // ~7.5 captured/s → real-time playback at 13 cs delay.
-                    let buf = annotate(frame.image(), &stream, &d, &tracks, &intr)?;
-                    gif_frames.push(downscale(&buf, w as usize, h as usize, gw, gh));
+                    // Stack main over the BEV → one tall frame; ~7.5 captured/s.
+                    let main = render_main(frame.image(), &stream, &d, &tracks)?;
+                    let bev = render_bev(&tracks, &intr);
+                    let st = stack_v(&main, w as usize, h as usize, &bev, BEV_W, BEV_H);
+                    gif_frames.push(downscale(&st, stack_w, stack_h, gw, gh));
                 }
             } else if let Some(path) = out_png.take() {
                 write_gif(&path, &gif_frames, gw as u16, gh as u16, 13)?;
@@ -259,15 +265,14 @@ fn track_color(id: u64) -> [u8; 3] {
     PALETTE[(id as usize) % PALETTE.len()]
 }
 
-/// Host-copy the frame; tint each instance mask in **its track's id colour** (matched
-/// by box IoU), outline the track box + `<id> <depth>m` label, and draw a top-down
-/// **BEV mini-map** of the tracks' metric X–Z. Returns the annotated RGB buffer.
-fn annotate(
+/// Render the **main** view: host-copy the frame, tint each instance mask in its
+/// track's id colour (matched by box IoU), outline the track box + `<id> <depth>m`
+/// label. Returns the `w×h` RGB buffer (no BEV — that is a separate image).
+fn render_main(
     frame: &Image<u8, 3>,
     stream: &std::sync::Arc<cudarc::driver::CudaStream>,
     d: &vrt_rfdetr_seg::SegResult,
     tracks: &[Track],
-    intr: &CameraIntrinsics,
 ) -> Res<Vec<u8>> {
     let (w, h) = (frame.width(), frame.height());
     let host = frame.to_host(stream)?;
@@ -290,7 +295,6 @@ fn annotate(
             .unwrap_or([110, 110, 110]);
         tint_mask(&mut buf, w, h, inst, color);
     }
-    // Track boxes + `<id> <depth>m` label, coloured by id.
     for t in &confirmed {
         let color = track_color(t.id);
         draw_box(&mut buf, w, h, t.bbox, color);
@@ -298,60 +302,92 @@ fn annotate(
         let label = format!("{} {:.1}m", t.id, t.position_3d[2]);
         draw_label(&mut buf, w, h, x1 as i32 + 2, y1 as i32 + 2, &label, color);
     }
-    draw_bev(&mut buf, w, h, &confirmed, intr);
     Ok(buf)
 }
 
-/// Bird's-eye-view mini-map (top-down metric X–Z) in the top-right corner: the camera
-/// sits at the bottom-centre looking "up" the panel; each track is a dot at its metric
-/// `(X, Z)` coloured by id, over a 1 m grid. Range: X ∈ [−3, 3] m, Z ∈ [0, 6] m.
-fn draw_bev(buf: &mut [u8], w: usize, h: usize, tracks: &[&Track], intr: &CameraIntrinsics) {
-    const PW: usize = 300;
-    const PH: usize = 260;
-    const MARGIN: usize = 12;
-    let (ox, oy) = (w.saturating_sub(PW + MARGIN), MARGIN);
-    let (xmin, xmax, zmax) = (-3.0f32, 3.0f32, 6.0f32);
-
-    // Darkened panel backing.
-    for y in oy..(oy + PH).min(h) {
-        for x in ox..(ox + PW).min(w) {
-            let o = (y * w + x) * 3;
-            for k in 0..3 {
-                buf[o + k] = (buf[o + k] as u16 * 2 / 10) as u8;
-            }
-        }
-    }
+/// Render the **BEV** as a standalone `BEV_W×BEV_H` image: a top-down metric map with
+/// the camera at bottom-centre looking "up", each confirmed track a dot at its metric
+/// `(X, Z)` coloured by id, over a 1 m grid. Range: X ∈ [−4, 4] m, Z ∈ [0, 8] m.
+fn render_bev(tracks: &[Track], intr: &CameraIntrinsics) -> Vec<u8> {
+    let (w, h) = (BEV_W, BEV_H);
+    let mut buf = vec![20u8; w * h * 3]; // dark background
+    let (xmin, xmax, zmax) = (-4.0f32, 4.0f32, 8.0f32);
     let map = |x_m: f32, z_m: f32| -> (i32, i32) {
-        let px = ox as f32 + (x_m - xmin) / (xmax - xmin) * PW as f32;
-        let py = oy as f32 + PH as f32 - (z_m / zmax) * PH as f32; // Z=0 bottom, far up
+        let px = (x_m - xmin) / (xmax - xmin) * w as f32;
+        let py = h as f32 - (z_m / zmax) * h as f32; // Z=0 bottom (camera), far = top
         (px as i32, py as i32)
     };
-    let grid = [70u8, 70, 70];
-    // Z rings (horizontal lines) every 1 m + label.
+    let grid = [60u8, 60, 60];
+    // Z rings (depth) every 1 m + label down the left edge.
     for zi in 1..=zmax as i32 {
         let (_, y) = map(0.0, zi as f32);
-        draw_line(buf, w, h, ox as i32, y, (ox + PW) as i32, y, grid);
-        draw_label(buf, w, h, ox as i32 + 2, y - 8, &format!("{zi}m"), grid);
+        draw_line(&mut buf, w, h, 0, y, w as i32, y, grid);
+        draw_label(&mut buf, w, h, 4, y + 2, &format!("{zi}m"), [120, 120, 120]);
     }
-    // X grid (vertical lines) every 1 m.
+    // X grid (lateral) every 1 m.
     for xi in xmin as i32..=xmax as i32 {
         let (x, _) = map(xi as f32, 0.0);
-        draw_line(buf, w, h, x, oy as i32, x, (oy + PH) as i32, grid);
+        draw_line(&mut buf, w, h, x, 0, x, h as i32, grid);
     }
+    draw_label(
+        &mut buf,
+        w,
+        h,
+        4,
+        4,
+        "BEV top-down (metres)",
+        [150, 150, 150],
+    );
     // Camera marker at (0, 0) bottom-centre.
     let (cxp, cyp) = map(0.0, 0.0);
-    fill_dot(buf, w, h, cxp, cyp - 2, 3, [230, 230, 230]);
-    // Each track: a coloured dot at its metric (X, Z) + id.
+    fill_dot(&mut buf, w, h, cxp, cyp - 4, 5, [235, 235, 235]);
+    // Each confirmed track: a coloured dot at its metric (X, Z) + `<id> <name>`.
     for t in tracks {
+        if t.state != TrackState::Confirmed {
+            continue;
+        }
         let [x_m, _, z_m] = t.metric_position(intr);
         if z_m <= 0.0 || z_m > zmax || x_m < xmin || x_m > xmax {
             continue;
         }
         let (px, py) = map(x_m, z_m);
         let c = track_color(t.id);
-        fill_dot(buf, w, h, px, py, 4, c);
-        draw_label(buf, w, h, px + 5, py - 6, &format!("{}", t.id), c);
+        fill_dot(&mut buf, w, h, px, py, 7, c);
+        draw_label(&mut buf, w, h, px + 9, py - 7, &format!("{}", t.id), c);
     }
+    buf
+}
+
+/// Stack `top` (`tw×th`) over `bot` (`bw×bh`) into one RGB buffer of
+/// `max(tw,bw) × (th+bh)`, each centred horizontally on a black canvas.
+fn stack_v(top: &[u8], tw: usize, th: usize, bot: &[u8], bw: usize, bh: usize) -> Vec<u8> {
+    let w = tw.max(bw);
+    let mut out = vec![0u8; w * (th + bh) * 3];
+    let blit = |out: &mut [u8], src: &[u8], sw: usize, sh: usize, y0: usize| {
+        let xoff = (w - sw) / 2;
+        for y in 0..sh {
+            let d = ((y0 + y) * w + xoff) * 3;
+            let s = y * sw * 3;
+            out[d..d + sw * 3].copy_from_slice(&src[s..s + sw * 3]);
+        }
+    };
+    blit(&mut out, top, tw, th, 0);
+    blit(&mut out, bot, bw, bh, th);
+    out
+}
+
+/// Encode an RGB buffer to JPEG (kornia-io, quality 70).
+fn encode_jpeg(rgb: &[u8], w: usize, h: usize) -> Res<Vec<u8>> {
+    let img = Image::<u8, 3>::new(
+        ImageSize {
+            width: w,
+            height: h,
+        },
+        rgb.to_vec(),
+    )?;
+    let mut jpeg = Vec::new();
+    encode_image_jpeg_rgb8(&img, 70, &mut jpeg)?;
+    Ok(jpeg)
 }
 
 /// Fill a small square dot (radius `r`) centred at `(cx, cy)`, clipped to the frame.
@@ -379,7 +415,7 @@ fn iou(a: &[f32; 4], b: &[f32; 4]) -> f32 {
     }
 }
 
-/// Annotate one frame and write it as a PNG.
+/// Render main + BEV, stack them vertically, and write one PNG.
 fn save_overlay(
     path: &str,
     frame: &Image<u8, 3>,
@@ -388,14 +424,17 @@ fn save_overlay(
     tracks: &[Track],
     intr: &CameraIntrinsics,
 ) -> Res<()> {
-    let (w, h) = (frame.width(), frame.height());
-    let buf = annotate(frame, stream, d, tracks, intr)?;
+    let (w, h) = (frame.width() as usize, frame.height() as usize);
+    let main = render_main(frame, stream, d, tracks)?;
+    let bev = render_bev(tracks, intr);
+    let st = stack_v(&main, w, h, &bev, BEV_W, BEV_H);
+    let (sw, sh) = (w.max(BEV_W), h + BEV_H);
     let img = Image::<u8, 3>::new(
         ImageSize {
-            width: w,
-            height: h,
+            width: sw,
+            height: sh,
         },
-        buf,
+        st,
     )?;
     write_image_png_rgb8(path, &img)?;
     println!("     saved tracked overlay → {path}");
@@ -411,10 +450,16 @@ fn parse_port(s: &str) -> Option<u16> {
     }
 }
 
-/// Spawn a background MJPEG-over-HTTP server. Every connected client is streamed the
-/// latest annotated JPEG as `multipart/x-mixed-replace` — open `http://<ip>:port`
-/// in a phone browser (same LAN) for a live view. No app, no ffmpeg.
-fn spawn_mjpeg_server(port: u16, latest: Arc<Mutex<Vec<u8>>>) {
+/// Index page: the two MJPEG streams (`/main`, `/bev`) stacked vertically.
+const INDEX_HTML: &str = "<!doctype html><html><head><meta name=viewport \
+content='width=device-width,initial-scale=1'><style>body{margin:0;background:#111}\
+img{display:block;width:100%;height:auto}</style></head><body>\
+<img src=/main><img src=/bev></body></html>";
+
+/// Spawn a background MJPEG-over-HTTP server. `/` serves an index that stacks the two
+/// live streams; `/main` and `/bev` are each a `multipart/x-mixed-replace` MJPEG —
+/// open `http://<ip>:port` in a phone browser (same LAN). No app, no ffmpeg.
+fn spawn_mjpeg_server(port: u16, main: Arc<Mutex<Vec<u8>>>, bev: Arc<Mutex<Vec<u8>>>) {
     std::thread::spawn(move || {
         let listener = match TcpListener::bind(("0.0.0.0", port)) {
             Ok(l) => l,
@@ -424,17 +469,42 @@ fn spawn_mjpeg_server(port: u16, latest: Arc<Mutex<Vec<u8>>>) {
             }
         };
         for stream in listener.incoming().flatten() {
-            let latest = latest.clone();
+            let (main, bev) = (main.clone(), bev.clone());
             std::thread::spawn(move || {
-                let _ = serve_client(stream, &latest);
+                let _ = serve_client(stream, &main, &bev);
             });
         }
     });
 }
 
-/// Serve one client the MJPEG stream until it disconnects.
-fn serve_client(mut s: TcpStream, latest: &Arc<Mutex<Vec<u8>>>) -> std::io::Result<()> {
-    let _ = s.read(&mut [0u8; 1024]); // consume the HTTP request line
+/// Route one client by request path: `/main` / `/bev` stream MJPEG, else the index.
+fn serve_client(
+    mut s: TcpStream,
+    main: &Arc<Mutex<Vec<u8>>>,
+    bev: &Arc<Mutex<Vec<u8>>>,
+) -> std::io::Result<()> {
+    let mut req = [0u8; 1024];
+    let n = s.read(&mut req).unwrap_or(0);
+    let path = std::str::from_utf8(&req[..n])
+        .ok()
+        .and_then(|r| r.split_whitespace().nth(1))
+        .unwrap_or("/")
+        .to_string();
+    let latest = match path.as_str() {
+        "/main" => main,
+        "/bev" => bev,
+        _ => {
+            // Serve the index HTML.
+            write!(
+                s,
+                "HTTP/1.0 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\n\
+                 Connection: close\r\n\r\n{}",
+                INDEX_HTML.len(),
+                INDEX_HTML
+            )?;
+            return Ok(());
+        }
+    };
     s.write_all(
         b"HTTP/1.0 200 OK\r\nConnection: close\r\nCache-Control: no-cache\r\n\
           Content-Type: multipart/x-mixed-replace; boundary=frame\r\n\r\n",
