@@ -153,20 +153,23 @@ impl DepthAnything {
         let (ih, iw) = (d[2] as usize, d[3] as usize);
 
         // The dense depth map: rank-4 [1,1,H,W] or rank-3 [1,H,W], positive dims.
-        let (mut out_name, mut mh, mut mw) = (None, 0usize, 0usize);
+        // Reject ambiguity: a permissive rank-3 match would also bind an auxiliary
+        // output (e.g. a [1,Q,4] boxes head), so require *exactly one* dense-map
+        // output and error out rather than silently pick the last one.
+        let mut matched: Option<(String, usize, usize)> = None;
         for s in engine.outputs() {
-            match s.dims.as_slice() {
-                [1, 1, nh, nw] | [1, nh, nw] if *nh > 0 && *nw > 0 => {
-                    out_name = Some(s.name.clone());
-                    (mh, mw) = (*nh as usize, *nw as usize);
+            if let [1, 1, nh, nw] | [1, nh, nw] = s.dims.as_slice() {
+                if *nh > 0 && *nw > 0 {
+                    if matched.is_some() {
+                        return Err("depth: engine exposes multiple dense-map outputs; \
+                             cannot identify the depth output by shape"
+                            .into());
+                    }
+                    matched = Some((s.name.clone(), *nh as usize, *nw as usize));
                 }
-                _ => {}
             }
         }
-        let out_name = out_name.ok_or("depth: no dense depth output [1,1,H,W]/[1,H,W]")?;
-        if mh == 0 || mw == 0 {
-            return Err("depth: dynamic/unknown output dims unsupported".into());
-        }
+        let (out_name, mh, mw) = matched.ok_or("depth: no dense depth output [1,1,H,W]/[1,H,W]")?;
 
         // Stretch + ImageNet normalization (DA2 expects ImageNet mean/std).
         let preproc = PreprocessorBuilder::new()

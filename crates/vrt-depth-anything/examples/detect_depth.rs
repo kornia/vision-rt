@@ -74,7 +74,9 @@ fn main() -> Result<(), vrt::BoxError> {
     stream.synchronize()?;
 
     let instances = d.instances()?;
-    let zs = stream.clone_dtoh(&zs_dev)?; // per-instance metric depth (meters)
+    // Post-sync the live count is known — copy only that prefix (sample_masks fills
+    // the full capacity, but the trailing stale slots are meaningless).
+    let zs = stream.clone_dtoh(&zs_dev.slice(0..instances.len()))?; // per-instance meters
 
     let (mw, mh) = depth.map_size();
     println!(
@@ -189,11 +191,12 @@ fn run_bench(
     Ok(())
 }
 
-/// `foo.png` → `foo.depth.png` (or append `.depth.png` if no `.png` suffix).
+/// Colorized-depth companion path for the overlay: insert `_depth` before the
+/// extension (`foo.png` → `foo_depth.png`), matching `examples/rtsp_depth`.
 fn depth_png_path(out: &str) -> String {
-    match out.strip_suffix(".png") {
-        Some(stem) => format!("{stem}.depth.png"),
-        None => format!("{out}.depth.png"),
+    match out.rsplit_once('.') {
+        Some((stem, ext)) => format!("{stem}_depth.{ext}"),
+        None => format!("{out}_depth"),
     }
 }
 

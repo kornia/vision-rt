@@ -32,6 +32,8 @@ pub enum TypeError {
     Driver(#[from] cudarc::driver::DriverError),
     #[error("expected a device-resident image (backed by a CudaSlice)")]
     NotOnDevice,
+    #[error("invalid sampling argument: {0}")]
+    InvalidArg(&'static str),
 }
 
 /// A detected object in original-image coordinate space.
@@ -323,12 +325,21 @@ impl DepthImage {
         src_wh: (f32, f32),
         stream: &Arc<CudaStream>,
     ) -> Result<CudaSlice<f32>, TypeError> {
-        let slots = boxes.len() / stride.max(1);
-        let z = stream.alloc_zeros::<f32>(slots)?;
         let (sw, sh) = src_wh;
-        // src_w/h scale source-pixel boxes into map space; a non-positive src would
-        // make the scale inf → NaN box coords. Guard (returns all-zero z).
-        if slots > 0 && sw > 0.0 && sh > 0.0 {
+        // Misconfig is an error, not a silent all-zero z: stride==0 would read every
+        // box from offset 0, and a non-positive src makes the source→map scale
+        // inf → NaN box coords. Both yield plausible-but-wrong depths downstream.
+        if stride == 0 {
+            return Err(TypeError::InvalidArg("sample_boxes: stride must be > 0"));
+        }
+        if sw <= 0.0 || sh <= 0.0 {
+            return Err(TypeError::InvalidArg(
+                "sample_boxes: src_wh must be positive",
+            ));
+        }
+        let slots = boxes.len() / stride;
+        let z = stream.alloc_zeros::<f32>(slots)?;
+        if slots > 0 {
             let depth = self.as_cudaslice().ok_or(TypeError::NotOnDevice)?;
             let (dmh, dmw) = (self.size().height as i32, self.size().width as i32);
             let (st, ni) = (stride as i32, slots as i32);

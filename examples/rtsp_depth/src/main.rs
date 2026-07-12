@@ -88,7 +88,9 @@ fn main() -> Res<()> {
         let t4 = Instant::now();
         // Readout: per-instance metric depth (D2H) + the survivor count (pinned).
         let inst_n = d.count();
-        let z_m = stream.clone_dtoh(&zs)?; // [count] meters, aligned with instances
+        // Post-sync count is valid — copy only the live prefix (sample_masks fills the
+        // full capacity; the trailing stale slots are meaningless).
+        let z_m = stream.clone_dtoh(&zs.slice(0..inst_n))?; // [inst_n] meters, aligned
         let t5 = Instant::now();
 
         // Debug: after warm-up, host-copy this frame + boxes + masks + depth and draw
