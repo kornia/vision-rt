@@ -1,6 +1,6 @@
 ---
 name: vrt-pipeline-compose
-description: Use when building or composing a real-time CV pipeline from vrt model crates — wiring RfDetrSeg / DepthAnything / XFeat together, running N models on one frame, going fast, or handling multiple cameras. Covers the async / caller-owned / one-stream idiom, not kernel internals.
+description: Use when building or composing a real-time CV pipeline from vrt model crates — wiring RfDetrSeg / DepthAnything / XFeat together, running N models on one frame, feeding the GPU results to the CPU tracker (vrt-track) + live view (vrt-viz, H.264/WebCodecs), going fast, or handling multiple cameras. Covers the async / caller-owned / one-stream idiom, not kernel internals.
 ---
 
 # Composing a Fast vrt CV Pipeline
@@ -80,6 +80,26 @@ for free: every model decodes back to **source pixel space** and the full-frame
 `Stretch` preprocess makes cross-grid scaling a plain `grid/src` ratio (mask grid →
 depth grid → source all differ only by a scalar).
 
+## Downstream: track + view (CPU, off the GPU wall)
+
+The pipeline doesn't end at the sync — the GPU results feed **pure-CPU** consumers
+that cost ~nothing next to the ~25 ms GPU wall:
+
+- **`vrt-track`** — build a `Detection` per box and attach its mask-sampled metric
+  depth (`Detection::with_depth(z)`), then `tracker.update(&dets)` → stable **3D**
+  tracks. Association is depth-gated, so objects that overlap in the image but sit at
+  different ranges don't swap IDs. `Track::metric_position` / `world_position` give
+  metres; the Kalman **coasts** between updates, so run depth at a lower cadence to
+  save GPU and let the tracker fill in.
+- **`vrt-viz`** — `render_main` (id-coloured masks + boxes + `id depth`) and
+  `render_bev` (world-frame top-down floor plan). `LiveStream` / `StreamServer`
+  (feature `h264`) encode both views to H.264 and broadcast over one WebSocket; the
+  browser decodes via WebCodecs. Encoding runs on a **worker thread** off the capture
+  loop, so it never stalls the GPU pipeline.
+
+Ground truth for the whole chain: `examples/rtsp_track/src/main.rs` — undistort → seg
++ depth + fusion → tracker → vrt-viz live stream, one sync per frame.
+
 ## Reading the profiler (is it actually async?)
 
 The per-stage timers in `examples/rtsp_rfdetr_seg/src/main.rs:59-114` are the
@@ -143,4 +163,6 @@ wins** (batching's launch-overhead payoff is small next to model compute).
 - `rust-cuda-patterns` — the cudarc launch side, streams, pinned readback.
 - `cuda-kernel-craft` — writing the fusion kernel itself.
 - `vrt-add-model-crate` — add a new model to compose into a pipeline.
+- `vrt-tracking` — the CPU 3D tracker + metric geometry the results feed.
+- `vrt-live-stream` — render + H.264/WebCodecs live view downstream.
 - `trt-engine-rebuild` — build the `.engine` files these constructors load.
