@@ -39,19 +39,17 @@ impl LiveStream {
         let server = StreamServer::spawn(port)?;
         let slot: FrameSlot = Arc::new((Mutex::new(None), Condvar::new()));
         let wslot = slot.clone();
-        let specs = [
+        // Build the encoders up front so a bad config surfaces here as an error, not as
+        // a panic in the detached worker thread. Each tuple is (encoder, which view,
+        // whether its codec-config has been published yet).
+        let mut encs: Vec<(H264Encoder, Stream, bool)> = [
             (main, main_kbps, Stream::Main),
             (bev, bev_kbps, Stream::Bev),
-        ];
+        ]
+        .into_iter()
+        .map(|((w, h), kbps, stream)| Ok((H264Encoder::new(w, h, fps, kbps, fps)?, stream, false)))
+        .collect::<Result<_, VizError>>()?;
         std::thread::spawn(move || {
-            // (encoder, which view, whether its codec-config has been published yet)
-            let mut encs: Vec<(H264Encoder, Stream, bool)> = specs
-                .iter()
-                .map(|&((w, h), kbps, stream)| {
-                    let enc = H264Encoder::new(w, h, fps, kbps, fps).expect("h264 encoder");
-                    (enc, stream, false)
-                })
-                .collect();
             let (lock, cv) = &*wslot;
             loop {
                 let (main_rgb, bev_rgb): FramePair = {

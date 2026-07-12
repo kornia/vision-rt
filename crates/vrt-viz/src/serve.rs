@@ -170,7 +170,8 @@ fn serve_client(mut s: TcpStream, cast: &H264Cast) -> std::io::Result<()> {
         ("/ws", None) => Ok(()),
         _ => write!(
             s,
-            "HTTP/1.0 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            "HTTP/1.0 200 OK\r\nContent-Type: text/html\r\nCache-Control: no-cache\r\n\
+             Content-Length: {}\r\nConnection: close\r\n\r\n{}",
             INDEX_HTML.len(),
             INDEX_HTML
         ),
