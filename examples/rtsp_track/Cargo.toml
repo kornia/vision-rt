@@ -18,7 +18,7 @@ vrt-rfdetr-seg = { path = "../../crates/vrt-rfdetr-seg" }
 vrt-track = { path = "../../crates/vrt-track" }
 vrt-types = { path = "../../crates/vrt-types" }
 # CPU rendering + MJPEG/GIF/PNG viz. `turbojpeg` = SIMD JPEG for the live stream.
-vrt-viz = { path = "../../crates/vrt-viz", features = ["turbojpeg"] }
+vrt-viz = { path = "../../crates/vrt-viz", features = ["h264"] }
 # Private git dep (kornia/sensor-rt) — needs CARGO_NET_GIT_FETCH_WITH_CLI=true.
 sensor-rtsp = { git = "https://github.com/kornia/sensor-rt", rev = "d3b369c95b259c9b14e9b4f69581c2d609dbb2cc" }
 kornia-image = { git = "https://github.com/kornia/kornia-rs", tag = "v0.1.15-rc.4", features = ["cudarc"] }

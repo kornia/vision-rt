@@ -36,7 +36,7 @@ use vrt_rfdetr_seg::RfDetrSeg;
 use vrt_track::{CameraIntrinsics, Detection, TrackState, Tracker, TrackerConfig};
 use vrt_types::Undistorter;
 use vrt_viz::{
-    downscale, encode_png, render_bev, render_main, stack_v, write_gif, JpegEncoder, MaskOverlay,
+    downscale, encode_png, render_bev, render_main, stack_v, write_gif, H264Encoder, MaskOverlay,
     MjpegServer, TrailStore,
 };
 
@@ -55,17 +55,21 @@ const TAPO_C210_K1: f32 = -0.28;
 const BEV_W: usize = 1280;
 const BEV_H: usize = 640;
 
-/// A rendered `(main_rgb, bev_rgb)` pair awaiting JPEG encode.
+/// A rendered `(main_rgb, bev_rgb)` pair awaiting H.264 encode.
 type FramePair = (Vec<u8>, Vec<u8>);
 /// Latest-only handoff slot: newest pair + a condvar the worker waits on.
 type FrameSlot = Arc<(Mutex<Option<FramePair>>, Condvar)>;
 
-/// Off-thread JPEG encoder + MJPEG publisher. The render loop hands over the two
-/// rendered RGB buffers through a **latest-only** slot; a worker thread owns the
-/// [`JpegEncoder`] + [`MjpegServer`] and does the ~13 ms turbojpeg encode + publish
-/// off the hot path, so encoding never stalls frame production. If the worker falls
-/// behind, the slot keeps only the newest pair (stale frames dropped → no queued
-/// latency), which also steadies the publish cadence the browser sees.
+/// Nominal stream frame rate (camera-paced); also the encoder GOP (1 s keyframe
+/// interval → a WebSocket viewer joins/re-syncs within ~1 s).
+const STREAM_FPS: i32 = 15;
+
+/// Off-thread **H.264** encoder + publisher. The render loop hands the two rendered RGB
+/// buffers through a **latest-only** slot; a worker thread owns a per-stream
+/// [`H264Encoder`] (software x264 — the Orin Nano has no NVENC) + the [`MjpegServer`]
+/// and does the inter-frame encode + WebSocket broadcast off the hot path. H.264's
+/// temporal compression cuts the bitrate ~10–20× vs MJPEG, which is what fixes remote
+/// buffering; the browser decodes via WebCodecs.
 struct EncodeSink {
     /// Newest un-encoded pair; `None` once the worker takes it.
     slot: FrameSlot,
@@ -73,43 +77,32 @@ struct EncodeSink {
     enc_us: Arc<AtomicU32>,
 }
 
-/// Round `x·scale` down to an even pixel count (≥2) — turbojpeg 4:2:0 wants even dims.
-fn scaled_even(x: usize, scale: f32) -> usize {
-    (((x as f32 * scale) as usize).max(2)) & !1
-}
-
 impl EncodeSink {
-    /// Bind the MJPEG server and spawn the encode worker. `w`/`h` size the main view,
-    /// `bw`/`bh` the BEV. The streamed JPEGs are downscaled by `scale` and encoded at
-    /// `quality` — render/track stay full-res, only the bytes on the wire shrink, which
-    /// is what keeps a remote (e.g. cellular Tailscale) link from buffering.
+    /// Bind the server and spawn the H.264 encode worker. `w`/`h` size the main view,
+    /// `bw`/`bh` the BEV; `main_kbps`/`bev_kbps` are the target bitrates.
     fn spawn(
         port: u16,
         w: usize,
         h: usize,
         bw: usize,
         bh: usize,
-        scale: f32,
-        quality: u8,
+        main_kbps: u32,
+        bev_kbps: u32,
     ) -> Res<Self> {
         let server = MjpegServer::spawn(port)?;
-        let _ = JpegEncoder::new(quality)?; // fail fast on the main thread if turbojpeg is absent
-        let down = scale < 0.999;
-        let (sw, sh) = (scaled_even(w, scale), scaled_even(h, scale));
-        let (sbw, sbh) = (scaled_even(bw, scale), scaled_even(bh, scale));
-        let (mw, mh, bvw, bvh) = if down {
-            (sw, sh, sbw, sbh)
-        } else {
-            (w, h, bw, bh)
-        };
-        println!(
-            "     stream: main {mw}x{mh} + bev {bvw}x{bvh} @ q{quality} (turbojpeg, scale {scale})"
-        );
         let slot = Arc::new((Mutex::new(None), Condvar::new()));
         let enc_us = Arc::new(AtomicU32::new(0));
         let (wslot, wenc) = (slot.clone(), enc_us.clone());
         std::thread::spawn(move || {
-            let jenc = JpegEncoder::new(quality).expect("jpeg encoder");
+            let mut menc = H264Encoder::new(w, h, STREAM_FPS, main_kbps, STREAM_FPS)
+                .expect("h264 main encoder");
+            let mut benc = H264Encoder::new(bw, bh, STREAM_FPS, bev_kbps, STREAM_FPS)
+                .expect("h264 bev encoder");
+            println!(
+                "     stream: H.264 x264 sw — main {w}x{h}@{main_kbps}k + bev {bw}x{bh}@{bev_kbps}k \
+                 (WebSocket/WebCodecs)"
+            );
+            let _ = std::io::stdout().flush();
             let (lock, cv) = &*wslot;
             loop {
                 let pair: FramePair = {
@@ -121,19 +114,15 @@ impl EncodeSink {
                 };
                 let (main_rgb, bev_rgb) = pair;
                 let t = Instant::now();
-                // Downscale the streamed copy on the worker (off the hot path).
-                let (mbuf, mw, mh) = if down {
-                    (downscale(main_rgb.as_slice(), w, h, sw, sh), sw, sh)
-                } else {
-                    (main_rgb, w, h)
-                };
-                let (bbuf, bw2, bh2) = if down {
-                    (downscale(bev_rgb.as_slice(), bw, bh, sbw, sbh), sbw, sbh)
-                } else {
-                    (bev_rgb, bw, bh)
-                };
-                if let (Ok(mj), Ok(bj)) = (jenc.encode(mbuf, mw, mh), jenc.encode(bbuf, bw2, bh2)) {
-                    server.publish(mj, bj);
+                for (enc, tag, rgb) in [(&mut menc, b'M', main_rgb), (&mut benc, b'B', bev_rgb)] {
+                    if let Ok(aus) = enc.encode(&rgb) {
+                        if let Some(cd) = enc.codec_data() {
+                            server.publish_h264_config(tag, cd);
+                        }
+                        for au in aus {
+                            server.publish_h264_frame(tag, au.key, au.data);
+                        }
+                    }
                 }
                 wenc.store(t.elapsed().as_micros() as u32, Ordering::Relaxed);
             }
@@ -197,20 +186,22 @@ fn main() -> Res<()> {
     let enc_sink = match serve_port {
         Some(port) => {
             println!("live: open http://<this-jetson-ip>:{port} in a phone browser (same Wi-Fi)");
-            // Streamed at full res by default (the WebSocket client's jitter buffer
-            // absorbs network cadence). On a constrained remote/cellular link, drop
-            // RTSP_TRACK_STREAM_SCALE (0<s≤1) / RTSP_TRACK_STREAM_Q to cut bandwidth.
-            let scale = std::env::var("RTSP_TRACK_STREAM_SCALE")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .filter(|s: &f32| *s > 0.0 && *s <= 1.0)
-                .unwrap_or(1.0);
-            let quality = std::env::var("RTSP_TRACK_STREAM_Q")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .filter(|q: &u8| *q >= 10 && *q <= 95)
-                .unwrap_or(72);
-            Some(EncodeSink::spawn(port, w, h, BEV_W, BEV_H, scale, quality)?)
+            // H.264 target bitrates (kbit/s). Full res streams comfortably at a few
+            // Mbit/s thanks to inter-frame compression; tune for tighter links.
+            let kbps = |var: &str, def: u32| {
+                std::env::var(var)
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .filter(|k: &u32| *k >= 100 && *k <= 20000)
+                    .unwrap_or(def)
+            };
+            let (main_kbps, bev_kbps) = (
+                kbps("RTSP_TRACK_MAIN_KBPS", 3500),
+                kbps("RTSP_TRACK_BEV_KBPS", 1500),
+            );
+            Some(EncodeSink::spawn(
+                port, w, h, BEV_W, BEV_H, main_kbps, bev_kbps,
+            )?)
         }
         None => None,
     };
