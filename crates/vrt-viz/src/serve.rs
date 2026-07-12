@@ -98,6 +98,7 @@ impl MjpegServer {
 
 /// Route one client by request path: `/main` / `/bev` stream MJPEG, else the index.
 fn serve_client(mut s: TcpStream, main: &Slot, bev: &Slot) -> std::io::Result<()> {
+    let _ = s.set_nodelay(true); // flush each JPEG immediately — no Nagle coalescing latency
     let mut req = [0u8; 1024];
     let n = s.read(&mut req).unwrap_or(0);
     let path = std::str::from_utf8(&req[..n])
