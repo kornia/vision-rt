@@ -1,4 +1,4 @@
-//! 3D constant-velocity Kalman filter for BoT-SORT tracks.
+//! 3D constant-velocity Kalman filter for the tracker's tracks.
 //!
 //! # State
 //! The filter keeps an **8-dimensional** state that models the target's centre in
@@ -219,16 +219,26 @@ impl KalmanFilter3D {
         self.p = f * self.p * f.transpose() + self.process_noise(dt);
     }
 
-    /// Correct with a measurement `[cx, cy, w, h]` plus optional depth.
+    /// Correct with a measurement `[cx, cy, w, h]` plus optional depth. `meas_scale`
+    /// multiplies the measurement noise `R` (NSA-style: pass `> 1` for a low-confidence
+    /// detection so it nudges the state gently; `1.0` = standard Kalman).
     ///
     /// When `depth` is `None` the depth axis is updated with a huge variance, i.e.
     /// left essentially unchanged (image-plane fallback). Returns `false` if the
     /// innovation covariance is singular (update skipped) — should not happen with
     /// positive `R`, but the filter degrades safely rather than panicking.
-    pub fn update(&mut self, cx: f64, cy: f64, w: f64, h: f64, depth: Option<f64>) -> bool {
+    pub fn update(
+        &mut self,
+        cx: f64,
+        cy: f64,
+        w: f64,
+        h: f64,
+        depth: Option<f64>,
+        meas_scale: f64,
+    ) -> bool {
         let z = Meas::from_column_slice(&[cx, cy, depth.unwrap_or(self.x[2]), w, h]);
         let h_mat = Self::observation();
-        let r = self.measurement_noise(depth.is_some());
+        let r = self.measurement_noise(depth.is_some()) * meas_scale;
 
         let y = z - h_mat * self.x; // innovation
         let s = h_mat * self.p * h_mat.transpose() + r; // innovation covariance
@@ -281,7 +291,7 @@ mod tests {
         // Inject a known velocity by updating with a shifted measurement a few times.
         for i in 1..=5 {
             let cx = 100.0 + 10.0 * i as f64;
-            kf.update(cx, 50.0, 20.0, 40.0, None);
+            kf.update(cx, 50.0, 20.0, 40.0, None, 1.0);
             kf.predict(1.0);
         }
         // After learning ~+10 px/frame, one more predict should move right, not left.
@@ -303,7 +313,7 @@ mod tests {
         // predicted correctly instead of lagging.
         let mut a = KalmanFilter3D::new(0.0, 0.0, 20.0, 20.0, Some(4.0), params());
         for i in 1..=6 {
-            a.update(10.0 * i as f64, 0.0, 20.0, 20.0, Some(4.0));
+            a.update(10.0 * i as f64, 0.0, 20.0, 20.0, Some(4.0), 1.0);
             a.predict(1.0);
         }
         let mut b = a.clone();
@@ -324,11 +334,25 @@ mod tests {
     fn update_pulls_state_toward_measurement() {
         let mut kf = KalmanFilter3D::new(100.0, 100.0, 20.0, 20.0, None, params());
         let (before, _) = kf.center();
-        kf.update(140.0, 100.0, 20.0, 20.0, None);
+        kf.update(140.0, 100.0, 20.0, 20.0, None, 1.0);
         let (after, _) = kf.center();
         assert!(
             after > before && after < 140.0,
             "no partial correction: {after}"
+        );
+    }
+
+    #[test]
+    fn nsa_low_confidence_updates_less() {
+        // Same measurement, different measurement-noise scale: a low-confidence
+        // detection (large scale) must move the state less than a crisp one (scale 1).
+        let mut crisp = KalmanFilter3D::new(0.0, 0.0, 20.0, 20.0, None, params());
+        let mut noisy = crisp.clone();
+        crisp.update(40.0, 0.0, 20.0, 20.0, None, 1.0);
+        noisy.update(40.0, 0.0, 20.0, 20.0, None, 5.0);
+        assert!(
+            crisp.center().0 > noisy.center().0,
+            "crisp update should pull the state further than a low-confidence one"
         );
     }
 
@@ -340,7 +364,7 @@ mod tests {
         let z0 = kf.position_3d()[2];
         for _ in 0..20 {
             kf.predict(1.0);
-            kf.update(5.0, 5.0, 10.0, 10.0, None);
+            kf.update(5.0, 5.0, 10.0, 10.0, None, 1.0);
         }
         let z1 = kf.position_3d()[2];
         assert!(
@@ -355,7 +379,7 @@ mod tests {
         let mut kf = KalmanFilter3D::new(0.0, 0.0, 10.0, 10.0, None, params());
         for _ in 0..30 {
             kf.predict(1.0);
-            kf.update(0.0, 0.0, 10.0, 10.0, Some(7.5));
+            kf.update(0.0, 0.0, 10.0, 10.0, Some(7.5), 1.0);
         }
         let z = kf.position_3d()[2];
         assert!((z - 7.5).abs() < 0.2, "depth did not converge: {z}");
@@ -366,7 +390,7 @@ mod tests {
         let mut kf = KalmanFilter3D::new(0.0, 0.0, 10.0, 10.0, Some(3.0), params());
         for _ in 0..10 {
             kf.predict(1.0);
-            kf.update(1.0, 1.0, 10.0, 10.0, Some(3.0));
+            kf.update(1.0, 1.0, 10.0, 10.0, Some(3.0), 1.0);
         }
         let p = &kf.p;
         for r in 0..NX {

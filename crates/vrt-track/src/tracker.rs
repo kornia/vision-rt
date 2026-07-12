@@ -1,13 +1,14 @@
-//! The [`Tracker`] tracker: ByteTrack two-stage association over the 3D Kalman
-//! motion model, with optional appearance fusion and a camera-motion hook.
+//! The [`Tracker`]: ByteTrack two-stage association over the 3D Kalman motion model
+//! (NSA measurement noise), with a depth-gated 3D association and an optional
+//! appearance-fusion hook.
 
 use crate::association::{gate_depth, iou_cost_matrix, linear_assignment};
 use crate::kalman::KalmanParams;
 use crate::track::{Track, TrackState, Tracklet};
 use crate::{Detection, TrackError};
 
-/// Configuration for [`Tracker`]. [`Default`] gives BoT-SORT-like defaults tuned
-/// for pixel-space boxes.
+/// Configuration for [`Tracker`]. [`Default`] gives sensible defaults tuned for
+/// pixel-space boxes.
 #[derive(Debug, Clone)]
 pub struct TrackerConfig {
     /// Detections at/above this score enter the **first** (high-confidence)
@@ -103,7 +104,7 @@ impl TrackerConfig {
     }
 }
 
-/// BoT-SORT multi-object tracker. Construct once with [`Tracker::new`], then call
+/// Robust multi-object tracker. Construct once with [`Tracker::new`], then call
 /// [`update`](Self::update) every frame with that frame's detections.
 ///
 /// ```

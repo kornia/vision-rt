@@ -5,6 +5,10 @@ use crate::kalman::{KalmanFilter3D, KalmanParams};
 use crate::Detection;
 use vrt_types::{CameraExtrinsics, CameraIntrinsics};
 
+/// NSA measurement-noise inflation strength: `R ← R·(1 + α·(1−score))`. At `score=1`
+/// the noise is the tuned base; a 0.4-score detection gets ~2.2× the noise.
+const NSA_ALPHA: f64 = 2.0;
+
 /// Lifecycle stage of a track.
 ///
 /// ```text
@@ -141,10 +145,15 @@ impl Tracklet {
         self.matched_this_frame = false;
     }
 
-    /// Correct with a matched detection and advance the lifecycle.
+    /// Correct with a matched detection and advance the lifecycle. **NSA Kalman**
+    /// (StrongSORT): the measurement noise is inflated for low-confidence detections,
+    /// `R ← R · (1 + α·(1−score))`, so a shaky box nudges the state gently while a
+    /// crisp one updates firmly.
     pub fn update(&mut self, det: &Detection, min_hits: u32) {
         let (cx, cy, w, h) = xyxy_to_cxcywh(&det.bbox);
-        self.kf.update(cx, cy, w, h, det.depth.map(|z| z as f64));
+        let meas_scale = 1.0 + NSA_ALPHA * (1.0 - det.score.clamp(0.0, 1.0) as f64);
+        self.kf
+            .update(cx, cy, w, h, det.depth.map(|z| z as f64), meas_scale);
         self.class_id = det.class_id;
         self.score = det.score;
         self.hits += 1;
