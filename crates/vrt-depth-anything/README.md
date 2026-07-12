@@ -84,11 +84,11 @@ fp16:
 
 | Stage | ms | note |
 |-------|----:|------|
-| enqueue (both `submit`s) | 4.13 | CPU kernel-launch, ≪ sync → truly async |
-| fusion (`sample_masks`, depth-at-mask) | 0.03 | negligible — one launch, ~200 slots |
-| **GPU sync (seg + depth + fusion)** | **25.52** | the real GPU wall |
-| readout (per-instance depth D2H) | 0.15 | on-demand host copy |
-| **end-to-end** | **29.83** | → **33.5 fps** |
+| enqueue (both `submit`s) | 4.17 | CPU kernel-launch, ≪ sync → truly async |
+| fusion (`sample_masks`, depth-at-mask) | 0.03 | negligible — one launch, on-GPU survivor-gated, ~200 slots |
+| **GPU sync (seg + depth + fusion)** | **25.39** | the real GPU wall |
+| readout (per-instance depth D2H) | 0.14 | on-demand host copy, live-count prefix |
+| **end-to-end** | **29.73** | → **33.6 fps** |
 
 **Decomposition** (trtexec engine-only, same box): depth 392 = 10.1 ms, and RF-DETR-Seg
 is the larger share — the two engines serialized on the one stream account for nearly
@@ -96,10 +96,13 @@ all of the 25.5 ms GPU wall; enqueue + fusion + readout together are < 0.2 ms of
 on the critical path. So you get **detection *and* a metric range for every object at
 ~33 fps** GPU-bound.
 
-Run live: `examples/rtsp_depth` on a 1280×720 kitchen RTSP stream held **~14 fps** —
-**source-gated, not GPU-gated** (the blocking RTSP receive is ~38 ms/frame on a 15 fps
-camera), i.e. ~2× GPU headroom for a faster sensor or a second model. Drop depth to a
-**lower cadence** and let a tracker coast between updates to spend less GPU per frame.
+Run live: `examples/rtsp_depth` on a 1280×720 kitchen RTSP stream held **~14.8 fps** —
+**source-gated, not GPU-gated** (the blocking RTSP receive is ~36 ms/frame on a 15 fps
+camera; on-stream the frame is enqueue 4.5 + fusion 0.04 + GPU sync 25.9 + readout 0.08
+≈ 30 ms → the same **~33 fps** GPU ceiling), i.e. ~2× GPU headroom for a faster sensor
+or a second model. 14–16 instances/frame, per-object metric depth coherent (chairs
+2.0–2.9 m, dining table 2.7 m, fridge 4.1 m, oven 4.9 m). Drop depth to a **lower
+cadence** and let a tracker coast between updates to spend less GPU per frame.
 
 ## Building the weights
 
