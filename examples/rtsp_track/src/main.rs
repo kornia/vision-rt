@@ -320,58 +320,60 @@ fn main() -> Res<()> {
         a_trk += ms(t6 - t5);
         a_dt += dt;
         if n.is_multiple_of(100) {
-            let k = 100.0;
-            let confirmed = tracks
-                .iter()
-                .filter(|t| t.state == TrackState::Confirmed)
-                .count();
-            // Churn: distinct confirmed ids seen this window vs the live count. If the
-            // scene is static, distinct ≈ live; distinct ≫ live ⇒ ids are switching.
-            let distinct = window_ids.len();
-            window_ids.clear();
-            println!(
-                "── {n} frames | {:.1} fps | source {:.2} | enqueue {:.3} | fusion {:.3} | \
-                 sync(GPU) {:.2} | readout {:.3} | track {:.3} | dt {:.2} | {inst_n} det → \
-                 {confirmed} conf | {distinct} distinct-ids/100f",
-                n as f64 / t_start.elapsed().as_secs_f64(),
-                a_src / k,
-                a_enq / k,
-                a_fus / k,
-                a_sync / k,
-                a_read / k,
-                a_trk / k,
-                a_dt / k,
-            );
-            let spf = if ema_dt > 0.0 {
-                ema_dt as f32
-            } else {
-                1.0 / 15.0
-            };
-            let shown: Vec<String> = tracks
-                .iter()
-                .filter(|t| t.state == TrackState::Confirmed)
-                .take(6)
-                .map(|t| {
-                    let [x, y, zz] = t.metric_position(&intr);
-                    let mv = t.metric_velocity(&intr);
-                    let speed = (mv[0].powi(2) + mv[1].powi(2) + mv[2].powi(2)).sqrt() / spf;
-                    format!(
-                        "#{} {} [X{x:+.1} Y{y:+.1} Z{zz:.1}]m {speed:.1}m/s",
-                        t.id,
-                        coco_name(t.class_id)
-                    )
-                })
-                .collect();
-            println!("     tracks: {}", shown.join(", "));
-            if let Some(sink) = &enc_sink {
-                // Encode runs on the worker thread; report its last measured cost.
-                let enc_ms = sink.enc_us.load(Ordering::Relaxed) as f64 / 1000.0;
-                println!(
-                    "     serve: render {:.1} ms | encode×2 {enc_ms:.1} ms (worker, off hot path)",
-                    a_render / k,
+            // Per-window profiling + track/churn stats — silent by default, opt in with
+            // `RUST_LOG=rtsp_track=debug`.
+            if log::log_enabled!(log::Level::Debug) {
+                let k = 100.0;
+                let confirmed = tracks
+                    .iter()
+                    .filter(|t| t.state == TrackState::Confirmed)
+                    .count();
+                // Churn: distinct confirmed ids this window vs the live count. Static
+                // scene ⇒ distinct ≈ live; distinct ≫ live ⇒ ids are switching.
+                let distinct = window_ids.len();
+                log::debug!(
+                    "{n} frames | {:.1} fps | source {:.2} | enqueue {:.3} | fusion {:.3} | \
+                     sync(GPU) {:.2} | readout {:.3} | track {:.3} | dt {:.2} | {inst_n} det → \
+                     {confirmed} conf | {distinct} distinct-ids/100f",
+                    n as f64 / t_start.elapsed().as_secs_f64(),
+                    a_src / k,
+                    a_enq / k,
+                    a_fus / k,
+                    a_sync / k,
+                    a_read / k,
+                    a_trk / k,
+                    a_dt / k,
                 );
+                let spf = if ema_dt > 0.0 {
+                    ema_dt as f32
+                } else {
+                    1.0 / 15.0
+                };
+                let shown: Vec<String> = tracks
+                    .iter()
+                    .filter(|t| t.state == TrackState::Confirmed)
+                    .take(6)
+                    .map(|t| {
+                        let [x, y, zz] = t.metric_position(&intr);
+                        let mv = t.metric_velocity(&intr);
+                        let speed = (mv[0].powi(2) + mv[1].powi(2) + mv[2].powi(2)).sqrt() / spf;
+                        format!(
+                            "#{} {} [X{x:+.1} Y{y:+.1} Z{zz:.1}]m {speed:.1}m/s",
+                            t.id,
+                            coco_name(t.class_id)
+                        )
+                    })
+                    .collect();
+                log::debug!("tracks: {}", shown.join(", "));
+                if let Some(sink) = &enc_sink {
+                    let enc_ms = sink.enc_us.load(Ordering::Relaxed) as f64 / 1000.0;
+                    log::debug!(
+                        "serve: render {:.1} ms | encode×2 {enc_ms:.1} ms (worker, off hot path)",
+                        a_render / k,
+                    );
+                }
             }
-            let _ = std::io::stdout().flush();
+            window_ids.clear();
             (a_src, a_enq, a_fus, a_sync, a_read, a_trk, a_dt, a_render) =
                 (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
         }
