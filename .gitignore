@@ -22,3 +22,6 @@ models/
 
 # ReID backbone probe (research + data — not for public repo)
 scripts/reid_probe/
+
+# pixi environments
+.pixi/
