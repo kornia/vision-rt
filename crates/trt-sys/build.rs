@@ -1,4 +1,41 @@
-use std::{env, path::PathBuf};
+use std::collections::HashMap;
+use std::{env, path::Path, path::PathBuf};
+
+/// Parse "MAJOR.MINOR.PATCH.BUILD" from NvInferVersion.h so the version
+/// constant tracks the actually-installed TRT (engine-cache keys depend on
+/// it). TRT >= 10.13 defines the NV_TENSORRT_* macros through one level of
+/// indirection (`#define NV_TENSORRT_MAJOR TRT_MAJOR_ENTERPRISE`), so
+/// non-numeric values are resolved through the define map.
+fn parse_trt_version(trt_inc: &str) -> Option<String> {
+    let text = std::fs::read_to_string(format!("{trt_inc}/NvInferVersion.h")).ok()?;
+    let defines: HashMap<&str, &str> = text
+        .lines()
+        .filter_map(|line| {
+            let mut words = line.split_whitespace();
+            if words.next()? != "#define" {
+                return None;
+            }
+            Some((words.next()?, words.next()?))
+        })
+        .collect();
+    let grab = |name: &str| -> Option<u32> {
+        let mut value = *defines.get(name)?;
+        for _ in 0..16 {
+            if let Ok(number) = value.parse() {
+                return Some(number);
+            }
+            value = *defines.get(value)?;
+        }
+        None
+    };
+    Some(format!(
+        "{}.{}.{}.{}",
+        grab("NV_TENSORRT_MAJOR")?,
+        grab("NV_TENSORRT_MINOR")?,
+        grab("NV_TENSORRT_PATCH")?,
+        grab("NV_TENSORRT_BUILD")?,
+    ))
+}
 
 fn main() {
     println!("cargo:rustc-check-cfg=cfg(trt_stub)");
@@ -20,7 +57,28 @@ fn main() {
     let trt_lib = env::var("TRT_LIB_DIR").unwrap_or_else(|_| "/usr/lib/aarch64-linux-gnu".into());
     let cuda_home = env::var("CUDA_HOME").unwrap_or_else(|_| "/usr/local/cuda".into());
     let cuda_inc = format!("{cuda_home}/include");
-    let cuda_lib = format!("{cuda_home}/lib64");
+    let cuda_lib64 = format!("{cuda_home}/lib64");
+    let cuda_lib = if Path::new(&cuda_lib64).is_dir() {
+        cuda_lib64
+    } else {
+        format!("{cuda_home}/lib")
+    };
+
+    // Parse before any link directives: the installed major selects the only
+    // versioned soname fallback that can safely satisfy this exact build.
+    let version = parse_trt_version(&trt_inc).unwrap_or_else(|| {
+        panic!(
+            "failed to parse TensorRT version from {trt_inc}/NvInferVersion.h; \
+             check TRT_INCLUDE_DIR"
+        )
+    });
+    let major = version
+        .split('.')
+        .next()
+        .expect("parsed TensorRT version always has a major component");
+    println!("cargo:rustc-env=TENSORRT_VERSION={version}");
+    println!("cargo:rerun-if-changed={trt_inc}/NvInferVersion.h");
+
     // ── 1. Compile logger shim (ILogger subclass — only thing needing C++ subclassing) ──
     cc::Build::new()
         .cpp(true)
@@ -90,32 +148,75 @@ fn main() {
     }
 
     // ── 4. Link directives ──────────────────────────────────────────────────────────────
+    let mut libraries = vec!["nvinfer", "nvinfer_plugin"];
+    if builder_feature {
+        libraries.push("nvonnxparser");
+    }
+    let unversioned: Vec<String> = libraries
+        .iter()
+        .map(|library| format!("lib{library}.so"))
+        .collect();
+    let versioned: Vec<String> = libraries
+        .iter()
+        .map(|library| format!("lib{library}.so.{major}"))
+        .collect();
+    let trt_lib_path = Path::new(&trt_lib);
+    let has_unversioned = unversioned
+        .iter()
+        .all(|name| trt_lib_path.join(name).is_file());
+    let has_versioned = versioned
+        .iter()
+        .all(|name| trt_lib_path.join(name).is_file());
+    if !has_unversioned && !has_versioned {
+        let resolved = trt_lib_path
+            .canonicalize()
+            .unwrap_or_else(|_| trt_lib_path.to_path_buf());
+        panic!(
+            "TensorRT libraries not found in {}: expected either [{}] or [{}]",
+            resolved.display(),
+            unversioned.join(", "),
+            versioned.join(", "),
+        );
+    }
+
     println!("cargo:rustc-link-search=native={trt_lib}");
     println!("cargo:rustc-link-search=native={cuda_lib}");
-    println!("cargo:rustc-link-lib=dylib=nvinfer");
-    println!("cargo:rustc-link-lib=dylib=nvinfer_plugin");
-    if builder_feature {
-        println!("cargo:rustc-link-lib=dylib=nvonnxparser");
+    if has_unversioned {
+        println!("cargo:rustc-link-lib=dylib=nvinfer");
+        println!("cargo:rustc-link-lib=dylib=nvinfer_plugin");
+        if builder_feature {
+            println!("cargo:rustc-link-lib=dylib=nvonnxparser");
+        }
+    } else {
+        println!("cargo:rustc-link-lib=dylib:+verbatim=libnvinfer.so.{major}");
+        println!("cargo:rustc-link-lib=dylib:+verbatim=libnvinfer_plugin.so.{major}");
+        if builder_feature {
+            println!("cargo:rustc-link-lib=dylib:+verbatim=libnvonnxparser.so.{major}");
+        }
     }
     println!("cargo:rustc-link-lib=dylib=cudart");
     println!("cargo:rustc-link-lib=dylib=stdc++");
 
-    // ── 5. Version constants — parsed from NvInferVersion.h, not hardcoded ─────────────
-    let version = parse_trt_version(&trt_inc).unwrap_or_else(|| "10.3.0.30".to_string());
-    println!("cargo:rustc-env=TENSORRT_VERSION={version}");
-    println!("cargo:rerun-if-changed={trt_inc}/NvInferVersion.h");
-
+    // ── 5. Version support warning ─────────────────────────────────────────────────────
     // Warn (never fail) if the installed TRT is outside the tested range. The
     // version flows into engine-cache keys, so an off-version box simply gets its
     // own cache namespace rather than a miskeyed hit — but the shims are only
-    // validated against 10.3.x, so surface the mismatch to the builder.
-    const SUPPORTED_TRT: (&str, &str) = ("10", "3"); // major, minor
+    // validated against the listed versions, so surface the mismatch to the builder.
+    const SUPPORTED_TRT: [(&str, &str); 2] = [("10", "3"), ("10", "13")]; // major, minor
     let mut parts = version.split('.');
-    if (parts.next(), parts.next()) != (Some(SUPPORTED_TRT.0), Some(SUPPORTED_TRT.1)) {
+    let installed = (parts.next(), parts.next());
+    if !SUPPORTED_TRT
+        .iter()
+        .any(|&(major, minor)| installed == (Some(major), Some(minor)))
+    {
+        let tested_versions = SUPPORTED_TRT
+            .iter()
+            .map(|(major, minor)| format!("{major}.{minor}.x"))
+            .collect::<Vec<_>>()
+            .join("/");
         println!(
-            "cargo:warning=TensorRT {version} is outside the tested {}.{}.x range; \
+            "cargo:warning=TensorRT {version} is outside the tested {tested_versions} ranges; \
              engines/cache-keys are version-specific and may need an on-device rebuild",
-            SUPPORTED_TRT.0, SUPPORTED_TRT.1
         );
     }
 
@@ -128,28 +229,4 @@ fn main() {
     println!("cargo:rerun-if-env-changed=TRT_INCLUDE_DIR");
     println!("cargo:rerun-if-env-changed=TRT_LIB_DIR");
     println!("cargo:rerun-if-env-changed=CUDA_HOME");
-}
-
-/// Parse "MAJOR.MINOR.PATCH.BUILD" from NvInferVersion.h so the version
-/// constant tracks the actually-installed TRT (engine-cache keys depend on it).
-fn parse_trt_version(trt_inc: &str) -> Option<String> {
-    let text = std::fs::read_to_string(format!("{trt_inc}/NvInferVersion.h")).ok()?;
-    let grab = |name: &str| -> Option<u32> {
-        text.lines()
-            .find(|l| l.contains(&format!("#define {name} ")))
-            // Take the token immediately AFTER the macro name, not the last
-            // token — the headers carry trailing `//!< …` Doxygen comments, so
-            // `.last()` would grab a comment word and the parse would always
-            // fail (silently falling back to a hardcoded version → mis-keyed
-            // engine cache on any non-default TRT).
-            .and_then(|l| l.split_whitespace().skip_while(|t| *t != name).nth(1))
-            .and_then(|v| v.parse().ok())
-    };
-    Some(format!(
-        "{}.{}.{}.{}",
-        grab("NV_TENSORRT_MAJOR")?,
-        grab("NV_TENSORRT_MINOR")?,
-        grab("NV_TENSORRT_PATCH")?,
-        grab("NV_TENSORRT_BUILD")?,
-    ))
 }
