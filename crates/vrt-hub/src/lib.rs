@@ -203,6 +203,25 @@ pub static REGISTRY: &[ModelSpec] = &[
             sm: "87",
         }],
     },
+    ModelSpec {
+        // OSNet x0.25 person re-id (torchreid `osnet_x0_25_msmt17`, MSMT17). Fixed-batch
+        // export (input [16,3,256,128]) + a prebuilt engine for this Orin config (trt+sm
+        // guarded; other boxes build from the ONNX on-device). The engine filename
+        // carries the ONNX sha256 prefix (`e78604f4`) it was built from.
+        name: "osnet-reid",
+        hf_repo: "kornia/osnet",
+        revision: "main",
+        files: &[ModelFile {
+            filename: "osnet_x0_25_msmt17.onnx",
+            sha256: "e78604f4ccda49b8f41cd0f8f7303800ce75d2361895ebb0729513c1bf53d277",
+        }],
+        engines: &[EngineArtifact {
+            filename: "osnet-reid-e78604f4-trt10.3.0.30-sm87.engine",
+            sha256: "893b4dae9af84aeb0d6309e8a19fc06f3b759ee40a82f8af091729aa686166e3",
+            trt_version: "10.3.0.30",
+            sm: "87",
+        }],
+    },
 ];
 
 /// Look up a model spec by name.
