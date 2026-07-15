@@ -12,26 +12,27 @@
 //! alternative on crossing/overlapping targets. Rectangular problems are padded to
 //! square with a large sentinel cost that the gate rejects.
 
+use vrt_types::CameraIntrinsics;
+
 /// A large finite cost used to pad rectangular assignment problems to square.
 const PAD_COST: f64 = 1.0e6;
 
-/// Cost stamped on a depth-inconsistent pair by [`gate_depth`]: large enough that
-/// the assignment never accepts it (`> match_thresh`), yet below [`PAD_COST`] so a
-/// forced pick still loses to real padding and is dropped as unmatched.
-const DEPTH_GATE_COST: f64 = 1.0e3;
-
-/// Reject track↔detection pairs whose **metric depth** disagrees, in place.
+/// Penalize track↔detection pairs whose **metric depth** disagrees, in place.
 ///
-/// For every pair where *both* the track and the detection carry a known metric
-/// depth, if `|z_track − z_det|` exceeds a relative tolerance
-/// `max(abs_floor, rel · z_track)` the pair's cost is stamped to [`DEPTH_GATE_COST`]
-/// so the assignment never accepts it — killing the ID swap between two objects that
-/// overlap in the image but sit at different depths (a person walking in front of a
-/// chair, two people crossing). A pair with an unknown depth on either side is left
-/// untouched, so the tracker degrades gracefully to pure IoU. Apply this **after**
-/// [`fuse_appearance`] so a depth-inconsistent pair is rejected even when appearance
-/// would have rescued it. `rel`/`abs_floor` are
-/// [`TrackerConfig::depth_gate_rel`]/[`depth_gate_abs`].
+/// For every pair where *both* the track and the detection carry a known metric depth,
+/// if `|z_track − z_det|` exceeds a relative tolerance `max(abs_floor, rel · z_track)`
+/// the pair's cost is **increased by `penalty`** (additive, not a hard veto). This kills
+/// the ID swap between two objects that overlap in the image but sit at different depths
+/// (the correct same-depth match keeps its low cost and wins), while a strongly-
+/// overlapping self-match survives a transient monocular-depth spike instead of being
+/// rejected (which made static objects churn ids). A pair with an unknown depth on
+/// either side is untouched — graceful degradation to pure IoU. Apply this **after**
+/// [`fuse_appearance`] so a depth-inconsistent pair is penalized even when appearance
+/// rescued it. `rel`/`abs_floor`/`penalty` are
+/// [`TrackerConfig::depth_gate_rel`]/[`depth_gate_abs`]/[`depth_gate_penalty`]; a very
+/// large `penalty` recovers the old hard-veto behaviour.
+///
+/// [`TrackerConfig::depth_gate_penalty`]: crate::TrackerConfig::depth_gate_penalty
 ///
 /// [`TrackerConfig::depth_gate_rel`]: crate::TrackerConfig::depth_gate_rel
 /// [`depth_gate_abs`]: crate::TrackerConfig::depth_gate_abs
@@ -41,6 +42,7 @@ pub fn gate_depth(
     det_depths: &[Option<f32>],
     rel: f32,
     abs_floor: f32,
+    penalty: f64,
 ) {
     for (t, row) in cost.iter_mut().enumerate() {
         let Some(zt) = track_depths.get(t).copied().flatten() else {
@@ -52,7 +54,15 @@ pub fn gate_depth(
                 continue;
             };
             if (zt - zd).abs() > tol {
-                *c = DEPTH_GATE_COST;
+                // **Additive** penalty, not a hard veto. A strongly-overlapping (high-IoU,
+                // low-cost) pair survives it and still matches — so an object's OWN
+                // detection with a transient monocular-depth spike is not rejected (which
+                // caused static objects to churn ids). But a genuine crossing is still
+                // resolved: the correct same-depth detection has ~0 base cost and no
+                // penalty, so the Hungarian prefers it over the penalized cross pair. A
+                // low-overlap cross-depth pair (already near the match gate) is pushed
+                // over it and dropped, preserving the swap veto where it matters.
+                *c += penalty;
             }
         }
     }
@@ -78,10 +88,141 @@ pub fn iou(a: &[f32; 4], b: &[f32; 4]) -> f32 {
 }
 
 /// IoU-distance cost matrix `cost[t][d] = 1 − IoU(track_t, det_d)`, in `[0, 1]`.
-pub fn iou_cost_matrix(tracks: &[[f32; 4]], dets: &[[f32; 4]]) -> Vec<Vec<f64>> {
+/// **Distance-IoU** (Zheng et al., AAAI 2020): `IoU − ρ²(centres)/c²`, where `ρ` is the
+/// distance between box centres and `c` the diagonal of the smallest box enclosing both.
+/// Range `[-1, 1]`. Unlike plain IoU it discriminates among **equal-IoU** candidates by
+/// centre proximity — which only differs from IoU when the boxes have **different sizes**
+/// (for equal-size axis-aligned boxes IoU is already monotonic in centre distance). The
+/// case it helps: an occlusion-shrunk detection overlaps two tracks equally in IoU but
+/// sits on one's centre — DIoU picks that one, stabilizing the association.
+pub fn diou(a: &[f32; 4], b: &[f32; 4]) -> f32 {
+    let i = iou(a, b);
+    let (acx, acy) = ((a[0] + a[2]) * 0.5, (a[1] + a[3]) * 0.5);
+    let (bcx, bcy) = ((b[0] + b[2]) * 0.5, (b[1] + b[3]) * 0.5);
+    let d2 = (acx - bcx).powi(2) + (acy - bcy).powi(2);
+    let (ex1, ey1) = (a[0].min(b[0]), a[1].min(b[1]));
+    let (ex2, ey2) = (a[2].max(b[2]), a[3].max(b[3]));
+    let c2 = (ex2 - ex1).powi(2) + (ey2 - ey1).powi(2);
+    if c2 <= 0.0 {
+        i
+    } else {
+        i - d2 / c2
+    }
+}
+
+/// **DIoU with a metric-3D centre penalty.** Keeps the crisp 2D pixel IoU overlap but
+/// makes the centre-distance penalty `ρ²/c²` metric: unproject each box's centre and
+/// corners to camera-frame metres at its own depth, so `ρ` is the real 3D centre
+/// distance (including depth) and `c` the diagonal of the enclosing metric box (its
+/// Z-extent is the depth gap between the two flat box-planes). Two boxes overlapping in
+/// the image but at **different depths** get a large `ρ` → DIoU-3D collapses → no match:
+/// depth separation folded smoothly into the cost. For equal depth it reduces to 2D
+/// [`diou`]. Falls back to 2D `diou` when either depth is absent (can't lift to metres).
+pub fn diou3d(
+    a: &[f32; 4],
+    b: &[f32; 4],
+    az: Option<f32>,
+    bz: Option<f32>,
+    intr: &CameraIntrinsics,
+) -> f32 {
+    let (Some(za), Some(zb)) = (az, bz) else {
+        return diou(a, b);
+    };
+    let i = iou(a, b);
+    let ca = intr.unproject((a[0] + a[2]) * 0.5, (a[1] + a[3]) * 0.5, za);
+    let cb = intr.unproject((b[0] + b[2]) * 0.5, (b[1] + b[3]) * 0.5, zb);
+    let rho2 = (ca[0] - cb[0]).powi(2) + (ca[1] - cb[1]).powi(2) + (ca[2] - cb[2]).powi(2);
+    // Metric corners at each box's depth → X/Y extent of the enclosing box; the boxes
+    // are flat planes so the enclosing Z-extent is just the depth gap |za − zb|.
+    let (atl, abr) = (
+        intr.unproject(a[0], a[1], za),
+        intr.unproject(a[2], a[3], za),
+    );
+    let (btl, bbr) = (
+        intr.unproject(b[0], b[1], zb),
+        intr.unproject(b[2], b[3], zb),
+    );
+    let xs = [atl[0], abr[0], btl[0], bbr[0]];
+    let ys = [atl[1], abr[1], btl[1], bbr[1]];
+    let ex =
+        xs.iter().copied().fold(f32::MIN, f32::max) - xs.iter().copied().fold(f32::MAX, f32::min);
+    let ey =
+        ys.iter().copied().fold(f32::MIN, f32::max) - ys.iter().copied().fold(f32::MAX, f32::min);
+    let c2 = ex * ex + ey * ey + (za - zb).powi(2);
+    if c2 <= 0.0 {
+        i
+    } else {
+        i - rho2 / c2
+    }
+}
+
+/// **Buffered IoU** (C-BIoU, Yang et al. WACV 2023): IoU after expanding both boxes by
+/// `buffer × (w, h)` on each side. Tolerates a shifted/jittered box — a detection whose
+/// seg-mask box moved (a common instability) still overlaps its track's buffered box, so
+/// the match survives instead of the track dying and re-birthing. `buffer = 0` is plain
+/// IoU. Note: buffering scales with box size, so it rescues *positional* shift, not a
+/// wild size mismatch (a tiny box vs a huge one stays non-overlapping).
+pub fn biou(a: &[f32; 4], b: &[f32; 4], buffer: f32) -> f32 {
+    if buffer <= 0.0 {
+        return iou(a, b);
+    }
+    let ex = |x: &[f32; 4]| {
+        let (w, h) = (x[2] - x[0], x[3] - x[1]);
+        [
+            x[0] - buffer * w,
+            x[1] - buffer * h,
+            x[2] + buffer * w,
+            x[3] + buffer * h,
+        ]
+    };
+    iou(&ex(a), &ex(b))
+}
+
+/// Association cost matrix `1 − similarity`. `use_diou` swaps plain IoU for [`diou`]
+/// (distance-aware); otherwise plain IoU with an optional `iou_buffer` (Buffered IoU,
+/// [`biou`]) for seg-box-shift tolerance. Both off by default.
+pub fn iou_cost_matrix(
+    tracks: &[[f32; 4]],
+    dets: &[[f32; 4]],
+    use_diou: bool,
+    iou_buffer: f32,
+) -> Vec<Vec<f64>> {
     tracks
         .iter()
-        .map(|t| dets.iter().map(|d| 1.0 - iou(t, d) as f64).collect())
+        .map(|t| {
+            dets.iter()
+                .map(|d| {
+                    let s = if use_diou {
+                        diou(t, d)
+                    } else {
+                        biou(t, d, iou_buffer)
+                    };
+                    1.0 - s as f64
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// Cost matrix using [`diou3d`] — per-object depths + intrinsics lift the centre
+/// penalty to metres. `track_z[i]` / `det_z[j]` are the boxes' metric depths (`None` →
+/// that pair falls back to 2D `diou`). Enable via [`TrackerConfig::use_diou3d`].
+pub fn diou3d_cost_matrix(
+    tracks: &[[f32; 4]],
+    dets: &[[f32; 4]],
+    track_z: &[Option<f32>],
+    det_z: &[Option<f32>],
+    intr: &CameraIntrinsics,
+) -> Vec<Vec<f64>> {
+    tracks
+        .iter()
+        .enumerate()
+        .map(|(ti, t)| {
+            dets.iter()
+                .enumerate()
+                .map(|(di, d)| 1.0 - diou3d(t, d, track_z[ti], det_z[di], intr) as f64)
+                .collect()
+        })
         .collect()
 }
 
@@ -290,6 +431,51 @@ fn hungarian(cost: &[Vec<f64>]) -> Vec<usize> {
     assign
 }
 
+/// Observation-Centric Momentum (OC-SORT), in **metric world space**: penalize a match
+/// whose direction — from the track's last world observation to the candidate detection's
+/// world position — disagrees with the track's **observed** world-velocity direction.
+/// Adds `lambda · (Δθ / π)` to the IoU cost (Δθ ∈ `[0, π]`), so a detection moving
+/// *against* the track's established 3D motion is pushed away even when IoU (or an
+/// appearance rescue) would otherwise tie — the crossing-swap case. Working in metres
+/// (not pixels) makes the cue perspective-correct and sensitive to motion in **depth**,
+/// which a pixel-plane direction can't see.
+///
+/// `track_dir[t]` is the unit observed world-velocity direction (`None` = skip the
+/// track), `track_center[t]` the track's last world position, `det_center[d]` each
+/// detection's world position (`None` = no depth → skip). Applied after the IoU/appearance
+/// fusion and **before** the depth gate, so the gate stays the hard veto.
+pub fn fuse_momentum(
+    cost: &mut [Vec<f64>],
+    track_dir: &[Option<[f64; 3]>],
+    track_center: &[[f64; 3]],
+    det_center: &[Option<[f64; 3]>],
+    lambda: f32,
+) {
+    if lambda <= 0.0 {
+        return;
+    }
+    let lambda = lambda as f64;
+    for (t, row) in cost.iter_mut().enumerate() {
+        let Some(dir) = track_dir.get(t).and_then(|d| *d) else {
+            continue;
+        };
+        let tc = track_center[t];
+        for (d, c) in row.iter_mut().enumerate() {
+            let Some(dc) = det_center.get(d).and_then(|p| *p) else {
+                continue; // detection has no world position (no depth) → no cue
+            };
+            let delta = [dc[0] - tc[0], dc[1] - tc[1], dc[2] - tc[2]];
+            let n = (delta[0] * delta[0] + delta[1] * delta[1] + delta[2] * delta[2]).sqrt();
+            if n < 1e-3 {
+                continue; // detection ≈ track centre → no direction to compare
+            }
+            let cos = (dir[0] * delta[0] + dir[1] * delta[1] + dir[2] * delta[2]) / n;
+            let dtheta = cos.clamp(-1.0, 1.0).acos(); // [0, π]
+            *c += lambda * (dtheta / std::f64::consts::PI);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -346,11 +532,28 @@ mod tests {
         let mut cost = vec![vec![0.1, 0.1], vec![0.1, 0.1]];
         let track_d = [Some(2.0f32), None];
         let det_d = [Some(2.1f32), Some(5.0f32)];
-        gate_depth(&mut cost, &track_d, &det_d, 0.25, 0.5);
-        assert!(cost[0][0] < 1.0, "consistent depth pair kept");
-        assert!(cost[0][1] >= DEPTH_GATE_COST, "3 m mismatch gated");
+        gate_depth(&mut cost, &track_d, &det_d, 0.25, 0.5, 0.2);
+        assert!(
+            (cost[0][0] - 0.1).abs() < 1e-6,
+            "consistent depth pair unpenalized"
+        );
+        assert!(
+            (cost[0][1] - 0.3).abs() < 1e-6,
+            "3 m mismatch penalized (+0.2)"
+        );
         // Unknown track depth → whole row untouched (graceful fallback to IoU).
         assert!(cost[1][0] < 1.0 && cost[1][1] < 1.0);
+        // A large penalty recovers the old hard-veto (mismatch pushed past the gate).
+        let mut hard = vec![vec![0.1, 0.1]];
+        gate_depth(
+            &mut hard,
+            &[Some(2.0)],
+            &[Some(2.1), Some(5.0)],
+            0.25,
+            0.5,
+            1.0e6,
+        );
+        assert!(hard[0][1] > 1.0, "large penalty = hard veto");
     }
 
     #[test]
@@ -358,13 +561,16 @@ mod tests {
         // At 10 m the 25% relative tol is 2.5 m, so a 2 m gap is allowed; the same
         // 2 m gap at 2 m distance (tol = max(0.5, 0.5) = 0.5 m) is rejected.
         let mut far = vec![vec![0.2]];
-        gate_depth(&mut far, &[Some(10.0)], &[Some(12.0)], 0.25, 0.5);
-        assert!(far[0][0] < 1.0, "2 m gap within 2.5 m tol at 10 m");
-        let mut near = vec![vec![0.2]];
-        gate_depth(&mut near, &[Some(2.0)], &[Some(4.0)], 0.25, 0.5);
+        gate_depth(&mut far, &[Some(10.0)], &[Some(12.0)], 0.25, 0.5, 1.0e6);
         assert!(
-            near[0][0] >= DEPTH_GATE_COST,
-            "2 m gap exceeds 0.5 m tol at 2 m"
+            far[0][0] < 1.0,
+            "2 m gap within 2.5 m tol at 10 m → unpenalized"
+        );
+        let mut near = vec![vec![0.2]];
+        gate_depth(&mut near, &[Some(2.0)], &[Some(4.0)], 0.25, 0.5, 1.0e6);
+        assert!(
+            near[0][0] > 1.0,
+            "2 m gap exceeds 0.5 m tol at 2 m → penalized"
         );
     }
 
@@ -417,5 +623,210 @@ mod tests {
         assert!((cosine_distance(&a, &b) - 1.0).abs() < 1e-6);
         let c = [-1.0, 0.0];
         assert!((cosine_distance(&a, &c) - 2.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn diou3d_penalizes_depth_separated_overlap() {
+        let intr = vrt_types::CameraIntrinsics::from_hfov(1280.0, 720.0, 70.0);
+        // Two boxes overlapping heavily in the image.
+        let a = [100.0, 100.0, 200.0, 300.0];
+        let b = [110.0, 100.0, 210.0, 300.0];
+        // Same depth → behaves like 2D DIoU (high similarity, boxes overlap).
+        let same = diou3d(&a, &b, Some(3.0), Some(3.0), &intr);
+        // Different depth (2 m vs 6 m) → large metric ρ → similarity collapses.
+        let diff = diou3d(&a, &b, Some(2.0), Some(6.0), &intr);
+        assert!(
+            same > diff + 0.2,
+            "depth separation must lower DIoU-3D: same={same} diff={diff}"
+        );
+        // No depth on one side → 2D fallback, exactly plain diou.
+        let fb = diou3d(&a, &b, None, Some(3.0), &intr);
+        assert!(
+            (fb - diou(&a, &b)).abs() < 1e-6,
+            "no depth → 2D DIoU fallback"
+        );
+        // Same-depth DIoU-3D ≈ 2D DIoU (centre penalty ~scale-consistent).
+        assert!(
+            same > 0.5,
+            "same-depth overlap should stay a strong match: {same}"
+        );
+    }
+
+    #[test]
+    fn diou_breaks_equal_iou_tie_by_centre() {
+        // A big track box; two SMALLER detections both fully inside it → identical IoU,
+        // but D0 sits on the track's centre and D1 is offset (the occlusion-shrunk
+        // crossing case). Plain IoU can't choose; DIoU prefers the centre-aligned D0.
+        let t = [0.0, 0.0, 20.0, 20.0]; // centre (10,10)
+        let d0 = [5.0, 5.0, 15.0, 15.0]; // centre (10,10) — on the track centre
+        let d1 = [10.0, 5.0, 20.0, 15.0]; // centre (15,10) — offset, SAME iou
+        assert!(
+            (iou(&t, &d0) - iou(&t, &d1)).abs() < 1e-6,
+            "IoU is a genuine tie"
+        );
+        assert!(
+            diou(&t, &d0) > diou(&t, &d1),
+            "DIoU ranks the centre-aligned box higher"
+        );
+        // Plain-IoU cost matrix ties; DIoU cost breaks it → assignment picks D0.
+        let plain = iou_cost_matrix(&[t], &[d0, d1], false, 0.0);
+        assert!(
+            (plain[0][0] - plain[0][1]).abs() < 1e-6,
+            "plain IoU cost is a tie"
+        );
+        let dcost = iou_cost_matrix(&[t], &[d0, d1], true, 0.0);
+        assert!(
+            dcost[0][0] < dcost[0][1],
+            "DIoU cost prefers the centre-aligned det"
+        );
+        let (m, _, _) = linear_assignment(&dcost, 1, 2, 0.9);
+        assert!(
+            m.contains(&(0, 0)),
+            "DIoU assigns the centre-aligned detection: {m:?}"
+        );
+    }
+
+    #[test]
+    fn biou_rescues_shifted_box_below_iou_gate() {
+        // A seg-mask box that SHIFTED between frames: the track sits at its smoothed
+        // position; the new detection is the same-size box translated far enough that plain
+        // IoU falls below the match gate (real live case: id11 chair, IoU 0.17). Buffering
+        // both boxes restores enough overlap to keep the match — without letting a genuinely
+        // distant box match.
+        let track = [700.0, 380.0, 760.0, 440.0]; // 60×60
+        let shifted = [745.0, 380.0, 805.0, 440.0]; // same size, +45px in x
+        let plain = iou(&track, &shifted);
+        assert!(
+            plain < 0.2,
+            "setup: shifted box must be below the ~0.2 gate, got {plain}"
+        );
+        let buffered = biou(&track, &shifted, 0.3);
+        assert!(
+            buffered > plain,
+            "buffering must raise overlap: {buffered} vs {plain}"
+        );
+        assert!(
+            buffered > 0.2,
+            "buffered IoU must clear the gate: {buffered}"
+        );
+        // buffer=0 is exactly plain IoU (no behavior change when disabled).
+        assert!(
+            (biou(&track, &shifted, 0.0) - plain).abs() < 1e-6,
+            "buffer=0 must equal plain IoU"
+        );
+        // A truly far box (2× a box-width away) must NOT be rescued — buffering tolerates
+        // jitter, not teleport.
+        let far = [900.0, 380.0, 960.0, 440.0]; // +200px
+        assert_eq!(
+            biou(&track, &far, 0.3),
+            0.0,
+            "buffering must not match a distant box"
+        );
+    }
+
+    #[test]
+    fn momentum_breaks_iou_tie_on_crossing() {
+        // Two objects that just crossed: IoU slightly favors the swapped assignment.
+        // But each detection only continues its track's OBSERVED direction on the
+        // diagonal — the swap reverses direction. OC-SORT momentum penalizes the
+        // reversal and restores the correct pairing. (No depth/appearance needed.)
+        let mut cost = vec![vec![0.30, 0.28], vec![0.28, 0.30]];
+        let (m, _, _) = linear_assignment(&cost, 2, 2, 0.9);
+        assert!(
+            m.contains(&(0, 1)) && m.contains(&(1, 0)),
+            "geometry-only should swap: {m:?}"
+        );
+
+        // World space (metres), constant depth Z=5. T0 moving +X from (4,0,5); T1 moving
+        // −X from (6,0,5). After the crossing D0 sits at (7,0,5) (continues +X), D1 at
+        // (3,0,5) (continues −X).
+        let dir = [Some([1.0, 0.0, 0.0]), Some([-1.0, 0.0, 0.0])];
+        let tc = [[4.0, 0.0, 5.0], [6.0, 0.0, 5.0]];
+        let dc = [Some([7.0, 0.0, 5.0]), Some([3.0, 0.0, 5.0])];
+        fuse_momentum(&mut cost, &dir, &tc, &dc, 0.5);
+        let (m2, _, _) = linear_assignment(&cost, 2, 2, 0.9);
+        assert!(
+            m2.contains(&(0, 0)) && m2.contains(&(1, 1)),
+            "momentum should keep correct ids through the crossing: {m2:?}"
+        );
+    }
+
+    #[test]
+    fn momentum_sees_depth_motion() {
+        // Pure motion in DEPTH (Z), zero lateral — invisible to a pixel-plane direction,
+        // caught by the metric version. T0 receding (+Z), T1 approaching (−Z). D0 is
+        // further (Z=7), D1 nearer (Z=3); the swap reverses depth direction.
+        let mut cost = vec![vec![0.30, 0.28], vec![0.28, 0.30]];
+        let dir = [Some([0.0, 0.0, 1.0]), Some([0.0, 0.0, -1.0])];
+        let tc = [[0.0, 0.0, 5.0], [0.0, 0.0, 5.0]];
+        let dc = [Some([0.0, 0.0, 7.0]), Some([0.0, 0.0, 3.0])];
+        fuse_momentum(&mut cost, &dir, &tc, &dc, 0.5);
+        let (m, _, _) = linear_assignment(&cost, 2, 2, 0.9);
+        assert!(
+            m.contains(&(0, 0)) && m.contains(&(1, 1)),
+            "depth-motion OCM: {m:?}"
+        );
+    }
+
+    #[test]
+    fn momentum_ignores_stationary_and_depthless() {
+        // No direction (stationary track) or a detection with no world position (no
+        // depth) → no penalty added (OCM is a no-op there).
+        let mut cost = vec![vec![0.2, 0.2]];
+        let before = cost.clone();
+        fuse_momentum(
+            &mut cost,
+            &[None],
+            &[[5.0, 5.0, 5.0]],
+            &[Some([9.0, 9.0, 5.0]), None],
+            0.5,
+        );
+        assert_eq!(cost, before, "no track direction → untouched");
+        let mut cost2 = vec![vec![0.2]];
+        fuse_momentum(
+            &mut cost2,
+            &[Some([1.0, 0.0, 0.0])],
+            &[[5.0, 5.0, 5.0]],
+            &[None],
+            0.5,
+        );
+        assert_eq!(
+            cost2,
+            vec![vec![0.2]],
+            "depthless detection → no world pos, untouched"
+        );
+    }
+
+    #[cfg(feature = "appearance")]
+    #[test]
+    fn appearance_breaks_iou_tie_on_same_class_crossing() {
+        // Two same-class objects crossing so their boxes overlap: the IoU cost slightly
+        // FAVORS the swapped (anti-diagonal) assignment, so geometry alone flips their
+        // ids — the exact ID-switch failure the ReID tie-breaker exists to prevent. The
+        // depth gate can't help here (same class, assume same range). Distinct appearance
+        // embeddings (the RF-DETR blk-11 tokens this PR pools) break the tie correctly.
+        let swap_cost = vec![vec![0.30, 0.28], vec![0.28, 0.30]];
+
+        // Geometry-only: anti-diagonal (0.28 + 0.28) beats the diagonal (0.30 + 0.30),
+        // so T0↔D1, T1↔D0 — the ids SWAP.
+        let (m, _, _) = linear_assignment(&swap_cost, 2, 2, 0.9);
+        assert!(
+            m.contains(&(0, 1)) && m.contains(&(1, 0)),
+            "geometry-only should swap on this crossing: {m:?}"
+        );
+
+        // With appearance: D0 matches T0, D1 matches T1 (orthogonal embeddings). Matching
+        // pairs fuse the cost to ~0; the mismatched (swapped) pairs are appearance-gated
+        // and stay at their IoU cost → the correct diagonal is now cheapest.
+        let mut cost = swap_cost.clone();
+        let tf = [Some(vec![1.0f32, 0.0]), Some(vec![0.0f32, 1.0])];
+        let (d0, d1) = ([1.0f32, 0.0], [0.0f32, 1.0]);
+        let df = [Some(&d0[..]), Some(&d1[..])];
+        fuse_appearance(&mut cost, &tf, &df, 0.25, 0.5);
+        let (m2, _, _) = linear_assignment(&cost, 2, 2, 0.9);
+        assert!(
+            m2.contains(&(0, 0)) && m2.contains(&(1, 1)),
+            "appearance should keep correct ids through the crossing: {m2:?}"
+        );
     }
 }

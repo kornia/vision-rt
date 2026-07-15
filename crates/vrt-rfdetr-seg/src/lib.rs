@@ -27,7 +27,7 @@
 use std::sync::Arc;
 
 use cudarc::driver::sys::CUdeviceptr;
-use cudarc::driver::{CudaSlice, CudaStream, DevicePtr};
+use cudarc::driver::{CudaSlice, CudaStream, DevicePtr, LaunchConfig};
 use kornia_image::Image;
 use kornia_imgproc::preprocess::{Normalize, Preprocessor, PreprocessorBuilder, ResizeMode};
 use kornia_tensor::{zeros_cuda, CudaKernel, Tensor};
@@ -140,6 +140,81 @@ extern "C" __global__ void seg_masks(
 }
 "#;
 
+// One block per survivor slot: mask-pool the backbone's block-11 token grid
+// ([C,gh,gw], NCHW) over the instance mask's foreground, then L2-normalize → a
+// per-instance appearance embedding for the tracker's ReID tie-breaker. Coverage
+// pooling: reduce the (packed) instance mask into a gh×gw coverage histogram (each
+// foreground mask pixel votes for the token cell it lands in — "soft coverage",
+// the mask grid is an integer multiple of the token grid so the map is exact), then
+// take the coverage-weighted mean token and normalize. Stale slots (>= count) and
+// empty masks yield a zero embedding (caller zeros `out` each frame + reads 0..count).
+const POOL_SRC: &str = r#"
+extern "C" __global__ void pool_tokens(
+    const float* __restrict__ tokens,        // [C*gh*gw] NCHW (batch 1)
+    int C, int gh, int gw,
+    const unsigned char* __restrict__ masks, // [Q*mmh*mmw] binary, packed by slot
+    int mmh, int mmw,
+    const int* __restrict__ count,
+    float* __restrict__ out                  // [Q*C] L2-normed per live slot
+) {
+    int m = blockIdx.x;
+    if (m >= *count) return;                 // stale slot: leave pre-zeroed embedding
+    const unsigned char* mask = masks + (long)m * mmh * mmw;
+    extern __shared__ float cov[];           // [gh*gw] coverage histogram
+    int G = gh * gw;
+    for (int i = threadIdx.x; i < G; i += blockDim.x) cov[i] = 0.0f;
+    __syncthreads();
+
+    float sx = (float)gw / mmw, sy = (float)gh / mmh;
+    for (int p = threadIdx.x; p < mmh * mmw; p += blockDim.x) {
+        if (mask[p]) {
+            int mx = p % mmw, my = p / mmw;
+            int tx = min(gw - 1, (int)(mx * sx));
+            int ty = min(gh - 1, (int)(my * sy));
+            atomicAdd(&cov[ty * gw + tx], 1.0f);
+        }
+    }
+    __syncthreads();
+
+    __shared__ float total;
+    if (threadIdx.x == 0) {
+        float s = 0.0f;
+        for (int i = 0; i < G; ++i) s += cov[i];
+        total = s;
+    }
+    __syncthreads();
+
+    float* o = out + (long)m * C;
+    if (total <= 0.0f) {                      // empty mask → zero embedding
+        for (int c = threadIdx.x; c < C; c += blockDim.x) o[c] = 0.0f;
+        return;
+    }
+    // coverage-weighted mean token per channel (channel loop over the grid)
+    for (int c = threadIdx.x; c < C; c += blockDim.x) {
+        const float* tc = tokens + (long)c * G;
+        float acc = 0.0f;
+        for (int cell = 0; cell < G; ++cell) {
+            float w = cov[cell];
+            if (w > 0.0f) acc += w * tc[cell];
+        }
+        o[c] = acc / total;
+    }
+    __syncthreads();
+    // L2-normalize across channels
+    __shared__ float ss[256];
+    float local = 0.0f;
+    for (int c = threadIdx.x; c < C; c += blockDim.x) { float v = o[c]; local += v * v; }
+    ss[threadIdx.x] = local;
+    __syncthreads();
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (threadIdx.x < s) ss[threadIdx.x] += ss[threadIdx.x + s];
+        __syncthreads();
+    }
+    float inv = rsqrtf(ss[0] + 1e-12f);
+    for (int c = threadIdx.x; c < C; c += blockDim.x) o[c] *= inv;
+}
+"#;
+
 /// Caller-owned segmentation output (VPI-style), allocated once and reused.
 ///
 /// [`RfDetrSeg::submit`] fills these **GPU-resident** buffers async; after the
@@ -158,26 +233,36 @@ pub struct SegResult {
     dets: CudaSlice<f32>, // [q*6] x1,y1,x2,y2,class,score (survivors, packed by slot)
     qidx: CudaSlice<i32>, // [q] survivor slot -> query index
     masks: CudaSlice<u8>, // [q*mh*mw] binary masks (survivors, packed by slot)
+    feats: CudaSlice<f32>, // [q*tc] per-instance L2-normed appearance embeddings (empty if no tokens output)
     count_dev: CudaSlice<i32>, // [1] survivor count on-device (atomic target, retained for GPU readers)
     count_pin: vrt::PinnedBuffer<i32>,
     stream: Arc<CudaStream>,
     q: usize,
     mh: usize,
     mw: usize,
+    tc: usize, // appearance embedding dim (0 = engine has no tokens output)
 }
 
 impl SegResult {
-    fn alloc(stream: &Arc<CudaStream>, q: usize, mh: usize, mw: usize) -> Result<Self, SegError> {
+    fn alloc(
+        stream: &Arc<CudaStream>,
+        q: usize,
+        mh: usize,
+        mw: usize,
+        tc: usize,
+    ) -> Result<Self, SegError> {
         Ok(Self {
             dets: unsafe { stream.alloc::<f32>(q * 6)? },
             qidx: unsafe { stream.alloc::<i32>(q)? },
             masks: unsafe { stream.alloc::<u8>(q * mh * mw)? },
+            feats: stream.alloc_zeros::<f32>(q * tc)?,
             count_dev: stream.alloc_zeros::<i32>(1)?,
             count_pin: vrt::PinnedBuffer::<i32>::alloc(1)?,
             stream: stream.clone(),
             q,
             mh,
             mw,
+            tc,
         })
     }
 
@@ -267,6 +352,32 @@ impl SegResult {
     pub fn count_slice(&self) -> &CudaSlice<i32> {
         &self.count_dev
     }
+
+    /// Appearance embedding dimension (`C`, e.g. 384), or `0` if the engine has no
+    /// `tokens` output (then [`features_host`](Self::features_host) is always empty).
+    pub fn feat_dim(&self) -> usize {
+        self.tc
+    }
+
+    /// GPU-resident per-instance appearance embeddings `[q*C]`, L2-normed, packed by
+    /// slot (slots `0..count()` valid, aligned with [`detections`](Self::detections)).
+    /// Empty when the engine has no `tokens` output. Stays on device.
+    pub fn feats_slice(&self) -> &CudaSlice<f32> {
+        &self.feats
+    }
+
+    /// Download the surviving instances' appearance embeddings to host, one `C`-vector
+    /// per instance (aligned with [`detections`](Self::detections)). Each vector is
+    /// L2-normalized (ready for cosine ReID). Empty if the engine has no `tokens`
+    /// output. Call after the stream sync that follows [`RfDetrSeg::submit`].
+    pub fn features_host(&self) -> Result<Vec<Vec<f32>>, SegError> {
+        let n = self.count();
+        if n == 0 || self.tc == 0 {
+            return Ok(Vec::new());
+        }
+        let flat = self.stream.clone_dtoh(&self.feats.slice(0..n * self.tc))?;
+        Ok(flat.chunks_exact(self.tc).map(<[f32]>::to_vec).collect())
+    }
 }
 
 /// RF-DETR instance segmenter (payload): backbone session + stretch/ImageNet
@@ -278,14 +389,19 @@ pub struct RfDetrSeg {
     input: Tensor<f32, 4>, // [1,3,ih,iw] CHW f32 device, reused
     decode: CudaKernel,
     masks_k: CudaKernel,
+    pool_k: Option<CudaKernel>, // token mask-pool (only if the engine has a `tokens` output)
     conf: f32,
     q: usize,
     c: usize,
     mh: usize,
     mw: usize,
+    tc: usize,  // token channels (0 = no tokens output)
+    tgh: usize, // token grid height
+    tgw: usize, // token grid width
     dets_name: String,
     labels_name: String,
     masks_name: String,
+    tokens_name: Option<String>,
 }
 
 impl RfDetrSeg {
@@ -303,9 +419,22 @@ impl RfDetrSeg {
         // Positive-dim guards reject dynamic/unknown outputs (-1 → would wrap to a
         // huge usize); labels is rank-3 with last-dim ≠ 4 so a box-shaped tensor
         // can't be misbound as labels.
-        let (mut dets_name, mut labels_name, mut masks_name) = (None, None, None);
+        let (mut dets_name, mut labels_name, mut masks_name, mut tokens_name) =
+            (None, None, None, None);
         let (mut q, mut c, mut mh, mut mw) = (0usize, 0usize, 0usize, 0usize);
+        let (mut tc, mut tgh, mut tgw) = (0usize, 0usize, 0usize);
         for s in engine.outputs() {
+            // The optional backbone-token feature map is rank-4 like masks, so bind it
+            // by NAME first (else it would be misclassified as the masks output).
+            if s.name == "tokens" {
+                if let [1, nc, nh, nw] = s.dims.as_slice() {
+                    if *nc > 0 && *nh > 0 && *nw > 0 {
+                        tokens_name = Some(s.name.clone());
+                        (tc, tgh, tgw) = (*nc as usize, *nh as usize, *nw as usize);
+                    }
+                }
+                continue;
+            }
             match s.dims.as_slice() {
                 [1, nq, nh, nw] if *nq > 0 && *nh > 0 && *nw > 0 => {
                     masks_name = Some(s.name.clone());
@@ -334,6 +463,15 @@ impl RfDetrSeg {
         let input = zeros_cuda::<f32, 4>([1, 3, ih, iw], &stream)?;
         let decode = CudaKernel::compile(stream.context(), DECODE_SRC, "seg_decode")?;
         let masks_k = CudaKernel::compile(stream.context(), MASKS_SRC, "seg_masks")?;
+        // Compile the token mask-pool only if the engine exposes a `tokens` output.
+        let pool_k = match &tokens_name {
+            Some(_) => Some(CudaKernel::compile(
+                stream.context(),
+                POOL_SRC,
+                "pool_tokens",
+            )?),
+            None => None,
+        };
         let model = ModelSession::new(engine, stream.clone())?;
 
         Ok(Self {
@@ -343,14 +481,19 @@ impl RfDetrSeg {
             input,
             decode,
             masks_k,
+            pool_k,
             conf,
             q,
             c,
             mh,
             mw,
+            tc,
+            tgh,
+            tgw,
             dets_name,
             labels_name,
             masks_name,
+            tokens_name,
         })
     }
 
@@ -412,9 +555,16 @@ impl RfDetrSeg {
         (self.mw, self.mh)
     }
 
+    /// Appearance embedding dimension (`C`) if the engine exposes a `tokens` output,
+    /// else `0`. When `> 0`, [`SegResult::features_host`] returns a per-instance ReID
+    /// embedding pooled from the backbone's block-11 tokens.
+    pub fn feat_dim(&self) -> usize {
+        self.tc
+    }
+
     /// Allocate a reusable output for this segmenter.
     pub fn alloc_result(&self) -> Result<SegResult, SegError> {
-        SegResult::alloc(&self.stream, self.q, self.mh, self.mw)
+        SegResult::alloc(&self.stream, self.q, self.mh, self.mw, self.tc)
     }
 
     /// Submit one frame's async GPU work — stretch-resize → backbone → decode boxes
@@ -476,6 +626,34 @@ impl RfDetrSeg {
             .arg(&li)
             .arg(&masks_out_raw)
             .launch_cfg(cfg_2d(self.mh * self.mw, self.q))?;
+
+        // Optional appearance pass: mask-pool the backbone token grid into a per-instance
+        // L2-normed embedding (enqueued after the mask pass, so FIFO order guarantees it
+        // sees this frame's masks + count). Zero `feats` first so stale slots read 0.
+        if let Some(pool_k) = &self.pool_k {
+            let tok_raw = out_ptr(self.tokens_name.as_deref().unwrap_or_default())?;
+            self.stream.memset_zeros(&mut out.feats)?;
+            let feats_raw = out.feats.device_ptr(self.stream.as_ref()).0;
+            let (tci, tghi, tgwi) = (self.tc as i32, self.tgh as i32, self.tgw as i32);
+            let (mmhi, mmwi) = (self.mh as i32, self.mw as i32);
+            let cfg = LaunchConfig {
+                grid_dim: (self.q as u32, 1, 1),
+                block_dim: (256, 1, 1),
+                shared_mem_bytes: (self.tgh * self.tgw * std::mem::size_of::<f32>()) as u32,
+            };
+            pool_k
+                .launch_builder(&self.stream)
+                .arg(&tok_raw)
+                .arg(&tci)
+                .arg(&tghi)
+                .arg(&tgwi)
+                .arg(&masks_out_raw)
+                .arg(&mmhi)
+                .arg(&mmwi)
+                .arg(&cnt_raw)
+                .arg(&feats_raw)
+                .launch_cfg(cfg)?;
+        }
 
         // Async D2H of just the count into the caller's pinned buffer (no sync).
         let cnt_pin = out.count_pin.as_mut_ptr();

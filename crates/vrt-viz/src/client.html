@@ -37,11 +37,20 @@ function reset(s) {
   s.waitkey = true;
 }
 
+// Recover from a decoder failure or a corrupt access unit: close + recreate the
+// decoder and re-arm `waitkey` so we resync on the next IDR. Never keep feeding
+// deltas into a wedged decoder — that turns one failure into a per-frame error
+// storm until the GOP rolls over.
+function resync(s) {
+  reset(s);
+  ensureDec(s);
+}
+
 function ensureDec(s) {
   if (s.dec && s.dec.state !== 'closed') return;
   s.dec = new VideoDecoder({
     output: f => { s.q.push(f); while (s.q.length > MAXBUF) s.q.shift().close(); },
-    error: e => { document.getElementById('e').textContent = '' + e; reset(s); },
+    error: e => { document.getElementById('e').textContent = '' + e; resync(s); },
   });
   const cfg = { optimizeForLatency: true, codec: s.cfg ? codecStr(s.cfg) : 'avc1.42e01f' };
   if (s.cfg) cfg.description = s.cfg;
@@ -67,7 +76,7 @@ function connect() {
         timestamp: performance.now() * 1000,
         data: pl,
       }));
-    } catch (_) {}
+    } catch (_) { s.waitkey = true; } // bad decode → resync on the next keyframe
   };
   ws.onclose = () => { for (const t in S) reset(S[t]); setTimeout(connect, 500); };
 }

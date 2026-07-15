@@ -71,7 +71,7 @@ scales the Kalman F/Q by real inter-frame seconds (jitter-robust under variable 
 
 A **hook**, not a model: supply L2-normalised embeddings via `Detection::feature`;
 cosine distance is min-fused into the IoU cost (BoT-SORT style) with a per-track EMA
-bank. No embedder in the crate — a future `vrt-reid` (or the detector's own backbone
+bank. No embedder in the crate — `vrt-osnet` (or the detector's own backbone
 features) provides the vectors. Update the bank only from confident detections.
 
 ## Tuning knobs (`TrackerConfig`)
