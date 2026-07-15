@@ -26,6 +26,7 @@ crate per PR.
 | `crates/vrt-rfdetr-seg` | RF-DETR instance segmentation: boxes + per-instance masks + on-device GPU decode |
 | `crates/vrt-rfdetr-kpts` | RF-DETR human pose: box + 17 COCO keypoints + confidence (CPU decode) |
 | `crates/vrt-depth-anything` | Depth Anything V2 metric depth + depth-at-mask/box fusion kernels |
+| `crates/vrt-osnet` | OSNet **person re-id**: GPU crop+normalize → TRT → L2-normed embeddings for the tracker's appearance identity decisions; off the one-sync hot path |
 | `crates/vrt-track` | Pure-CPU **3D multi-object tracker** (ByteTrack assoc + depth-gated 3D Kalman); no GPU/TRT — depends only on `vrt-types` |
 | `crates/vrt-viz` | Pure-CPU render (masks/boxes/BEV) + **H.264/WebSocket live view** (browser WebCodecs); no GPU/TRT |
 

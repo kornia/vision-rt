@@ -10,6 +10,7 @@ members = [
     "crates/vrt-rfdetr-seg",
     "crates/vrt-track",
     "crates/vrt-types",
+    "crates/vrt-osnet",
     "crates/vrt-depth-anything",
     "crates/vrt-viz",
 ]

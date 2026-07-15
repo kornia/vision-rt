@@ -1,0 +1,29 @@
+[package]
+name = "vrt-osnet"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+description = "OSNet person re-identification embeddings for vision-rt — GPU crop+resize → TensorRT → L2-normed identity vectors for the tracker's appearance hook"
+readme = "README.md"
+
+[lib]
+name = "vrt_osnet"
+
+[features]
+default = []
+# Auto-pull the pinned ONNX from Hugging Face (kornia/osnet) via vrt-hub.
+hub = ["dep:vrt-hub", "vrt-hub/hub"]
+# Build the engine in-process via nvonnxparser instead of the trtexec subprocess.
+builder = ["dep:vrt-hub", "vrt-hub/builder"]
+
+[dependencies]
+kornia-image  = { workspace = true }
+kornia-tensor = { workspace = true }
+cudarc        = { workspace = true }
+vrt           = { path = "../vrt" }
+vrt-hub       = { path = "../vrt-hub", optional = true }
+thiserror     = "2.0"
+
+[dev-dependencies]
+vrt-hub = { path = "../vrt-hub", features = ["builder"] }
