@@ -14,7 +14,7 @@ name = "vrt_track"
 default = []
 # Appearance / ReID hook: cosine-distance fusion + per-track EMA feature bank.
 # Purely optional — no hard dependency on any embedding model. Feed embeddings
-# yourself (e.g. from a future vrt-reid crate) via `Detection::feature`.
+# yourself (e.g. from a the vrt-osnet crate) via `Detection::feature`.
 appearance = []
 
 [dependencies]

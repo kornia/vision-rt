@@ -25,7 +25,7 @@ pub mod trail;
 pub use encode::{encode_png, write_gif, JpegEncoder};
 #[cfg(feature = "h264")]
 pub use h264::{EncodedAu, H264Encoder};
-pub use render::{downscale, render_bev, render_main, stack_v};
+pub use render::{downscale, render_bev, render_depth, render_main, stack_v};
 pub use serve::{Stream, StreamServer};
 #[cfg(feature = "h264")]
 pub use stream::LiveStream;

@@ -6,7 +6,7 @@
 //!
 //! Run: `cargo run -p vrt-track --example track_synthetic`
 
-use vrt_track::{Detection, Tracker, TrackerConfig};
+use vrt_track::{CameraIntrinsics, Detection, Tracker, TrackerConfig};
 
 /// Tiny deterministic LCG so the demo needs no `rand` dependency.
 struct Lcg(u64);
@@ -21,7 +21,8 @@ impl Lcg {
 }
 
 fn main() {
-    let mut tracker = Tracker::new(TrackerConfig::default()).expect("valid config");
+    let intr = CameraIntrinsics::from_hfov(1280.0, 720.0, 70.0);
+    let mut tracker = Tracker::new(TrackerConfig::default(), intr).expect("valid config");
     let mut rng = Lcg(0x1234_5678);
 
     println!("frame | detections in            | tracks out (id:class @ cx,cy [d=depth])");

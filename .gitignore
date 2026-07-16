@@ -19,3 +19,6 @@ models/
 
 # nested / workspace-excluded example crates build into their own target/
 **/target/
+
+# ReID backbone probe (research + data — not for public repo)
+scripts/reid_probe/

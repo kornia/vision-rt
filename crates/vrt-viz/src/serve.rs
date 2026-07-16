@@ -23,24 +23,30 @@ use std::sync::{Arc, Mutex};
 /// JS/HTML instead of an inline Rust string).
 const INDEX_HTML: &str = include_str!("client.html");
 
-/// Which of the two composited views a frame belongs to.
+/// Which composited view a frame belongs to.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Stream {
     /// The main annotated camera view.
     Main,
     /// The top-down BEV.
     Bev,
+    /// The dense depth colormap (draggable overlay panel in the client).
+    Depth,
 }
 
+/// Number of concurrent streams (sizes per-stream arrays; keep in sync with [`Stream`]).
+pub(crate) const STREAM_COUNT: usize = 3;
+
 impl Stream {
-    /// Wire tag byte sent to the browser client (`M` / `B`).
+    /// Wire tag byte sent to the browser client (`M` / `B` / `Z`).
     fn tag(self) -> u8 {
         match self {
             Stream::Main => b'M',
             Stream::Bev => b'B',
+            Stream::Depth => b'Z',
         }
     }
-    /// Dense index for per-stream arrays (`Main = 0`, `Bev = 1`).
+    /// Dense index for per-stream arrays (`Main = 0`, `Bev = 1`, `Depth = 2`).
     fn index(self) -> usize {
         self as usize
     }
@@ -193,7 +199,7 @@ fn serve_ws_h264(mut s: TcpStream, key: &str, cast: &H264Cast) -> std::io::Resul
     for (stream, data) in cfgs {
         ws_send(&mut s, &[b'C', stream.tag()], &data)?;
     }
-    let mut started = [false; 2]; // per stream: seen a keyframe yet (indexed by Stream)
+    let mut started = [false; STREAM_COUNT]; // per stream: seen a keyframe yet (indexed by Stream)
     for msg in rx {
         match msg {
             H264Msg::Config { stream, data } => ws_send(&mut s, &[b'C', stream.tag()], &data)?,

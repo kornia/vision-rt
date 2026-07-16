@@ -44,7 +44,7 @@ for frame in frames {
 - **Appearance / ReID fusion** (feature `appearance`, off by default) — cosine
   distance on caller-supplied embeddings (`Detection::feature`), min-fused into the
   IoU cost with a per-track EMA feature bank. It is a *hook*: you provide the
-  vectors (e.g. from a future `vrt-reid` crate), there is **no** hard dependency on
+  vectors (e.g. from the `vrt-osnet` crate), there is **no** hard dependency on
   any embedding model.
 
 ## Roadmap
@@ -54,7 +54,7 @@ for frame in frames {
   changed under heavy occlusion, or that re-enters after a long gap, needs
   appearance. The `appearance` feature already exposes the fusion hook
   (`Detection::feature` + per-track EMA bank); the next step is to port the OSNet
-  embedder (`vrt-reid`) into the workspace and feed its L2-normalised vectors in,
+  embedder (`vrt-osnet`) into the workspace and feed its L2-normalised vectors in,
   updating the bank only from confident detections (StrongSORT) so a noisy
   embedding doesn't poison an identity.
 

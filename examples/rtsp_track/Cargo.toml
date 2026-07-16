@@ -15,7 +15,8 @@ path = "src/main.rs"
 [dependencies]
 vrt-depth-anything = { path = "../../crates/vrt-depth-anything" }
 vrt-rfdetr-seg = { path = "../../crates/vrt-rfdetr-seg" }
-vrt-track = { path = "../../crates/vrt-track" }
+vrt-track = { path = "../../crates/vrt-track", features = ["appearance"] }
+vrt-osnet = { path = "../../crates/vrt-osnet" }
 vrt-types = { path = "../../crates/vrt-types" }
 # CPU rendering + MJPEG/GIF/PNG viz. `turbojpeg` = SIMD JPEG for the live stream.
 vrt-viz = { path = "../../crates/vrt-viz", features = ["h264"] }

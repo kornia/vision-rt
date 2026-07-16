@@ -43,6 +43,15 @@ impl CameraIntrinsics {
     pub fn unproject(&self, u: f32, v: f32, z: f32) -> [f32; 3] {
         [(u - self.cx) / self.fx * z, (v - self.cy) / self.fy * z, z]
     }
+
+    /// Project a camera-frame 3D point (metres) back to a pixel `(u, v)`:
+    /// `u = fx·X/Z + cx`, `v = fy·Y/Z + cy` — the inverse of [`unproject`](Self::unproject).
+    /// `Z` is floored to a small positive value so a point at/behind the camera degrades
+    /// gracefully instead of dividing by zero.
+    pub fn project(&self, p: [f32; 3]) -> [f32; 2] {
+        let z = p[2].max(1e-3);
+        [self.fx * p[0] / z + self.cx, self.fy * p[1] / z + self.cy]
+    }
 }
 
 /// Camera **pose** (extrinsics): a rotation `r` + translation `t` mapping a point from
