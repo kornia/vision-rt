@@ -1,40 +1,11 @@
-use std::collections::HashMap;
 use std::{env, path::Path, path::PathBuf};
 
-/// Parse "MAJOR.MINOR.PATCH.BUILD" from NvInferVersion.h so the version
-/// constant tracks the actually-installed TRT (engine-cache keys depend on
-/// it). TRT >= 10.13 defines the NV_TENSORRT_* macros through one level of
-/// indirection (`#define NV_TENSORRT_MAJOR TRT_MAJOR_ENTERPRISE`), so
-/// non-numeric values are resolved through the define map.
+include!("trt_version.rs");
+
+/// Version from the installed NvInferVersion.h — engine-cache keys depend on it.
 fn parse_trt_version(trt_inc: &str) -> Option<String> {
     let text = std::fs::read_to_string(format!("{trt_inc}/NvInferVersion.h")).ok()?;
-    let defines: HashMap<&str, &str> = text
-        .lines()
-        .filter_map(|line| {
-            let mut words = line.split_whitespace();
-            if words.next()? != "#define" {
-                return None;
-            }
-            Some((words.next()?, words.next()?))
-        })
-        .collect();
-    let grab = |name: &str| -> Option<u32> {
-        let mut value = *defines.get(name)?;
-        for _ in 0..16 {
-            if let Ok(number) = value.parse() {
-                return Some(number);
-            }
-            value = *defines.get(value)?;
-        }
-        None
-    };
-    Some(format!(
-        "{}.{}.{}.{}",
-        grab("NV_TENSORRT_MAJOR")?,
-        grab("NV_TENSORRT_MINOR")?,
-        grab("NV_TENSORRT_PATCH")?,
-        grab("NV_TENSORRT_BUILD")?,
-    ))
+    parse_trt_version_text(&text)
 }
 
 fn main() {
@@ -148,52 +119,36 @@ fn main() {
     }
 
     // ── 4. Link directives ──────────────────────────────────────────────────────────────
+    // Per library: prefer the unversioned linker name (JetPack / dev installs), else
+    // the versioned soname matching the parsed header major (pip wheels ship only
+    // *.so.10) — so a mixed dir still links, and only a truly absent lib panics.
     let mut libraries = vec!["nvinfer", "nvinfer_plugin"];
     if builder_feature {
         libraries.push("nvonnxparser");
     }
-    let unversioned: Vec<String> = libraries
-        .iter()
-        .map(|library| format!("lib{library}.so"))
-        .collect();
-    let versioned: Vec<String> = libraries
-        .iter()
-        .map(|library| format!("lib{library}.so.{major}"))
-        .collect();
     let trt_lib_path = Path::new(&trt_lib);
-    let has_unversioned = unversioned
-        .iter()
-        .all(|name| trt_lib_path.join(name).is_file());
-    let has_versioned = versioned
-        .iter()
-        .all(|name| trt_lib_path.join(name).is_file());
-    if !has_unversioned && !has_versioned {
-        let resolved = trt_lib_path
-            .canonicalize()
-            .unwrap_or_else(|_| trt_lib_path.to_path_buf());
-        panic!(
-            "TensorRT libraries not found in {}: expected either [{}] or [{}]",
-            resolved.display(),
-            unversioned.join(", "),
-            versioned.join(", "),
-        );
-    }
-
     println!("cargo:rustc-link-search=native={trt_lib}");
     println!("cargo:rustc-link-search=native={cuda_lib}");
-    if has_unversioned {
-        println!("cargo:rustc-link-lib=dylib=nvinfer");
-        println!("cargo:rustc-link-lib=dylib=nvinfer_plugin");
-        if builder_feature {
-            println!("cargo:rustc-link-lib=dylib=nvonnxparser");
-        }
-    } else {
-        println!("cargo:rustc-link-lib=dylib:+verbatim=libnvinfer.so.{major}");
-        println!("cargo:rustc-link-lib=dylib:+verbatim=libnvinfer_plugin.so.{major}");
-        if builder_feature {
-            println!("cargo:rustc-link-lib=dylib:+verbatim=libnvonnxparser.so.{major}");
+    for library in &libraries {
+        let unversioned = format!("lib{library}.so");
+        let versioned = format!("lib{library}.so.{major}");
+        if trt_lib_path.join(&unversioned).is_file() {
+            println!("cargo:rustc-link-lib=dylib={library}");
+        } else if trt_lib_path.join(&versioned).is_file() {
+            println!("cargo:rustc-link-lib=dylib:+verbatim={versioned}");
+        } else {
+            let resolved = trt_lib_path
+                .canonicalize()
+                .unwrap_or_else(|_| trt_lib_path.to_path_buf());
+            panic!(
+                "TensorRT library not found in {}: expected {unversioned} or {versioned}",
+                resolved.display(),
+            );
         }
     }
+    // cudart/stdc++ stay unversioned-only: JetPack, conda (cuda-cudart-dev), and
+    // the compiler runtime all provide lib*.so — a wheel-only layout without a
+    // CUDA_HOME dev install fails here on cudart, not on the nvinfer trio above.
     println!("cargo:rustc-link-lib=dylib=cudart");
     println!("cargo:rustc-link-lib=dylib=stdc++");
 

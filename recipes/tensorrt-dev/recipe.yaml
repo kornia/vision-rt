@@ -1,5 +1,5 @@
 # tensorrt-dev — TensorRT C++ headers as a conda package (pixi source package,
-# built locally by pixi-build-rattler-build; see [feature.spark.dependencies]
+# built locally by pixi-build-rattler-build; see [feature.cuda.dependencies]
 # in the root pixi.toml).
 #
 # The NVIDIA pip wheels (tensorrt-cu13) ship runtime .so's but no headers, so
