@@ -33,8 +33,8 @@ use vrt_rfdetr_seg::RfDetrSeg;
 use vrt_track::{CameraIntrinsics, Detection, TrackState, Tracker, TrackerConfig};
 use vrt_types::Undistorter;
 use vrt_viz::{
-    downscale, encode_png, render_bev, render_main, stack_v, write_gif, LiveStream, MaskOverlay,
-    TrailStore,
+    downscale, encode_png, render_bev, render_depth, render_main, stack_v, write_gif, LiveStream,
+    MaskOverlay, TrailStore,
 };
 
 type Res<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
@@ -51,6 +51,10 @@ const TAPO_C210_K1: f32 = -0.28;
 /// Standalone BEV canvas size (matches the 1280-wide main frame so they stack clean).
 const BEV_W: usize = 1280;
 const BEV_H: usize = 640;
+/// Depth colormap stream size (draggable overlay panel in the browser). Even dims for
+/// H.264; the dense depth map is scaled into this by [`vrt_viz::render_depth`].
+const DEPTH_W: usize = 480;
+const DEPTH_H: usize = 360;
 
 /// Nominal stream frame rate (camera-paced); also the encoder GOP (1 s keyframe
 /// interval → a WebSocket viewer joins/re-syncs within ~1 s).
@@ -236,19 +240,22 @@ fn main() -> Res<()> {
                     .filter(|k: &u32| *k >= 100 && *k <= 20000)
                     .unwrap_or(def)
             };
-            let (main_kbps, bev_kbps) = (
+            let (main_kbps, bev_kbps, depth_kbps) = (
                 kbps("RTSP_TRACK_MAIN_KBPS", 3500),
                 kbps("RTSP_TRACK_BEV_KBPS", 1500),
+                kbps("RTSP_TRACK_DEPTH_KBPS", 1200),
             );
             println!(
-                "     stream: H.264 x264 sw — main {w}x{h}@{main_kbps}k + bev {BEV_W}x{BEV_H}@{bev_kbps}k (WebSocket/WebCodecs)"
+                "     stream: H.264 x264 sw — main {w}x{h}@{main_kbps}k + bev {BEV_W}x{BEV_H}@{bev_kbps}k + depth {DEPTH_W}x{DEPTH_H}@{depth_kbps}k (WebSocket/WebCodecs)"
             );
             let live = LiveStream::spawn(
                 port,
                 (w, h),
                 (BEV_W, BEV_H),
+                (DEPTH_W, DEPTH_H),
                 main_kbps,
                 bev_kbps,
+                depth_kbps,
                 STREAM_FPS,
             )?;
             Some(live)
@@ -478,10 +485,14 @@ fn main() -> Res<()> {
                 break;
             }
         } else if let Some(sink) = &enc_sink {
-            // Render on this thread (needs the GPU host-copies + trails); hand the two
+            // Render on this thread (needs the GPU host-copies + trails); hand the three
             // RGB buffers to the worker, which encodes + publishes off the hot path.
             let (main, bev) = render_pair(&rect, &stream, &d, w, h, &tracks, &intr, &trails, fps)?;
-            sink.submit(main, bev);
+            // Depth colormap as its own stream (draggable overlay panel in the client).
+            let dmap = z.depth_host()?;
+            let ds = dmap.size();
+            let depth = render_depth(dmap.as_slice(), ds.width, ds.height, DEPTH_W, DEPTH_H);
+            sink.submit(main, bev, depth);
             a_render += ms(Instant::now() - t6);
         } else if record {
             if t_start.elapsed().as_secs_f64() < rec_secs {

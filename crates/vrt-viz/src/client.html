@@ -6,23 +6,42 @@
 body { margin: 0; background: #111 }
 canvas { display: block; width: 100%; height: auto }
 #e { color: #f66; font: 13px monospace; padding: 6px }
+/* Draggable + resizable depth overlay panel. */
+#dp {
+  position: fixed; top: 12px; right: 12px; width: 34vw; max-width: 480px; min-width: 120px;
+  border: 1px solid #4af; border-radius: 6px; overflow: hidden; resize: both;
+  box-shadow: 0 2px 12px rgba(0,0,0,.6); z-index: 10; background: #000; touch-action: none;
+}
+#dp .bar {
+  font: 11px monospace; color: #cde; background: #234; padding: 3px 6px; cursor: move;
+  user-select: none; display: flex; justify-content: space-between; align-items: center;
+}
+#dp .bar button { font: 11px monospace; background: #345; color: #cde; border: 0; cursor: pointer }
+#dp.min canvas { display: none }
+#dp canvas { width: 100%; height: auto }
 </style>
 </head>
 <body>
 <canvas id="m"></canvas>
 <canvas id="b"></canvas>
+<div id="dp">
+  <div class="bar"><span>depth</span><button id="dpmin">–</button></div>
+  <canvas id="z"></canvas>
+</div>
 <div id="e"></div>
 <script>
-// WebCodecs H.264 client: one WebSocket carries both views (main "M", BEV "B").
-// Each stream has its own VideoDecoder and a small jitter buffer — decoded frames
-// are queued and drawn on a fixed ~15 fps tick, absorbing network cadence jitter.
+// WebCodecs H.264 client: one WebSocket carries three views — main "M", BEV "B", and
+// the depth colormap "Z" (a draggable overlay panel). Each stream has its own
+// VideoDecoder + a small jitter buffer; decoded frames draw on a fixed ~15 fps tick.
 const MAXBUF = 30, MINBUF = 8;
 
 function mk(id) {
   const c = document.getElementById(id);
   return { c, x: c.getContext('2d'), q: [], dec: null, cfg: null, started: false, waitkey: true };
 }
-const S = { M: mk('m'), B: mk('b') };
+const S = { M: mk('m'), B: mk('b'), Z: mk('z') };
+// Wire tag byte → stream key ('M'=77, 'B'=66, 'Z'=90).
+const TAG = { 77: 'M', 66: 'B', 90: 'Z' };
 
 // Exact codec string from the avcC record (profile / compat / level bytes).
 function codecStr(a) {
@@ -38,9 +57,9 @@ function reset(s) {
 }
 
 // Recover from a decoder failure or a corrupt access unit: close + recreate the
-// decoder and re-arm `waitkey` so we resync on the next IDR. Never keep feeding
-// deltas into a wedged decoder — that turns one failure into a per-frame error
-// storm until the GOP rolls over.
+// decoder and re-arm `waitkey` so we resync on the next IDR. Never keep feeding deltas
+// into a wedged decoder — that turns one failure into a per-frame error storm until the
+// GOP rolls over.
 function resync(s) {
   reset(s);
   ensureDec(s);
@@ -63,7 +82,7 @@ function connect() {
   ws.binaryType = 'arraybuffer';
   ws.onmessage = e => {
     const d = new Uint8Array(e.data);
-    const kind = d[0], tag = d[1] === 66 ? 'B' : 'M'; // 'C'=67 config, 'K'=75 key, 'D' delta
+    const kind = d[0], tag = TAG[d[1]] || 'M'; // 'C'=67 config, 'K'=75 key, 'D' delta
     const s = S[tag];
     const pl = d.subarray(2);
     if (kind === 67) { s.cfg = pl.slice(); reset(s); ensureDec(s); return; }
@@ -84,7 +103,7 @@ connect();
 
 // Paced display: pull one buffered frame per stream each tick once MINBUF are ready.
 function tick() {
-  for (const t of ['M', 'B']) {
+  for (const t of ['M', 'B', 'Z']) {
     const s = S[t];
     if (!s.started && s.q.length >= MINBUF) s.started = true;
     if (s.started && s.q.length) {
@@ -97,6 +116,26 @@ function tick() {
   }
 }
 setInterval(tick, 66);
+
+// --- Draggable depth panel (pointer events → works with mouse + touch) ---
+const dp = document.getElementById('dp'), bar = dp.querySelector('.bar');
+let drag = null;
+bar.addEventListener('pointerdown', ev => {
+  if (ev.target.id === 'dpmin') return;
+  const r = dp.getBoundingClientRect();
+  drag = { dx: ev.clientX - r.left, dy: ev.clientY - r.top };
+  dp.style.right = 'auto'; // switch to left/top positioning once moved
+  bar.setPointerCapture(ev.pointerId);
+});
+bar.addEventListener('pointermove', ev => {
+  if (!drag) return;
+  const x = Math.max(0, Math.min(window.innerWidth - 40, ev.clientX - drag.dx));
+  const y = Math.max(0, Math.min(window.innerHeight - 20, ev.clientY - drag.dy));
+  dp.style.left = x + 'px';
+  dp.style.top = y + 'px';
+});
+bar.addEventListener('pointerup', () => { drag = null; });
+document.getElementById('dpmin').addEventListener('click', () => dp.classList.toggle('min'));
 </script>
 </body>
 </html>

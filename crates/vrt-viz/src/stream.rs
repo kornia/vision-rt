@@ -1,8 +1,8 @@
-//! [`LiveStream`]: a complete two-view H.264 live view. It owns the per-view encoders,
-//! the encode worker thread, and the WebSocket [`StreamServer`]; the caller just renders
-//! RGB frame pairs and [`submit`](LiveStream::submit)s them. Encoding runs off the
-//! caller's thread (a latest-only handoff slot, drop-stale) and access units are
-//! broadcast to browser viewers (WebCodecs). Behind the `h264` feature.
+//! [`LiveStream`]: a complete multi-view H.264 live view (main + BEV + depth). It owns
+//! the per-view encoders, the encode worker thread, and the WebSocket [`StreamServer`];
+//! the caller just renders the RGB frames and [`submit`](LiveStream::submit)s them.
+//! Encoding runs off the caller's thread (a latest-only handoff slot, drop-stale) and
+//! access units are broadcast to browser viewers (WebCodecs). Behind the `h264` feature.
 
 use std::sync::{Arc, Condvar, Mutex};
 
@@ -10,13 +10,13 @@ use crate::h264::H264Encoder;
 use crate::serve::{Stream, StreamServer};
 use crate::VizError;
 
-/// A rendered `(main_rgb, bev_rgb)` pair awaiting encode.
-type FramePair = (Vec<u8>, Vec<u8>);
+/// A rendered `(main_rgb, bev_rgb, depth_rgb)` set awaiting encode.
+type FrameSet = (Vec<u8>, Vec<u8>, Vec<u8>);
 /// Latest-only handoff slot to the encode worker (drop-stale).
-type FrameSlot = Arc<(Mutex<Option<FramePair>>, Condvar)>;
+type FrameSlot = Arc<(Mutex<Option<FrameSet>>, Condvar)>;
 
-/// A running two-view (main + BEV) H.264 live stream. Construct with [`spawn`], feed
-/// frames with [`submit`].
+/// A running multi-view (main + BEV + depth) H.264 live stream. Construct with
+/// [`spawn`], feed frames with [`submit`].
 ///
 /// [`spawn`]: LiveStream::spawn
 /// [`submit`]: LiveStream::submit
@@ -32,8 +32,10 @@ impl LiveStream {
         port: u16,
         main: (usize, usize),
         bev: (usize, usize),
+        depth: (usize, usize),
         main_kbps: u32,
         bev_kbps: u32,
+        depth_kbps: u32,
         fps: i32,
     ) -> Result<Self, VizError> {
         let server = StreamServer::spawn(port)?;
@@ -45,6 +47,7 @@ impl LiveStream {
         let mut encs: Vec<(H264Encoder, Stream, bool)> = [
             (main, main_kbps, Stream::Main),
             (bev, bev_kbps, Stream::Bev),
+            (depth, depth_kbps, Stream::Depth),
         ]
         .into_iter()
         .map(|((w, h), kbps, stream)| Ok((H264Encoder::new(w, h, fps, kbps, fps)?, stream, false)))
@@ -52,14 +55,16 @@ impl LiveStream {
         std::thread::spawn(move || {
             let (lock, cv) = &*wslot;
             loop {
-                let (main_rgb, bev_rgb): FramePair = {
+                let (main_rgb, bev_rgb, depth_rgb): FrameSet = {
                     let mut g = lock.lock().unwrap_or_else(|e| e.into_inner());
                     while g.is_none() {
                         g = cv.wait(g).unwrap_or_else(|e| e.into_inner());
                     }
                     g.take().unwrap()
                 };
-                for ((enc, stream, cfg_sent), rgb) in encs.iter_mut().zip([main_rgb, bev_rgb]) {
+                for ((enc, stream, cfg_sent), rgb) in
+                    encs.iter_mut().zip([main_rgb, bev_rgb, depth_rgb])
+                {
                     let Ok(aus) = enc.encode(rgb) else { continue };
                     // Publish the avcC config once, on the first frame it's available.
                     if !*cfg_sent {
@@ -77,11 +82,11 @@ impl LiveStream {
         Ok(Self { slot })
     }
 
-    /// Hand the latest rendered pair to the encode worker, overwriting any pair not yet
-    /// encoded (drop-stale → viewers always get the freshest frame).
-    pub fn submit(&self, main: Vec<u8>, bev: Vec<u8>) {
+    /// Hand the latest rendered frames (main, BEV, depth) to the encode worker,
+    /// overwriting any set not yet encoded (drop-stale → viewers always get the freshest).
+    pub fn submit(&self, main: Vec<u8>, bev: Vec<u8>, depth: Vec<u8>) {
         let (lock, cv) = &*self.slot;
-        *lock.lock().unwrap_or_else(|e| e.into_inner()) = Some((main, bev));
+        *lock.lock().unwrap_or_else(|e| e.into_inner()) = Some((main, bev, depth));
         cv.notify_one();
     }
 }

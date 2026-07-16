@@ -215,6 +215,32 @@ pub fn stack_v(
     (out, w, th + bh)
 }
 
+/// Jet-ish colormap `t ∈ [0, 1] → RGB` (blue → cyan → green → yellow → red).
+fn jet(t: f32) -> [u8; 3] {
+    let c = |x: f32| (255.0 * (1.5 - x.abs()).clamp(0.0, 1.0)) as u8;
+    [c(4.0 * t - 3.0), c(4.0 * t - 2.0), c(4.0 * t - 1.0)]
+}
+
+/// Render a dense scalar field (e.g. a depth map) to an `out_w×out_h` RGB heatmap.
+/// Per-field min/max normalization; **near (small value) = warm**. A generic
+/// dense-field → heatmap with no model/tracker coupling — resamples via [`downscale`].
+pub fn render_depth(field: &[f32], w: usize, h: usize, out_w: usize, out_h: usize) -> Vec<u8> {
+    let (mut lo, mut hi) = (f32::MAX, f32::MIN);
+    for &v in field {
+        if v.is_finite() {
+            lo = lo.min(v);
+            hi = hi.max(v);
+        }
+    }
+    let span = if hi > lo { hi - lo } else { 1.0 };
+    let mut rgb = vec![0u8; w * h * 3];
+    for (i, &v) in field.iter().enumerate() {
+        let t = 1.0 - ((v - lo) / span).clamp(0.0, 1.0);
+        rgb[i * 3..i * 3 + 3].copy_from_slice(&jet(t));
+    }
+    downscale(&rgb, w, h, out_w, out_h)
+}
+
 /// Nearest-neighbour downscale an RGB buffer to `(dw, dh)`.
 pub fn downscale(src: &[u8], sw: usize, sh: usize, dw: usize, dh: usize) -> Vec<u8> {
     let mut out = vec![0u8; dw * dh * 3];
