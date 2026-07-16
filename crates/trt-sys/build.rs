@@ -8,6 +8,22 @@ fn parse_trt_version(trt_inc: &str) -> Option<String> {
     parse_trt_version_text(&text)
 }
 
+/// Exact runtime version from a wheel install: `tensorrt*_libs-<v>.dist-info`
+/// sits next to the lib dir in site-packages. None for system installs
+/// (JetPack apt/tarball) — those carry no dist-info and need no check.
+fn wheel_dist_version(trt_lib: &Path) -> Option<String> {
+    let site_packages = trt_lib.parent()?;
+    for entry in site_packages.read_dir().ok()?.flatten() {
+        let name = entry.file_name().into_string().ok()?;
+        if let Some(stem) = name.strip_suffix(".dist-info") {
+            if stem.starts_with("tensorrt") && stem.contains("_libs-") {
+                return stem.rsplit('-').next().map(str::to_owned);
+            }
+        }
+    }
+    None
+}
+
 fn main() {
     println!("cargo:rustc-check-cfg=cfg(trt_stub)");
 
@@ -49,6 +65,20 @@ fn main() {
         .expect("parsed TensorRT version always has a major component");
     println!("cargo:rustc-env=TENSORRT_VERSION={version}");
     println!("cargo:rerun-if-changed={trt_inc}/NvInferVersion.h");
+
+    // Wheel installs state their exact runtime version in dist-info; when
+    // present it must equal the header version — headers and libs are pinned
+    // independently (recipes/tensorrt-dev vs the tensorrt-cu13 pin in
+    // pixi.toml), and a bump to one without the other would compile against
+    // skewed headers while TENSORRT_VERSION mis-keys every engine.
+    if let Some(wheel_version) = wheel_dist_version(Path::new(&trt_lib)) {
+        assert_eq!(
+            wheel_version, version,
+            "TensorRT header/runtime skew: headers at {trt_inc} are {version} but the \
+             installed wheel is {wheel_version}; bump recipes/tensorrt-dev and the \
+             tensorrt-cu13 pin in pixi.toml together"
+        );
+    }
 
     // ── 1. Compile logger shim (ILogger subclass — only thing needing C++ subclassing) ──
     cc::Build::new()

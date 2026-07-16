@@ -10,6 +10,10 @@
 #   pixi run build     # cargo build --release (workspace)
 #   pixi run check     # clippy gate
 #
+# Built binaries are env-bound: they link the wheel's TRT libs, which resolve
+# through this env's LD_LIBRARY_PATH — run them via `pixi run` (or export the
+# activation env), not bare from a shell.
+#
 # Jetson is unaffected: without pixi, trt-sys falls back to its JetPack
 # system-path defaults.
 
@@ -25,6 +29,9 @@ preview = ["pixi-build"]
 platforms = ["linux-aarch64", "linux-64"]
 
 [feature.cuda.system-requirements]
+# Requires a visible CUDA 13 driver at install time (all target machines have
+# one). For driverless builds — docker build stages, hosted CI — override the
+# virtual package: `CONDA_OVERRIDE_CUDA=13.0 pixi install`.
 cuda = "13.0"
 # The TRT wheels are manylinux_2_35 (aarch64) / _2_28 (x86_64); declare 2.35
 # so both resolve (every CUDA-13 host in the fleet has glibc >= 2.35).
