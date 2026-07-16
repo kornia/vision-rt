@@ -1,0 +1,144 @@
+# Self-contained pixi toolchain for building + running vision-rt on any
+# CUDA-13 Linux box — DGX Spark (GB10/sm_121, aarch64 SBSA) and x86_64 dGPUs
+# (e.g. RTX 5090/sm_120): granular conda CUDA-13 packages, TensorRT runtime
+# from the NVIDIA pip index, and TensorRT C++ headers from a local source
+# package (recipes/tensorrt-dev, built by pixi-build-rattler-build). Engines
+# build in-process via the `builder` feature — no trtexec needed. The GPU
+# arch is never pinned: NVRTC and the engine cache derive it from the device.
+#
+#   pixi install       # everything: rust, CUDA 13, TensorRT (libs + headers)
+#   pixi run build     # cargo build --release (workspace)
+#   pixi run check     # clippy gate
+#
+# Built binaries are env-bound: they link the wheel's TRT libs, which resolve
+# through this env's LD_LIBRARY_PATH — run them via `pixi run` (or export the
+# activation env), not bare from a shell.
+#
+# Jetson (Tegra) CANNOT use the default env — NVIDIA's tensorrt-cu13 sdist
+# refuses to build on Tegra, and JetPack ships TRT via apt anyway. Use the
+# `jetson` env instead: toolchain from pixi, TRT/CUDA from the JetPack system
+# paths (trt-sys's built-in defaults), -j2 baked in for the 7.4 GB Orin Nano:
+#
+#   pixi install -e jetson
+#   pixi run -e jetson build
+
+[workspace]
+name = "vision-rt"
+version = "0.1.0"
+channels = ["conda-forge"]
+platforms = ["linux-aarch64", "linux-64"]
+requires-pixi = ">=0.72"
+preview = ["pixi-build"]
+
+[feature.cuda]
+platforms = ["linux-aarch64", "linux-64"]
+
+# Pixi deprecates this table in favor of rich `platforms` entries, but those
+# only exist workspace-wide — where the cuda requirement would wrongly bind
+# the `jetson` env (12.6 driver) too. Per-feature scoping needs the table.
+[feature.cuda.system-requirements]
+# Requires a visible CUDA 13 driver at install time (all target machines have
+# one). For driverless builds — docker build stages, hosted CI — override the
+# virtual package: `CONDA_OVERRIDE_CUDA=13.0 pixi install`.
+cuda = "13.0"
+# The TRT wheels are manylinux_2_35 (aarch64) / _2_28 (x86_64); declare 2.35
+# so both resolve (every CUDA-13 host in the fleet has glibc >= 2.35).
+libc = { family = "glibc", version = "2.35" }
+
+[feature.cuda.dependencies]
+# Rust toolchain (matches rust-toolchain.toml) + native build tools.
+rust = "1.93.*"
+c-compiler = "*"
+cxx-compiler = "*"
+clang = "*"    # libclang for bindgen (trt-sys)
+cmake = "*"
+pkg-config = "*"
+git = "*"
+zlib = "*"       # gio-2.0.pc requires zlib.pc when linking the tracking example
+# CUDA 13 build tools (nvcc for cudarc version detection, nvrtc for JIT
+# kernels, cudart headers/libs for the trt-sys shim).
+cuda-version = "13.0.*"
+cuda-nvcc = "*"
+cuda-cudart-dev = "*"
+cuda-nvrtc-dev = "*"
+cuda-driver-dev = "*"
+# TensorRT C++ headers — local source package, version-locked to the wheel.
+tensorrt-dev = { path = "recipes/tensorrt-dev" }
+# Python hosts the TensorRT wheel.
+python = "3.12.*"
+# GStreamer for vrt-viz `h264` live streaming (x264enc lives in
+# gst-plugins-ugly) and kornia-io video decode (avdec_h264 from gst-libav).
+gstreamer = "*"
+gst-plugins-base = "*"
+gst-plugins-good = "*"
+gst-plugins-ugly = "*"
+gst-libav = "*"
+
+[feature.cuda.pypi-dependencies]
+# TensorRT runtime libs (libnvinfer/plugin/nvonnxparser, all *.so.10) — one
+# unscoped entry resolves the right wheel per platform (sm_121 SASS incl.
+# for GB10). tensorrt-cu13-libs has stale metadata requiring `nvidia-cuda-runtime-cu13`;
+# conda provides the real CUDA 13 runtime, so NVIDIA's empty 0.0.0a0
+# placeholder satisfies it (no-op).
+# NOTE: this sdist hard-refuses to build on Tegra ("TensorRT does not
+# currently build wheels for Tegra systems") — Jetson uses the `jetson` env.
+tensorrt-cu13 = { version = "==10.13.3.9", index = "https://pypi.nvidia.com" }
+nvidia-cuda-runtime-cu13 = "==0.0.0a0"
+
+[feature.cuda.activation.env]
+# trt-sys build.rs discovery: headers from tensorrt-dev, libs from the wheel.
+TRT_INCLUDE_DIR = "$CONDA_PREFIX/include"
+TRT_LIB_DIR = "$CONDA_PREFIX/lib/python3.12/site-packages/tensorrt_libs"
+CUDARC_CUDA_VERSION = "13000"
+# $CONDA_PREFIX/lib first (nvrtc, gstreamer), then the TRT wheel libs. Setting
+# this key replaces pixi's default, so $CONDA_PREFIX/lib MUST be explicit.
+LD_LIBRARY_PATH = "$CONDA_PREFIX/lib:$CONDA_PREFIX/lib/python3.12/site-packages/tensorrt_libs${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+PKG_CONFIG_PATH = "$CONDA_PREFIX/lib/pkgconfig"
+# Private git dep (sensor-rt), only fetched with `--features rtsp`.
+CARGO_NET_GIT_FETCH_WITH_CLI = "true"
+
+# conda-forge CUDA layout nests headers/libs under a per-arch target dir
+# (lib, not lib64 — build.rs handles that fallback).
+[feature.cuda.target.linux-aarch64.activation.env]
+CUDA_HOME = "$CONDA_PREFIX/targets/sbsa-linux"
+
+[feature.cuda.target.linux-64.activation.env]
+CUDA_HOME = "$CONDA_PREFIX/targets/x86_64-linux"
+
+[feature.cuda.tasks.build]
+cmd = "cargo build --release"
+
+[feature.cuda.tasks.check]
+cmd = "cargo clippy --all-targets -- -D warnings"
+
+# ── jetson: toolchain-only env over JetPack's system TRT/CUDA ────────────────
+# No TRT/CUDA deps, no cuda system-requirement (the 12.6 driver would fail the
+# >=13 check), and no TRT_*/CUDA_HOME activation vars — trt-sys's built-in
+# defaults ARE the JetPack paths. Pixi contributes the pinned rust toolchain
+# and build tools; JetPack contributes everything CUDA.
+[feature.jetson]
+platforms = ["linux-aarch64"]
+
+[feature.jetson.dependencies]
+rust = "1.93.*"
+c-compiler = "*"
+cxx-compiler = "*"
+clang = "*"    # libclang for bindgen (trt-sys)
+cmake = "*"
+pkg-config = "*"
+git = "*"
+
+[feature.jetson.activation.env]
+# Orin Nano has 7.4 GB: parallel template-heavy builds OOM-kill the box.
+CARGO_BUILD_JOBS = "2"
+
+[feature.jetson.tasks.build]
+cmd = "cargo build --release"
+
+[feature.jetson.tasks.check]
+cmd = "cargo clippy --all-targets -- -D warnings"
+
+[environments]
+# The cuda toolchain IS the default env: bare `pixi install` / `pixi run build`.
+default = { features = ["cuda"], solve-group = "cuda" }
+jetson = { features = ["jetson"], no-default-feature = true, solve-group = "jetson" }
