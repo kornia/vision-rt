@@ -14,8 +14,13 @@
 # through this env's LD_LIBRARY_PATH — run them via `pixi run` (or export the
 # activation env), not bare from a shell.
 #
-# Jetson is unaffected: without pixi, trt-sys falls back to its JetPack
-# system-path defaults.
+# Jetson (Tegra) CANNOT use the default env — NVIDIA's tensorrt-cu13 sdist
+# refuses to build on Tegra, and JetPack ships TRT via apt anyway. Use the
+# `jetson` env instead: toolchain from pixi, TRT/CUDA from the JetPack system
+# paths (trt-sys's built-in defaults), -j2 baked in for the 7.4 GB Orin Nano:
+#
+#   pixi install -e jetson
+#   pixi run -e jetson build
 
 [workspace]
 name = "vision-rt"
@@ -28,6 +33,9 @@ preview = ["pixi-build"]
 [feature.cuda]
 platforms = ["linux-aarch64", "linux-64"]
 
+# Pixi deprecates this table in favor of rich `platforms` entries, but those
+# only exist workspace-wide — where the cuda requirement would wrongly bind
+# the `jetson` env (12.6 driver) too. Per-feature scoping needs the table.
 [feature.cuda.system-requirements]
 # Requires a visible CUDA 13 driver at install time (all target machines have
 # one). For driverless builds — docker build stages, hosted CI — override the
@@ -72,6 +80,8 @@ gst-libav = "*"
 # for GB10). tensorrt-cu13-libs has stale metadata requiring `nvidia-cuda-runtime-cu13`;
 # conda provides the real CUDA 13 runtime, so NVIDIA's empty 0.0.0a0
 # placeholder satisfies it (no-op).
+# NOTE: this sdist hard-refuses to build on Tegra ("TensorRT does not
+# currently build wheels for Tegra systems") — Jetson uses the `jetson` env.
 tensorrt-cu13 = { version = "==10.13.3.9", index = "https://pypi.nvidia.com" }
 nvidia-cuda-runtime-cu13 = "==0.0.0a0"
 
@@ -101,6 +111,34 @@ cmd = "cargo build --release"
 [feature.cuda.tasks.check]
 cmd = "cargo clippy --all-targets -- -D warnings"
 
+# ── jetson: toolchain-only env over JetPack's system TRT/CUDA ────────────────
+# No TRT/CUDA deps, no cuda system-requirement (the 12.6 driver would fail the
+# >=13 check), and no TRT_*/CUDA_HOME activation vars — trt-sys's built-in
+# defaults ARE the JetPack paths. Pixi contributes the pinned rust toolchain
+# and build tools; JetPack contributes everything CUDA.
+[feature.jetson]
+platforms = ["linux-aarch64"]
+
+[feature.jetson.dependencies]
+rust = "1.93.*"
+c-compiler = "*"
+cxx-compiler = "*"
+clang = "*"    # libclang for bindgen (trt-sys)
+cmake = "*"
+pkg-config = "*"
+git = "*"
+
+[feature.jetson.activation.env]
+# Orin Nano has 7.4 GB: parallel template-heavy builds OOM-kill the box.
+CARGO_BUILD_JOBS = "2"
+
+[feature.jetson.tasks.build]
+cmd = "cargo build --release"
+
+[feature.jetson.tasks.check]
+cmd = "cargo clippy --all-targets -- -D warnings"
+
 [environments]
 # The cuda toolchain IS the default env: bare `pixi install` / `pixi run build`.
 default = { features = ["cuda"], solve-group = "cuda" }
+jetson = { features = ["jetson"], no-default-feature = true, solve-group = "jetson" }
