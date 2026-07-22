@@ -110,7 +110,7 @@ macro_rules! typed_image {
 
             #[doc = concat!("Upload to a device-resident ", stringify!($name), " (H2D).")]
             pub fn to_cuda(&self, stream: &Arc<CudaStream>) -> Result<Self, ImageError> {
-                Ok(Self(self.0.to_cuda_image(stream)?))
+                Ok(Self(self.0.to_cuda(stream)?))
             }
 
             #[doc = concat!("Copy a device-resident ", stringify!($name), " back to host (D2H).")]

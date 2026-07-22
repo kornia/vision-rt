@@ -66,7 +66,7 @@ fn main() -> Result<(), vrt::BoxError> {
     };
 
     let src = read_image_any_rgb8(image_path)?;
-    let dev = Image(src.0.to_cuda(&stream)?);
+    let dev = src.0.to_cuda(&stream)?;
 
     // Async: submit → one caller sync → decode.
     let mut out = pose.alloc_result()?;

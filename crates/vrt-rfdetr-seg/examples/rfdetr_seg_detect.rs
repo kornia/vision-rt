@@ -49,7 +49,7 @@ fn main() -> Result<(), vrt::BoxError> {
     };
 
     let src = read_image_any_rgb8(image_path)?;
-    let dev = Image(src.0.to_cuda(&stream)?);
+    let dev = src.0.to_cuda(&stream)?;
 
     // Async: submit (no sync, no host copy) → one caller sync → host-copy on request.
     let mut out = seg.alloc_result()?;
