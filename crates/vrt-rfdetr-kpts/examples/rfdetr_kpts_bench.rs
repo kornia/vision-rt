@@ -4,7 +4,6 @@
 //!   cargo run --release -p vrt-rfdetr-kpts --example rfdetr_kpts_bench -- \
 //!       <model.onnx|engine> <image> [iters] [conf]
 
-use kornia_image::Image;
 use kornia_io::functional::read_image_any_rgb8;
 use std::time::Instant;
 use vrt_rfdetr_kpts::RfDetrKpts;
@@ -31,7 +30,7 @@ fn main() -> Result<(), vrt::BoxError> {
     let mut pose = RfDetrKpts::from_engine_file(&engine_path, stream.clone(), conf)?;
 
     let src = read_image_any_rgb8(image_path)?;
-    let dev = Image(src.0.to_cuda(&stream)?);
+    let dev = src.0.to_cuda(&stream)?;
     let mut out = pose.alloc_result()?;
 
     // Per-stage accumulators (µs), tracking mean + peak over the timed window.

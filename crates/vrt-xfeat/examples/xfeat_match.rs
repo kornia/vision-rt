@@ -136,7 +136,7 @@ fn load(
     path: &str,
 ) -> Result<(Image<u8, 3>, Image<u8, 3>), vrt::BoxError> {
     let src = read_image_any_rgb8(path)?; // Rgb8 (derefs to Image<u8,3>)
-    let dev = Image(src.0.to_cuda(stream)?); // device Image<u8,3>
+    let dev = src.0.to_cuda(stream)?; // device Image<u8,3>
     Ok((dev, src.0))
 }
 

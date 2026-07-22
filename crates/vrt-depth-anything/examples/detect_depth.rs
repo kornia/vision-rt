@@ -59,7 +59,7 @@ fn main() -> Result<(), vrt::BoxError> {
     let mut depth = DepthAnything::from_engine_file(depth_engine, stream.clone())?;
 
     let src = read_image_any_rgb8(image_path)?;
-    let dev = Image(src.0.to_cuda(&stream)?);
+    let dev = src.0.to_cuda(&stream)?;
 
     let mut d = det.alloc_result()?;
     let mut z = depth.alloc_result()?;
