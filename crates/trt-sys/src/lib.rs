@@ -58,3 +58,58 @@ extern "C" {
 /// Installed TensorRT version "MAJOR.MINOR.PATCH.BUILD", parsed from
 /// NvInferVersion.h at build time.  Engine-cache keys depend on this.
 pub const TENSORRT_VERSION: &str = env!("TENSORRT_VERSION");
+
+// The header parser lives in ../trt_version.rs (include!d by build.rs, which
+// cargo never builds as a test harness) — pull it in here so its tests run.
+#[cfg(test)]
+#[path = "../trt_version.rs"]
+mod trt_version;
+
+#[cfg(test)]
+mod tests {
+    use super::trt_version::parse_trt_version_text;
+
+    // JetPack 10.3 style: numeric literals with trailing //!< doc comments.
+    #[test]
+    fn parses_literal_version_macros() {
+        let header = "\
+#define NV_TENSORRT_MAJOR 10 //!< TensorRT major version.\n\
+#define NV_TENSORRT_MINOR 3 //!< TensorRT minor version.\n\
+#define NV_TENSORRT_PATCH 0 //!< TensorRT patch version.\n\
+#define NV_TENSORRT_BUILD 26 //!< TensorRT build number.\n";
+        assert_eq!(parse_trt_version_text(header).as_deref(), Some("10.3.0.26"));
+    }
+
+    // TRT >= 10.13 style: NV_TENSORRT_* point at TRT_*_ENTERPRISE macros.
+    #[test]
+    fn parses_enterprise_indirection() {
+        let header = "\
+#define TRT_MAJOR_ENTERPRISE 10\n\
+#define TRT_MINOR_ENTERPRISE 13\n\
+#define TRT_PATCH_ENTERPRISE 3\n\
+#define TRT_BUILD_ENTERPRISE 9\n\
+#define NV_TENSORRT_MAJOR TRT_MAJOR_ENTERPRISE //!< TensorRT major version.\n\
+#define NV_TENSORRT_MINOR TRT_MINOR_ENTERPRISE //!< TensorRT minor version.\n\
+#define NV_TENSORRT_PATCH TRT_PATCH_ENTERPRISE //!< TensorRT patch version.\n\
+#define NV_TENSORRT_BUILD TRT_BUILD_ENTERPRISE //!< TensorRT build number.\n";
+        assert_eq!(
+            parse_trt_version_text(header).as_deref(),
+            Some("10.13.3.9")
+        );
+    }
+
+    // Missing macros or unresolvable/cyclic indirection must yield None (which
+    // build.rs turns into a hard error, never a fallback version).
+    #[test]
+    fn rejects_missing_or_cyclic_version_macros() {
+        assert_eq!(parse_trt_version_text(""), None);
+        let cyclic = "\
+#define NV_TENSORRT_MAJOR A\n\
+#define A B\n\
+#define B A\n\
+#define NV_TENSORRT_MINOR 3\n\
+#define NV_TENSORRT_PATCH 0\n\
+#define NV_TENSORRT_BUILD 26\n";
+        assert_eq!(parse_trt_version_text(cyclic), None);
+    }
+}

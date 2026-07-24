@@ -1,0 +1,34 @@
+# tensorrt-dev — TensorRT C++ headers as a conda package (pixi source package,
+# built locally by pixi-build-rattler-build; see [feature.cuda.dependencies]
+# in the root pixi.toml).
+#
+# The NVIDIA pip wheels (tensorrt-cu13) ship runtime .so's but no headers, so
+# trt-sys can't compile its C++ shim against them alone. The headers are Apache-2.0
+# in NVIDIA's OSS repo; this recipe installs them to $PREFIX/include. The version
+# MUST stay in lockstep with the tensorrt-cu13 wheel pin in pixi.toml — the OSS
+# tag v10.13.3 headers declare exactly 10.13.3.9 (TRT_*_ENTERPRISE macros).
+package:
+  name: tensorrt-dev
+  version: "10.13.3.9"
+
+source:
+  # Core NvInfer*.h headers. In the 10.13 line NvOnnxParser.h still lives in
+  # the onnx-tensorrt submodule (absent from release tarballs), so it comes
+  # from the matching onnx-tensorrt GA tag as a second source.
+  - url: https://github.com/NVIDIA/TensorRT/archive/refs/tags/v10.13.3.tar.gz
+    sha256: 8548701b2971016b823d7092804bd8870f729fcbfb7245506924d0109802cd64
+  - url: https://github.com/onnx/onnx-tensorrt/archive/refs/tags/release/10.13-GA.tar.gz
+    sha256: 6beefb3f32f2063ce5cf578c8ac52c1a5ed79df5c5da9171073c85903f1cdeb4
+    target_directory: onnx-tensorrt
+
+build:
+  number: 0
+  script:
+    - mkdir -p $PREFIX/include
+    - cp -r include/. $PREFIX/include/
+    - cp onnx-tensorrt/NvOnnxParser.h $PREFIX/include/
+
+about:
+  license: Apache-2.0
+  summary: TensorRT C++ API headers (NvInfer*.h, NvOnnxParser.h) from the OSS release
+  homepage: https://github.com/NVIDIA/TensorRT

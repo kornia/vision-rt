@@ -26,7 +26,11 @@ The pure-C header that `bindgen` uses to generate `OUT_DIR/bridge_bindings.rs`. 
 
 ### `trt-sys/build.rs`
 
-Nothing required — `TENSORRT_VERSION` is parsed from `NvInferVersion.h` at build time and feeds the engine-cache keys. If the new release is outside the tested 10.3.x range, the build emits a `cargo:warning` (it does not fail); bump the supported major.minor set here once the new version is validated.
+Nothing required — `TENSORRT_VERSION` is parsed from `NvInferVersion.h` at build time and feeds the engine-cache keys. If the new release is outside the tested range (`SUPPORTED_TRT`), the build emits a `cargo:warning` (it does not fail); bump the supported major.minor set here once the new version is validated.
+
+**Behavior change (CUDA-13 support):** a missing or unparseable `NvInferVersion.h` is now a hard build error instead of silently assuming `10.3.0.30`. A build that previously "worked" with an odd header layout now fails with the resolved include dir in the message — set `TRT_INCLUDE_DIR` to the directory that actually contains the headers. This protects the engine cache: a wrongly-assumed version would mis-key every engine built on that machine.
+
+**Bumping TRT in the pixi env:** the wheel pin (`tensorrt-cu13` in `pixi.toml`) and the header source tags (`recipes/tensorrt-dev/recipe.yaml`) must move together — `build.rs` compares the wheel's dist-info version against the parsed headers and fails the build on any skew. JetPack (no dist-info) is exempt.
 
 ---
 
