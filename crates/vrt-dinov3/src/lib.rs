@@ -407,7 +407,7 @@ impl DinoV3 {
         Self::from_engine_file(engine_path, stream)
     }
 
-    /// Pull from Hugging Face (`kornia/dinov3-vits16`) and construct — a matching
+    /// Pull from Hugging Face (`kornia/dinov3`) and construct — a matching
     /// prebuilt engine if the registry has one for this box, else the pinned ONNX built
     /// on-device. Requires feature `hub`.
     #[cfg(feature = "hub")]

@@ -227,12 +227,13 @@ pub static REGISTRY: &[ModelSpec] = &[
         // DINOv3 ViT-S/16 (Siméoni et al., Meta AI) — global CLS descriptors. Static
         // square export (input [1,3,336,336]) via crates/vrt-dinov3/scripts/export_dinov3.py.
         //
-        // ⚠️ NOT USABLE YET — `kornia/dinov3-vits16` does not exist, so `from_hub()`
-        // fails at the download. Before it works:
-        //   1. confirm Meta's DINOv3 licence permits redistributing the derived ONNX
-        //      (the upstream repo facebook/dinov3-vits16-pretrain-lvd1689m is GATED);
-        //   2. create kornia/dinov3-vits16 with the LICENCE + NOTICE + attribution;
-        //   3. upload BOTH files below, then pin `revision` to the commit sha.
+        // Redistribution is permitted: Meta's DINOv3 Licence grants the right to
+        // "distribute, copy, create derivative works", and an ONNX export is a derivative
+        // work — provided it ships under the same Agreement with a copy attached. The
+        // kornia/dinov3 repo carries LICENSE.md and attribution for exactly that reason.
+        //
+        // ⚠️ Weights not uploaded yet, so `from_hub()` still fails at the download.
+        // Remaining: upload both files below, then pin `revision` to the commit sha.
         // Until then use `DinoV3::from_engine_file` / `from_onnx` off a local export.
         //
         // The hashes ARE real — they are of the artifacts produced by
@@ -249,7 +250,7 @@ pub static REGISTRY: &[ModelSpec] = &[
         // fp16 is 2.56x faster on Orin but emits all-NaN on TRT 10.3 — do not ship one
         // without re-running the parity test.
         name: "dinov3-vits16-336",
-        hf_repo: "kornia/dinov3-vits16",
+        hf_repo: "kornia/dinov3",
         revision: "main",
         files: &[
             ModelFile {

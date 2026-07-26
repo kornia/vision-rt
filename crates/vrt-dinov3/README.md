@@ -135,10 +135,11 @@ weights regardless of the 2 GB protobuf limit, so the sidecar is mandatory — k
 together, and note the ONNX parser finds it next to the `.onnx` (no `pushd` needed, unlike
 the older `scripts/trtexec.sh` xfeat path).
 
-`vrt-hub` registration exists (`dinov3-vits16-336`) with real sha256 pins for both files,
-but is **not usable yet**: `kornia/dinov3-vits16` does not exist, so `from_hub()` fails at
-the download. See the comment on the `REGISTRY` entry. Use `from_engine_file` /
-`from_onnx` off a local export until then.
+`vrt-hub` registration exists (`dinov3-vits16-336`) with real sha256 pins for both files.
+<https://huggingface.co/kornia/dinov3> is created and carries the DINOv3 Licence plus
+attribution — redistribution is permitted under it — but the **weights are not uploaded
+yet**, so `from_hub()` still fails at the download. Use `from_engine_file` / `from_onnx`
+off a local export until they land.
 
 ## Tests
 
@@ -147,7 +148,7 @@ the download. See the comment on the `REGISTRY` entry. Use `from_engine_file` /
 TRT_STUB=1 cargo test -p vrt-dinov3
 
 # On-device: parity (the fp16 gate), discrimination, and the bank kernel
-DINOV3_ENGINE=models/engines/dinov3-vits16-336-trt10.3.0.30-sm87.engine \
+DINOV3_ENGINE=models/engines/dinov3-vits16-336-trt10.3.0.30-sm87-bf16.engine \
 DINOV3_REF_DIR=models/onnx/dinov3-ref \
     cargo test -p vrt-dinov3 --release -- --ignored
 ```
