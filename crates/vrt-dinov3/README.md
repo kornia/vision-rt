@@ -135,11 +135,20 @@ weights regardless of the 2 GB protobuf limit, so the sidecar is mandatory — k
 together, and note the ONNX parser finds it next to the `.onnx` (no `pushd` needed, unlike
 the older `scripts/trtexec.sh` xfeat path).
 
-`vrt-hub` registration exists (`dinov3-vits16-336`) with real sha256 pins for both files.
-<https://huggingface.co/kornia/dinov3> is created and carries the DINOv3 Licence plus
-attribution — redistribution is permitted under it — but the **weights are not uploaded
-yet**, so `from_hub()` still fails at the download. Use `from_engine_file` / `from_onnx`
-off a local export until they land.
+You do not have to do any of that, though — the export is published at
+<https://huggingface.co/kornia/dinov3> (both files, sha256-pinned in `vrt-hub`, shipped
+with the DINOv3 Licence and attribution as its redistribution terms require). So:
+
+```rust
+let dino = DinoV3::from_hub(stream.clone())?;   // downloads, verifies, builds bf16, caches
+```
+
+The first call downloads ~87 MB and builds the engine on-device (~2 min); later calls are
+cache hits. `from_onnx` on the same file lands on the *same* cached engine — the key is
+`(name, onnx_sha8, profile_tag, trt_version, sm)`, so the route you took to it does not
+matter.
+
+Build it yourself only if you want a different `--input-size` or precision.
 
 ## Tests
 

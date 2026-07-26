@@ -232,23 +232,19 @@ pub static REGISTRY: &[ModelSpec] = &[
         // work — provided it ships under the same Agreement with a copy attached. The
         // kornia/dinov3 repo carries LICENSE.md and attribution for exactly that reason.
         //
-        // ⚠️ Weights not uploaded yet, so `from_hub()` still fails at the download.
-        // Remaining: upload both files below, then pin `revision` to the commit sha.
-        // Until then use `DinoV3::from_engine_file` / `from_onnx` off a local export.
-        //
-        // The hashes ARE real — they are of the artifacts produced by
-        // `scripts/export_dinov3.py --input-size 336` on torch 2.11 / transformers 4.57.6.
-        // Upload those exact files and the pins match; re-export under a different stack
-        // and they will not, which fails closed (Sha256Mismatch) as it should.
+        // The pins are of the artifacts produced by `scripts/export_dinov3.py
+        // --input-size 336` on torch 2.11 / transformers 4.57.6, and match the uploaded
+        // files (verified end-to-end through `from_hub`). Re-exporting under a different
+        // stack yields different bytes, which fails closed (Sha256Mismatch) as it should.
         //
         // The `.onnx.data` sidecar is REQUIRED, not optional: torch's dynamo exporter
         // externalizes weights regardless of the 2 GB protobuf limit, so the .onnx alone
         // is a 1.2 MB graph with no weights. Entry ONNX first, sidecar after — same shape
         // as the xfeat-backbone entry above; the parser resolves it next to the .onnx.
         //
-        // No prebuilt engine: the crate builds fp32 on-device (see DinoV3::engine_profile).
-        // fp16 is 2.56x faster on Orin but emits all-NaN on TRT 10.3 — do not ship one
-        // without re-running the parity test.
+        // No prebuilt engine: the crate builds **bf16** on-device (DinoV3::engine_profile).
+        // Do not add an fp16 prebuilt here — fp16 is 2.56x faster on Orin but emits
+        // all-NaN for this model (attention logits reach 2.1e6 vs fp16's 65504 ceiling).
         name: "dinov3-vits16-336",
         hf_repo: "kornia/dinov3",
         revision: "main",
