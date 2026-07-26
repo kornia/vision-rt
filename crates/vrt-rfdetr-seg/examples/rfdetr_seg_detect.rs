@@ -41,6 +41,7 @@ fn main() -> Result<(), vrt::BoxError> {
         let profile = vrt_hub::EngineProfile {
             input: None,
             fp16: true,
+            bf16: false,
             workspace_mb: 2048,
         };
         let engine_path =

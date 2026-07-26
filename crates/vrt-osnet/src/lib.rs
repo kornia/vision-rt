@@ -228,6 +228,7 @@ impl OsNetReid {
         vrt_hub::EngineProfile {
             input: None,
             fp16: false,
+            bf16: false,
             workspace_mb: 1024,
         }
     }

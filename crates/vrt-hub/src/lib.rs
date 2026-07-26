@@ -21,6 +21,7 @@
 //!     input:  Some(("image".into(),
 //!                   vec![1,3,240,320], vec![1,3,640,640], vec![1,3,1088,1920])),
 //!     fp16: true,
+//!     bf16: false,   // transformers want bf16 instead — see EngineProfile::bf16
 //!     workspace_mb: 2048,
 //! };
 //! let engine_path = EngineCache::default().get_or_build("xfeat-backbone", &onnx, &profile)?;
@@ -222,6 +223,46 @@ pub static REGISTRY: &[ModelSpec] = &[
             sm: "87",
         }],
     },
+    ModelSpec {
+        // DINOv3 ViT-S/16 (Siméoni et al., Meta AI) — global CLS descriptors. Static
+        // square export (input [1,3,336,336]) via crates/vrt-dinov3/scripts/export_dinov3.py.
+        //
+        // ⚠️ NOT USABLE YET — `kornia/dinov3-vits16` does not exist, so `from_hub()`
+        // fails at the download. Before it works:
+        //   1. confirm Meta's DINOv3 licence permits redistributing the derived ONNX
+        //      (the upstream repo facebook/dinov3-vits16-pretrain-lvd1689m is GATED);
+        //   2. create kornia/dinov3-vits16 with the LICENCE + NOTICE + attribution;
+        //   3. upload BOTH files below, then pin `revision` to the commit sha.
+        // Until then use `DinoV3::from_engine_file` / `from_onnx` off a local export.
+        //
+        // The hashes ARE real — they are of the artifacts produced by
+        // `scripts/export_dinov3.py --input-size 336` on torch 2.11 / transformers 4.57.6.
+        // Upload those exact files and the pins match; re-export under a different stack
+        // and they will not, which fails closed (Sha256Mismatch) as it should.
+        //
+        // The `.onnx.data` sidecar is REQUIRED, not optional: torch's dynamo exporter
+        // externalizes weights regardless of the 2 GB protobuf limit, so the .onnx alone
+        // is a 1.2 MB graph with no weights. Entry ONNX first, sidecar after — same shape
+        // as the xfeat-backbone entry above; the parser resolves it next to the .onnx.
+        //
+        // No prebuilt engine: the crate builds fp32 on-device (see DinoV3::engine_profile).
+        // fp16 is 2.56x faster on Orin but emits all-NaN on TRT 10.3 — do not ship one
+        // without re-running the parity test.
+        name: "dinov3-vits16-336",
+        hf_repo: "kornia/dinov3-vits16",
+        revision: "main",
+        files: &[
+            ModelFile {
+                filename: "dinov3-vits16-336.onnx",
+                sha256: "95753abe620709f2df043e682a333ba29f6827bab493d4d3cb027dd2fe3b71f6",
+            },
+            ModelFile {
+                filename: "dinov3-vits16-336.onnx.data",
+                sha256: "73961e69729798b4e58f761051f88d099eadf869eae467ae7a3e8d26b1271db4",
+            },
+        ],
+        engines: &[],
+    },
 ];
 
 /// Look up a model spec by name.
@@ -367,6 +408,15 @@ pub struct EngineProfile {
     /// Profile for dynamic-shape models; None = static shapes.
     pub input: Option<ShapeProfile>,
     pub fp16: bool,
+    /// Enable BF16 kernels (Ampere+/SM80+, which includes the Orin's SM87).
+    ///
+    /// **The right choice for transformers.** FP16 caps at 65504 and ViT
+    /// attention logits exceed it (measured 2.1e6 on DINOv3 ViT-S/16),
+    /// overflowing to `inf` and making `softmax` produce NaN.  BF16 keeps
+    /// fp32's exponent range at similar speed.  Setting `fp16` and `bf16`
+    /// together lets TensorRT choose per layer — it chooses on speed, not
+    /// range, and can reintroduce the overflow.  Pick one.
+    pub bf16: bool,
     pub workspace_mb: i64,
 }
 
@@ -375,6 +425,7 @@ impl Default for EngineProfile {
         Self {
             input: None,
             fp16: true,
+            bf16: false,
             workspace_mb: 2048,
         }
     }
@@ -385,7 +436,10 @@ impl EngineProfile {
     /// cache key changes when the profile does (different precision or shape
     /// profile must NOT collide with a previously-built engine).
     fn cache_tag(&self) -> String {
-        let mut s = format!("fp16={};ws={};", self.fp16, self.workspace_mb);
+        let mut s = format!(
+            "fp16={};bf16={};ws={};",
+            self.fp16, self.bf16, self.workspace_mb
+        );
         if let Some((input, min, opt, max)) = &self.input {
             s.push_str(&format!("in={input};min={min:?};opt={opt:?};max={max:?}"));
         }
@@ -514,6 +568,7 @@ fn build_engine(onnx: &Path, profile: &EngineProfile) -> Result<Vec<u8>, HubErro
     let logger = vrt::Logger::new(Severity::Warning)?;
     let mut b = vrt::builder::EngineBuilder::from_onnx(onnx.to_string_lossy())
         .fp16(profile.fp16)
+        .bf16(profile.bf16)
         .workspace_mb(profile.workspace_mb);
     if let Some((input, min, opt, max)) = &profile.input {
         b = b.shape_profile(input.clone(), min, opt, max);
@@ -538,6 +593,9 @@ fn build_engine(onnx: &Path, profile: &EngineProfile) -> Result<Vec<u8>, HubErro
         .arg(format!("--memPoolSize=workspace:{}", profile.workspace_mb));
     if profile.fp16 {
         cmd.arg("--fp16");
+    }
+    if profile.bf16 {
+        cmd.arg("--bf16");
     }
     if let Some((input, min, opt, max)) = &profile.input {
         cmd.arg(format!("--minShapes={input}:{}", dims_x(min)))
@@ -666,6 +724,7 @@ mod integration {
                 vec![1, 3, 240, 320],
             )),
             fp16: true,
+            bf16: false,
             workspace_mb: 1024,
         };
         let cache = EngineCache::at(std::env::temp_dir().join("vrt-hub-it"));

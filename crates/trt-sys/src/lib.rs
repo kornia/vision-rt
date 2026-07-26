@@ -41,6 +41,7 @@ extern "C" {
         logger: *mut btrt_logger_t,
         onnx_path: *const ::std::os::raw::c_char,
         fp16: i32,
+        bf16: i32,
         input_name: *const ::std::os::raw::c_char,
         min_dims: *const i64,
         opt_dims: *const i64,

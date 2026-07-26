@@ -19,6 +19,12 @@ extern "C" {
  * onnx_path:       path to the .onnx file (external-data sidecars are
  *                  resolved relative to it by the parser).
  * fp16:            nonzero enables BuilderFlag::kFP16.
+ * bf16:            nonzero enables BuilderFlag::kBF16 (Ampere+/SM80+).
+ *                  Prefer bf16 over fp16 for transformers: fp16's 65504 ceiling
+ *                  overflows on ViT attention logits (measured 2.1e6 on DINOv3
+ *                  ViT-S/16 -> inf -> softmax NaN), while bf16 keeps fp32's
+ *                  exponent range. Setting both lets TRT choose per layer, which
+ *                  for that model picks fp16 on speed and reintroduces the NaN.
  * input_name:      name of the (single) dynamic input to attach an
  *                  optimization profile to, or NULL for static-shape models.
  * min/opt/max:     profile dims (length ndims each); ignored when
@@ -38,6 +44,7 @@ int32_t btrt_build_engine_from_onnx(
     btrt_logger_t* logger,
     const char*    onnx_path,
     int32_t        fp16,
+    int32_t        bf16,
     const char*    input_name,
     const int64_t* min_dims,
     const int64_t* opt_dims,

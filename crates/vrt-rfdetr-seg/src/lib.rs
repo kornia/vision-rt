@@ -512,6 +512,7 @@ impl RfDetrSeg {
         vrt_hub::EngineProfile {
             input: None,
             fp16: true,
+            bf16: false,
             workspace_mb: 2048,
         }
     }
