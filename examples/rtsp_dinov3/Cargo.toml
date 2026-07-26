@@ -1,0 +1,32 @@
+# Standalone example: RTSP → DINOv3 global descriptor → keyframe bank retrieval,
+# device end-to-end. Kept OUT of the vision-rt workspace (see root `[workspace] exclude`)
+# because it depends on the private `sensor-rtsp` (kornia/sensor-rt) + GStreamer. Build
+# it directly on-device.
+[package]
+name = "rtsp_dinov3"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "rtsp_dinov3"
+path = "src/main.rs"
+
+[dependencies]
+vrt-dinov3 = { path = "../../crates/vrt-dinov3" }
+# Live view: H.264 over WebSocket, decoded in-browser by WebCodecs.
+vrt-viz = { path = "../../crates/vrt-viz", features = ["h264"] }
+# Private git dep (kornia/sensor-rt) — needs CARGO_NET_GIT_FETCH_WITH_CLI=true.
+sensor-rtsp = { git = "https://github.com/kornia/sensor-rt", rev = "d3b369c95b259c9b14e9b4f69581c2d609dbb2cc" }
+# Must match the workspace feature set EXACTLY (see the root Cargo.toml comment): a
+# mismatch forks the cudarc build, and then `Arc<CudaStream>` is a different type on
+# each side of the boundary and nothing type-checks.
+cudarc = { version = "0.19", default-features = false, features = [
+  "cuda-version-from-build-system",
+  "driver",
+  "nvrtc",
+  "std",
+  "fallback-dynamic-loading",
+  "fallback-latest",
+] }
+env_logger = "0.11"

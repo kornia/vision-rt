@@ -2802,6 +2802,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "vrt-dinov3"
+version = "0.1.0"
+dependencies = [
+ "cudarc",
+ "env_logger",
+ "kornia-image",
+ "kornia-imgproc",
+ "kornia-io",
+ "kornia-tensor",
+ "thiserror 2.0.18",
+ "vrt",
+ "vrt-hub",
+]
+
+[[package]]
 name = "vrt-hub"
 version = "0.1.0"
 dependencies = [

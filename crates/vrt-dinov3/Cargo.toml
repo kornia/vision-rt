@@ -1,0 +1,32 @@
+[package]
+name = "vrt-dinov3"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+description = "DINOv3 global image descriptors for vision-rt — L2-normed CLS embeddings on TensorRT + GPU cosine retrieval bank"
+readme = "README.md"
+
+[lib]
+name = "vrt_dinov3"
+
+[features]
+default = []
+# Auto-pull the pinned ONNX from Hugging Face (kornia/dinov3-vits16) via vrt-hub.
+hub = ["dep:vrt-hub", "vrt-hub/hub"]
+# Build the engine in-process via nvonnxparser instead of the trtexec subprocess.
+builder = ["dep:vrt-hub", "vrt-hub/builder"]
+
+[dependencies]
+kornia-image  = { workspace = true }
+kornia-tensor = { workspace = true }
+cudarc      = { workspace = true }
+vrt = { path = "../vrt" }
+vrt-hub = { path = "../vrt-hub", optional = true }
+kornia-imgproc = { workspace = true }
+thiserror   = "2.0"
+
+[dev-dependencies]
+vrt-hub   = { path = "../vrt-hub", features = ["builder"] }
+kornia-io = { workspace = true }
+env_logger = "0.11"
