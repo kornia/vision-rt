@@ -201,9 +201,30 @@ suggests. Resolution generally buys more for *dense* tasks than for a whole-imag
 descriptor, so benchmark both and keep whichever retrieves as well — the crate reads `S`
 from the engine, so switching costs one export flag.
 
-**Not yet measured:** the end-to-end RTSP loop (needs a camera). In it, read `sync` as the
-GPU wall — `enqueue` + `match` ≪ `sync` means the launches are genuinely async; if they
-approach `sync`, something hidden-synced.
+### End-to-end, live (`examples/rtsp_dinov3`)
+
+1280×720 Tapo RTSP camera → descriptor → 512-slot bank, bf16 engine, live view off:
+
+| Stage | ms | note |
+|-------|---:|------|
+| source (recv + enqueue) | 56.1 | **the bottleneck** — a 15 fps camera, blocking receive |
+| enqueue (`submit`) | 1.93 | CPU kernel-launch, ≪ sync → genuinely async |
+| match (512-slot bank) | 0.015 | free, as predicted |
+| **sync (GPU)** | **6.8** | the real GPU wall |
+| readout (K floats D2H) | 0.09 | on-demand, post-sync |
+| **end-to-end** | | **15.0 fps — source-gated, not GPU-gated** |
+
+The GPU spends 6.8 ms of a 66 ms frame interval, so this is **~10× GPU headroom**: room
+for a much faster sensor, several cameras, or another model on the same stream. Note
+`sync` here (6.8 ms) comes in *below* the 7.64 ms `trtexec` figure — the standalone
+benchmark includes host-side binding overhead the in-pipeline path does not.
+
+Retrieval behaved correctly on a static scene: one keyframe enrolled on frame 0, then
+`best` held 0.994–0.997 for the whole run without spurious re-enrollment, which is exactly
+what `tau = 0.75` should do given the measured separation.
+
+First run on a cold page cache takes >70 s to reach the loop (deserializing the 47 MB
+engine); warm it is ~7 s. Budget for that before assuming a stall.
 
 ### Measured descriptor separation
 
