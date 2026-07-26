@@ -242,9 +242,15 @@ pub static REGISTRY: &[ModelSpec] = &[
         // is a 1.2 MB graph with no weights. Entry ONNX first, sidecar after — same shape
         // as the xfeat-backbone entry above; the parser resolves it next to the .onnx.
         //
-        // No prebuilt engine: the crate builds **bf16** on-device (DinoV3::engine_profile).
-        // Do not add an fp16 prebuilt here — fp16 is 2.56x faster on Orin but emits
-        // all-NaN for this model (attention logits reach 2.1e6 vs fp16's 65504 ceiling).
+        // The prebuilt engine is **bf16**, matching DinoV3::engine_profile(), and its
+        // filename carries the ONNX sha prefix (95753abe) it was built from.
+        //
+        // ⚠️ Never add an fp16 prebuilt here. fp16 is 2.56x faster on Orin but emits
+        // all-NaN for this model (attention logits reach 2.1e6 vs fp16's 65504 ceiling),
+        // and `get_engine` guards only on trt_version + sm — it does NOT check that a
+        // prebuilt's precision matches the profile the crate would have built. A wrong
+        // engine here is therefore served silently, in preference to a correct
+        // on-device build.
         name: "dinov3-vits16-336",
         hf_repo: "kornia/dinov3",
         revision: "main",
@@ -258,7 +264,12 @@ pub static REGISTRY: &[ModelSpec] = &[
                 sha256: "73961e69729798b4e58f761051f88d099eadf869eae467ae7a3e8d26b1271db4",
             },
         ],
-        engines: &[],
+        engines: &[EngineArtifact {
+            filename: "dinov3-vits16-336-95753abe-trt10.3.0.30-sm87-bf16.engine",
+            sha256: "86d2e7853a8d98bb445a808056e8c868a057786e4ab8714ed97214c592ed04c5",
+            trt_version: "10.3.0.30",
+            sm: "87",
+        }],
     },
 ];
 
