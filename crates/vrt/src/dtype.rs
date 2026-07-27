@@ -9,6 +9,9 @@
 pub enum DType {
     F32,
     F16,
+    /// Brain-float16 — same 2-byte width as `F16` but a different bit layout, so it
+    /// must never be confused with it (or with `F32`) when reading a TRT output.
+    BF16,
     U8,
     I32,
 }

@@ -15,11 +15,14 @@ use trt_sys::*;
 /// Map an engine I/O [`DataType`] to a tensor [`DType`].
 ///
 /// Int8/Bool fall back to `U8` (same 1-byte width); our models never emit them,
-/// and `VrtTensor::f32_ptr` rejects any mismatched read regardless.
+/// and `VrtTensor::f32_ptr` rejects any mismatched read regardless.  BF16 keeps its
+/// own tag for exactly that reason: an engine built with `BuilderFlag::kBF16` that
+/// also *exposes* bf16 I/O must be rejected at `f32_ptr`, not silently read as f32.
 fn dtype_of(d: DataType) -> DType {
     match d {
         DataType::Float32 => DType::F32,
         DataType::Float16 => DType::F16,
+        DataType::Bf16 => DType::BF16,
         DataType::Int32 => DType::I32,
         DataType::Int8 | DataType::UInt8 | DataType::Bool => DType::U8,
     }
@@ -258,7 +261,7 @@ impl Drop for Session {
 fn dtype_bytes(dtype: DataType) -> usize {
     match dtype {
         DataType::Float32 | DataType::Int32 => 4,
-        DataType::Float16 => 2,
+        DataType::Float16 | DataType::Bf16 => 2,
         DataType::Int8 | DataType::UInt8 | DataType::Bool => 1,
     }
 }

@@ -12,7 +12,7 @@ name = "vrt_dinov3"
 
 [features]
 default = []
-# Auto-pull the pinned ONNX from Hugging Face (kornia/dinov3-vits16) via vrt-hub.
+# Auto-pull the pinned ONNX from Hugging Face (kornia/dinov3) via vrt-hub.
 hub = ["dep:vrt-hub", "vrt-hub/hub"]
 # Build the engine in-process via nvonnxparser instead of the trtexec subprocess.
 builder = ["dep:vrt-hub", "vrt-hub/builder"]

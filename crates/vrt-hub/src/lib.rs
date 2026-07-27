@@ -455,6 +455,24 @@ impl EngineProfile {
         h.update(s.as_bytes());
         format!("{:x}", h.finalize())[..8].to_string()
     }
+
+    /// Reject build options that are individually legal but wrong together.
+    ///
+    /// `fp16` defaults to **true**, so `EngineProfile { bf16: true, ..default() }` —
+    /// the natural way to ask for bf16 — silently sets both flags.  TensorRT then
+    /// picks precision per layer on speed alone, with no knowledge of dynamic range,
+    /// which reintroduces exactly the fp16 overflow bf16 was chosen to avoid (all-NaN
+    /// on DINOv3).  Fail here rather than after a multi-minute build.
+    fn validate(&self) -> Result<(), HubError> {
+        if self.fp16 && self.bf16 {
+            return Err(HubError::Build(
+                "EngineProfile sets both fp16 and bf16 — pick one (fp16 defaults to \
+                 true, so bf16 profiles must set `fp16: false`)"
+                    .into(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// On-device engine cache keyed by ONNX content + TRT version + GPU arch.
@@ -520,6 +538,7 @@ impl EngineCache {
         onnx: &Path,
         profile: &EngineProfile,
     ) -> Result<PathBuf, HubError> {
+        profile.validate()?;
         let path = self.key_path(name, onnx, profile)?;
         if path.exists() {
             return Ok(path);
@@ -674,6 +693,18 @@ mod tests {
             fp16: !base.fp16,
             ..EngineProfile::default()
         };
+        // bf16 must be in the tag too: without it a bf16 profile would hit an engine
+        // cached from an fp32/fp16 build of the same ONNX — for a ViT that means
+        // silently loading the all-NaN fp16 engine.
+        let diff_bf16 = EngineProfile {
+            fp16: false,
+            bf16: true,
+            ..EngineProfile::default()
+        };
+        let fp32 = EngineProfile {
+            fp16: false,
+            ..EngineProfile::default()
+        };
         let shaped = EngineProfile {
             input: Some((
                 "x".into(),
@@ -685,8 +716,34 @@ mod tests {
         };
         assert_ne!(base.cache_tag(), diff_prec.cache_tag());
         assert_ne!(base.cache_tag(), shaped.cache_tag());
+        assert_ne!(fp32.cache_tag(), diff_bf16.cache_tag());
+        assert_ne!(base.cache_tag(), diff_bf16.cache_tag());
         // Deterministic.
         assert_eq!(base.cache_tag(), EngineProfile::default().cache_tag());
+    }
+
+    #[test]
+    fn rejects_fp16_and_bf16_together() {
+        // `fp16` defaults to true, so `EngineProfile { bf16: true, ..default() }` — the
+        // natural way to ask for bf16 — sets both. TensorRT would then pick per layer
+        // on speed alone and can reintroduce the fp16 overflow bf16 exists to avoid.
+        let both = EngineProfile {
+            bf16: true,
+            ..EngineProfile::default()
+        };
+        assert!(
+            both.fp16,
+            "fp16 still defaults to true — this test's premise"
+        );
+        assert!(matches!(both.validate(), Err(HubError::Build(_))));
+        assert!(EngineProfile::default().validate().is_ok());
+        assert!(EngineProfile {
+            fp16: false,
+            bf16: true,
+            ..EngineProfile::default()
+        }
+        .validate()
+        .is_ok());
     }
 
     #[test]

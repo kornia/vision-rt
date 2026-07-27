@@ -66,9 +66,13 @@ fn cosine(a: &[f32], b: &[f32]) -> f32 {
 /// essentially nothing. For reference, on real photos the same engine gives ~0.96 for
 /// two views of one place vs ~0.01–0.11 for unrelated scenes.
 fn synth_image(w: usize, h: usize, seed: u64) -> Image<u8, 3> {
-    let mut s = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+    let mut s = seed
+        .wrapping_mul(6364136223846793005)
+        .wrapping_add(1442695040888963407);
     let mut rnd = move || {
-        s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        s = s
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         ((s >> 40) as f32) / ((1u64 << 24) as f32) // [0, 1)
     };
     const TAU: f32 = std::f32::consts::TAU;
@@ -92,7 +96,14 @@ fn synth_image(w: usize, h: usize, seed: u64) -> Image<u8, 3> {
             }
         }
     }
-    Image::new(ImageSize { width: w, height: h }, buf).expect("synthetic image")
+    Image::new(
+        ImageSize {
+            width: w,
+            height: h,
+        },
+        buf,
+    )
+    .expect("synthetic image")
 }
 
 /// **The fp16 gate.** Engine + preprocessor vs the PyTorch reference, compared by
@@ -128,7 +139,14 @@ fn descriptor_matches_pytorch_reference() {
         .collect();
     assert_eq!(want.len(), dino.dim(), "reference dim != engine dim");
 
-    let img = Image::<u8, 3>::new(ImageSize { width: w, height: h }, raw).expect("ref image");
+    let img = Image::<u8, 3>::new(
+        ImageSize {
+            width: w,
+            height: h,
+        },
+        raw,
+    )
+    .expect("ref image");
     let dev = Image(img.0.to_cuda(&stream).expect("h2d"));
 
     let mut r = dino.alloc_result().expect("alloc");
@@ -176,7 +194,14 @@ fn descriptor_discriminates() {
                 v[d..d + 3].copy_from_slice(&src[s..s + 3]);
             }
         }
-        Image::new(ImageSize { width: w, height: h }, v).expect("shifted")
+        Image::new(
+            ImageSize {
+                width: w,
+                height: h,
+            },
+            v,
+        )
+        .expect("shifted")
     };
     let other = synth_image(w, h, 99);
 
@@ -219,12 +244,7 @@ fn bank_matches_host_cosine() {
     let mut hosts = Vec::new();
     let mut r = dino.alloc_result().expect("alloc");
     for seed in [1u64, 2, 3] {
-        let dev = Image(
-            synth_image(w, h, seed)
-                .0
-                .to_cuda(&stream)
-                .expect("h2d"),
-        );
+        let dev = Image(synth_image(w, h, seed).0.to_cuda(&stream).expect("h2d"));
         dino.submit(&dev, &mut r).expect("submit");
         stream.synchronize().expect("sync");
         hosts.push(r.descriptor_host().expect("d2h"));
@@ -241,7 +261,9 @@ fn bank_matches_host_cosine() {
         .expect("match");
     stream.synchronize().expect("sync");
 
-    let got = stream.clone_dtoh(&scores.slice(0..bank.len())).expect("d2h");
+    let got = stream
+        .clone_dtoh(&scores.slice(0..bank.len()))
+        .expect("d2h");
     let q = r.descriptor_host().expect("d2h");
     for (i, (g, stored)) in got.iter().zip(&hosts).enumerate() {
         let want = cosine(&q, stored);
@@ -289,7 +311,14 @@ fn from_onnx_builds_a_correct_bf16_engine() {
         .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
         .collect();
 
-    let img = Image::<u8, 3>::new(ImageSize { width: w, height: h }, raw).expect("ref image");
+    let img = Image::<u8, 3>::new(
+        ImageSize {
+            width: w,
+            height: h,
+        },
+        raw,
+    )
+    .expect("ref image");
     let dev = Image(img.0.to_cuda(&stream).expect("h2d"));
     let mut r = dino.alloc_result().expect("alloc");
     dino.submit(&dev, &mut r).expect("submit");

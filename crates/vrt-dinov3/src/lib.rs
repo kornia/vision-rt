@@ -59,7 +59,7 @@ use cudarc::driver::{CudaSlice, CudaStream, DevicePtr, DevicePtrMut, LaunchConfi
 use kornia_image::Image;
 use kornia_imgproc::preprocess::{Normalize, Preprocessor, PreprocessorBuilder, ResizeMode};
 use kornia_tensor::{zeros_cuda, CudaKernel, Tensor};
-use vrt::cuda::cfg_1d;
+use vrt::cuda::{cfg_1d, cfg_per_item};
 use vrt::{BoxError, Engine, ModelSession};
 
 /// ViT patch size for the DINOv3 `/16` family — the input side must be a multiple.
@@ -174,7 +174,9 @@ struct EngineIo {
 /// `usize` if cast blindly.
 fn resolve_io(inp: &[i64], outs: &[(String, Vec<i64>)]) -> Result<EngineIo, String> {
     if inp.len() != 4 || inp.iter().any(|&x| x <= 0) {
-        return Err(format!("dinov3: input must be static [1,3,S,S], got {inp:?}"));
+        return Err(format!(
+            "dinov3: input must be static [1,3,S,S], got {inp:?}"
+        ));
     }
     let (ih, iw) = (inp[2] as usize, inp[3] as usize);
     if !ih.is_multiple_of(PATCH) || !iw.is_multiple_of(PATCH) {
@@ -209,9 +211,8 @@ fn resolve_io(inp: &[i64], outs: &[(String, Vec<i64>)]) -> Result<EngineIo, Stri
             _ => {}
         }
     }
-    let (desc_name, dim) = desc.ok_or(
-        "dinov3: no [1,D] descriptor output — export `pooler_output` (the CLS token)",
-    )?;
+    let (desc_name, dim) =
+        desc.ok_or("dinov3: no [1,D] descriptor output — export `pooler_output` (the CLS token)")?;
 
     // The prefix is DERIVED (N - patches), not hardcoded to DINOv3's 5, so a variant
     // with a different register count needs no code change.
@@ -322,7 +323,10 @@ impl DinoV3 {
     /// Build a descriptor extractor sharing `stream`. Input size is read from the
     /// engine's static `[1,3,S,S]`; outputs are identified by shape (see [`resolve_io`]).
     pub fn new(engine: Arc<Engine>, stream: Arc<CudaStream>) -> Result<Self, BoxError> {
-        let inp = engine.inputs().next().ok_or("dinov3: engine has no input")?;
+        let inp = engine
+            .inputs()
+            .next()
+            .ok_or("dinov3: engine has no input")?;
         let outs: Vec<(String, Vec<i64>)> = engine
             .outputs()
             .map(|s| (s.name.clone(), s.dims.clone()))
@@ -435,7 +439,10 @@ impl DinoV3 {
     /// Allocate a reusable output for this extractor.
     pub fn alloc_result(&self) -> Result<DinoV3Result, DinoError> {
         let patches = match self.tok_name {
-            Some(_) => Some(self.stream.alloc_zeros::<f32>(self.gh * self.gw * self.dim)?),
+            Some(_) => Some(
+                self.stream
+                    .alloc_zeros::<f32>(self.gh * self.gw * self.dim)?,
+            ),
             None => None,
         };
         Ok(DinoV3Result {
@@ -456,6 +463,15 @@ impl DinoV3 {
     /// Keep `img` and `out` alive until the sync — the GPU reads their device pointers
     /// during it.
     pub fn submit(&mut self, img: &Image<u8, 3>, out: &mut DinoV3Result) -> Result<(), DinoError> {
+        // `out` is only ever produced by `alloc_result`, but nothing ties it to *this*
+        // extractor — feeding a result allocated by a smaller-dim model would write
+        // `self.dim` floats into a shorter device buffer and corrupt the heap silently.
+        if out.dim != self.dim {
+            return Err(DinoError::DimMismatch {
+                got: out.dim,
+                want: self.dim,
+            });
+        }
         self.preproc.run(img, &mut self.input)?;
         let tmap = self.model.run(&self.input)?;
 
@@ -499,12 +515,12 @@ impl DinoV3 {
     }
 }
 
-/// Launch config for the one-block-per-row reduction kernels.
+/// Launch config for the one-block-per-row reduction kernels: `vrt::cuda::cfg_per_item`
+/// plus the shared-memory scratch the tree reduction needs.
 fn red_cfg(rows: usize) -> LaunchConfig {
     LaunchConfig {
-        grid_dim: (rows as u32, 1, 1),
-        block_dim: (RED_BLOCK, 1, 1),
         shared_mem_bytes: RED_BLOCK * std::mem::size_of::<f32>() as u32,
+        ..cfg_per_item(rows, RED_BLOCK)
     }
 }
 
@@ -525,11 +541,7 @@ pub struct DescriptorBank {
 
 impl DescriptorBank {
     /// Allocate an empty bank on the shared stream.
-    pub fn new(
-        capacity: usize,
-        dim: usize,
-        stream: Arc<CudaStream>,
-    ) -> Result<Self, DinoError> {
+    pub fn new(capacity: usize, dim: usize, stream: Arc<CudaStream>) -> Result<Self, DinoError> {
         let match_k = CudaKernel::compile(stream.context(), MATCH_SRC, "cosine_bank")?;
         Ok(Self {
             data: stream.alloc_zeros::<f32>(capacity * dim)?,

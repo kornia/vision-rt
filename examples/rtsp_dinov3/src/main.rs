@@ -231,6 +231,10 @@ fn main() -> Res<()> {
         let (mut best_id, mut best) = (0usize, 0.0f32);
         if !bank.is_empty() {
             let s = stream.clone_dtoh(&scores.slice(0..bank.len()))?;
+            // Seed with -inf, not 0: unrelated scenes score down to ~-0.001 (see the
+            // crate README's measured separation), so a 0-seeded max reports a
+            // fabricated 0.000 and leaves `best_id` at 0 — the wrong keyframe.
+            best = f32::NEG_INFINITY;
             for (i, &v) in s.iter().enumerate() {
                 if v > best {
                     best = v;
@@ -253,7 +257,10 @@ fn main() -> Res<()> {
         if should_enroll(bank.len(), best, frames_since_enroll, cfg.tau, cfg.min_gap) {
             if bank.len() == bank.capacity() {
                 if !capacity_warned {
-                    println!("── bank full at {} keyframes; stopped enrolling", bank.capacity());
+                    println!(
+                        "── bank full at {} keyframes; stopped enrolling",
+                        bank.capacity()
+                    );
                     capacity_warned = true;
                 }
             } else {
@@ -281,12 +288,20 @@ fn main() -> Res<()> {
             // `render_depth` is a scalar-field → colormap → upsample, which is exactly a
             // timeline; it auto-scales to the window's own min/max, so the strip shows
             // relative variation rather than absolute cosine (those go to stdout).
-            let thumb = thumbs
-                .get(best_id)
-                .cloned()
-                .unwrap_or_else(|| vec![0u8; TH_W * TH_H * 3]);
-            let timeline = render_depth(&hist, hist.len(), 1, w - TH_W, strip_h);
-            let strip = stack_h(&thumb, TH_W, &timeline, w - TH_W, strip_h);
+            // `saturating_sub`: a source narrower than one thumbnail would otherwise
+            // wrap this to a huge width in release (overflow checks off) and try to
+            // allocate it.
+            let tl_w = w.saturating_sub(TH_W);
+            let blank_thumb;
+            let thumb: &[u8] = match thumbs.get(best_id) {
+                Some(t) => t,
+                None => {
+                    blank_thumb = vec![0u8; TH_W * TH_H * 3];
+                    &blank_thumb
+                }
+            };
+            let timeline = render_depth(&hist, hist.len(), 1, tl_w, strip_h);
+            let strip = stack_h(thumb, TH_W, &timeline, tl_w, strip_h);
             let (composed, _cw, _ch) = stack_v(host, w, h, &strip, w, strip_h);
             live.submit(composed, blank.clone(), blank.clone());
         }

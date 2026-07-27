@@ -97,6 +97,16 @@ impl EngineBuilder {
     /// Slow (minutes for real models — TRT exhaustively times kernels).
     /// `logger` receives TRT's build diagnostics.
     pub fn build_serialized(&self, logger: &Logger) -> Result<Vec<u8>> {
+        // Enforced, not just documented: `from_onnx` defaults `fp16` to true, so a
+        // caller who only writes `.bf16(true)` would otherwise get BOTH flags — the
+        // one combination that is always wrong (TRT then picks per layer on speed
+        // alone and can reintroduce the fp16 overflow bf16 was chosen to avoid).
+        if self.fp16 && self.bf16 {
+            return Err(TrtError::Create(
+                "fp16 and bf16 are mutually exclusive — pass .fp16(false) alongside \
+                 .bf16(true) (see EngineBuilder::bf16)",
+            ));
+        }
         let c_path = std::ffi::CString::new(self.onnx_path.as_str())
             .map_err(|_| TrtError::Create("onnx path contains NUL"))?;
 

@@ -87,11 +87,15 @@ fn main() -> Result<(), vrt::BoxError> {
 }
 
 /// Trailing path component, truncated to keep the matrix columns aligned.
+///
+/// Counted in **chars**, not bytes: `&name[name.len() - 8..]` panics the moment a
+/// filename contains a non-ASCII character whose encoding straddles that byte index.
 fn short(path: &str) -> String {
     let name = path.rsplit('/').next().unwrap_or(path);
-    if name.len() <= 9 {
+    let n = name.chars().count();
+    if n <= 9 {
         name.to_string()
     } else {
-        format!("…{}", &name[name.len() - 8..])
+        format!("…{}", name.chars().skip(n - 8).collect::<String>())
     }
 }

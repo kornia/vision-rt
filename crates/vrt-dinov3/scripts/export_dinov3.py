@@ -79,7 +79,7 @@ def main():
     ap.add_argument(
         "--dump-ref",
         default=None,
-        help="directory for the parity reference (ref_input.bin + ref_descriptor.bin)",
+        help="directory for the parity reference (ref_image.bin + ref_descriptor.bin)",
     )
     # 18, not the 17 the sibling exports use: torch has no opset-17 implementations for
     # this graph, so asking for 17 makes it export at 18 and then down-convert through the

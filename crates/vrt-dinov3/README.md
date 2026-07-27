@@ -202,8 +202,8 @@ compute). **Measured at the box's default power mode, not MAXN** — re-run unde
 
 | Input | Precision | GPU compute | Throughput | Note |
 |-------|-----------|------------:|-----------:|------|
-| **336×336** (21×21 patches) | **bf16** | **7.64 ms** | ~130 fps | recommended; p99 7.69 — tight |
-| 336×336 | fp32 | 13.39 ms | ~74 fps | what `from_onnx`/`from_hub` build today |
+| **336×336** (21×21 patches) | **bf16** | **7.64 ms** | ~130 fps | recommended — what `from_onnx`/`from_hub` build; p99 7.69, tight |
+| 336×336 | fp32 | 13.39 ms | ~74 fps | reference precision (cosine 0.999998) |
 | 224×224 (14×14, native) | — | not built | — | ~2.2× cheaper if 336 is more than you need |
 
 Attention is O(N²) in token count, so the 336→224 saving is larger than the pixel ratio
