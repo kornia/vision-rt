@@ -6,8 +6,12 @@
 //! - **Engines** are machine-locked (TRT version + GPU arch). They are normally
 //!   built **on-device** from ONNX into a versioned cache. A registry MAY also
 //!   list prebuilt engines for exact-match environments; [`ModelHub::get_engine`]
-//!   downloads one only when its `trt_version` + `sm` match the local box, so a
+//!   downloads one only when its `trt_version` + `sm` match the local box **and its
+//!   [`Precision`] matches what the caller's [`EngineProfile`] asks for**, so a
 //!   mismatched engine is never fetched — it falls back to an on-device build.
+//!   Precision is part of that guard because it changes the engine's *outputs*, not
+//!   just its speed: an fp16 artifact served to a bf16 request deserializes fine and
+//!   then returns wrong numbers.
 //!
 //! ```no_run
 //! use vrt_hub::{ModelHub, EngineCache, EngineProfile};
@@ -75,15 +79,35 @@ pub struct ModelFile {
     pub sha256: &'static str,
 }
 
+/// Numeric precision an engine was built at.
+///
+/// Part of a prebuilt's identity, not a performance hint: an engine's precision
+/// changes its *outputs*, so serving an artifact built at one precision to a caller
+/// asking for another is silently wrong numerics, not merely a slower or faster
+/// path. DINOv3 is the worked example — its fp16 engine emits all-NaN where bf16 is
+/// correct, so an fp16 prebuilt handed to a bf16 request would poison every
+/// descriptor with no error anywhere.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Precision {
+    Fp32,
+    Fp16,
+    Bf16,
+}
+
 /// An OPTIONAL prebuilt TensorRT engine, guarded by the exact environment it was
 /// serialized for. An engine only deserializes on a matching `trt_version` +
-/// GPU `sm` (compute capability); it is downloaded only when both match the
-/// local box, otherwise the engine is built on-device from the ONNX instead.
+/// GPU `sm` (compute capability), and is only *correct* for a caller wanting the
+/// same `precision`; it is downloaded only when all three match, otherwise the
+/// engine is built on-device from the ONNX instead.
 pub struct EngineArtifact {
     pub filename: &'static str, // e.g. "xfeat_backbone-trt10.3.0.30-sm87-fp16.engine"
     pub sha256: &'static str,
     pub trt_version: &'static str, // must equal `vrt::TENSORRT_VERSION`, e.g. "10.3.0.30"
     pub sm: &'static str,          // GPU compute capability, e.g. "87"
+    /// What this artifact was built at — must equal the requesting
+    /// [`EngineProfile::precision`] or the prebuilt is skipped in favour of an
+    /// on-device build.
+    pub precision: Precision,
 }
 
 /// A distributable model: where it lives on the Hub and what it contains.
@@ -127,6 +151,7 @@ pub static REGISTRY: &[ModelSpec] = &[
             sha256: "2190ad0e8daf7356708f91a2c18b89fa481082646c79b25fab91f5af6a912e6d",
             trt_version: "10.3.0.30",
             sm: "87",
+            precision: Precision::Fp16,
         }],
     },
     ModelSpec {
@@ -145,6 +170,7 @@ pub static REGISTRY: &[ModelSpec] = &[
             sha256: "0caa4fa8c1852d22ed044e6a4d8c87f7695538ed38a555b7a41eb15ef0833181",
             trt_version: "10.3.0.30",
             sm: "87",
+            precision: Precision::Fp16,
         }],
     },
     ModelSpec {
@@ -164,6 +190,7 @@ pub static REGISTRY: &[ModelSpec] = &[
             sha256: "0c4595bf0689ba509a33be9ab7eea02320a57bc2b59ad33f694c181e4bd54cf2",
             trt_version: "10.3.0.30",
             sm: "87",
+            precision: Precision::Fp16,
         }],
     },
     ModelSpec {
@@ -183,6 +210,7 @@ pub static REGISTRY: &[ModelSpec] = &[
             sha256: "57582be75a56411ffe1900165d2dc7860e8709498bbd5b669cda4f88a673d753",
             trt_version: "10.3.0.30",
             sm: "87",
+            precision: Precision::Fp16,
         }],
     },
     ModelSpec {
@@ -202,6 +230,7 @@ pub static REGISTRY: &[ModelSpec] = &[
             sha256: "a6255e66b01b11239dff9045df25e278f06afc7c2d63691ced8be1eecafca655",
             trt_version: "10.3.0.30",
             sm: "87",
+            precision: Precision::Fp16,
         }],
     },
     ModelSpec {
@@ -221,6 +250,7 @@ pub static REGISTRY: &[ModelSpec] = &[
             sha256: "893b4dae9af84aeb0d6309e8a19fc06f3b759ee40a82f8af091729aa686166e3",
             trt_version: "10.3.0.30",
             sm: "87",
+            precision: Precision::Fp32,
         }],
     },
     ModelSpec {
@@ -245,12 +275,11 @@ pub static REGISTRY: &[ModelSpec] = &[
         // The prebuilt engine is **bf16**, matching DinoV3::engine_profile(), and its
         // filename carries the ONNX sha prefix (95753abe) it was built from.
         //
-        // ⚠️ Never add an fp16 prebuilt here. fp16 is 2.56x faster on Orin but emits
-        // all-NaN for this model (attention logits reach 2.1e6 vs fp16's 65504 ceiling),
-        // and `get_engine` guards only on trt_version + sm — it does NOT check that a
-        // prebuilt's precision matches the profile the crate would have built. A wrong
-        // engine here is therefore served silently, in preference to a correct
-        // on-device build.
+        // Never add an fp16 prebuilt here: fp16 is 2.56x faster on Orin but emits
+        // all-NaN for this model (attention logits reach 2.1e6 vs fp16's 65504 ceiling).
+        // `get_engine` now also matches on `precision`, so an fp16 artifact would simply
+        // never be served to this crate's bf16 profile — but it would still be a trap for
+        // anyone who flipped `engine_profile()` without re-running the parity test.
         name: "dinov3-vits16-336",
         hf_repo: "kornia/dinov3",
         revision: "main",
@@ -269,6 +298,7 @@ pub static REGISTRY: &[ModelSpec] = &[
             sha256: "86d2e7853a8d98bb445a808056e8c868a057786e4ab8714ed97214c592ed04c5",
             trt_version: "10.3.0.30",
             sm: "87",
+            precision: Precision::Bf16,
         }],
     },
 ];
@@ -331,19 +361,16 @@ impl ModelHub {
     /// deserialize. Otherwise `Ok(None)`: the caller should build from the ONNX.
     /// The downloaded engine is verified against its sha256 pin.
     #[cfg(feature = "hub")]
-    pub fn get_engine(name: &str) -> Result<Option<PathBuf>, HubError> {
+    pub fn get_engine(name: &str, profile: &EngineProfile) -> Result<Option<PathBuf>, HubError> {
         let spec = spec(name).ok_or_else(|| HubError::UnknownModel(name.into()))?;
         if spec.engines.is_empty() {
             return Ok(None);
         }
+        profile.validate()?;
         let (local_trt, local_sm) = (vrt::TENSORRT_VERSION, compute_capability()?);
-        let art = match spec
-            .engines
-            .iter()
-            .find(|e| e.trt_version == local_trt && e.sm == local_sm)
-        {
+        let art = match pick_artifact(spec.engines, local_trt, &local_sm, profile.precision()) {
             Some(a) => a,
-            None => return Ok(None), // no prebuilt for this env → build from ONNX
+            None => return Ok(None), // no matching prebuilt for this env → build from ONNX
         };
 
         let api = hf_hub::api::sync::Api::new()?;
@@ -361,7 +388,7 @@ impl ModelHub {
     }
 
     #[cfg(not(feature = "hub"))]
-    pub fn get_engine(_name: &str) -> Result<Option<PathBuf>, HubError> {
+    pub fn get_engine(_name: &str, _profile: &EngineProfile) -> Result<Option<PathBuf>, HubError> {
         Ok(None)
     }
 }
@@ -372,11 +399,35 @@ impl ModelHub {
 /// each model crate's `from_hub` constructor.
 #[cfg(feature = "hub")]
 pub fn resolve_engine(name: &str, profile: &EngineProfile) -> Result<String, HubError> {
-    if let Some(engine) = ModelHub::get_engine(name)? {
+    if let Some(engine) = ModelHub::get_engine(name, profile)? {
         return Ok(engine.to_string_lossy().into_owned());
     }
     let onnx = ModelHub::get(name)?;
     EngineCache::default().resolve(name, &onnx.to_string_lossy(), profile)
+}
+
+/// Pick the prebuilt engine usable on this box for a given precision, if any.
+///
+/// All three of `trt_version`, `sm` and `precision` must match. The first two are
+/// about whether the engine *deserializes*; the third is about whether it is
+/// *right*. Precision changes an engine's outputs, so a mismatched artifact loads
+/// cleanly and then returns wrong numbers — for DINOv3, an fp16 engine served to a
+/// bf16 request is all-NaN, with no error anywhere to attribute it to. Returning
+/// `None` falls back to an on-device build at the requested precision: slower, but
+/// correct.
+///
+/// Split out from `get_engine` so the matching rule is testable without a network
+/// round-trip or a GPU — hence `test` in the cfg: `get_engine` itself is hub-only.
+#[cfg(any(feature = "hub", test))]
+fn pick_artifact<'a>(
+    engines: &'a [EngineArtifact],
+    trt: &str,
+    sm: &str,
+    want: Precision,
+) -> Option<&'a EngineArtifact> {
+    engines
+        .iter()
+        .find(|e| e.trt_version == trt && e.sm == sm && e.precision == want)
 }
 
 /// Verify a file against an expected sha256 hex digest.
@@ -472,6 +523,19 @@ impl EngineProfile {
             ));
         }
         Ok(())
+    }
+
+    /// The precision this profile asks for — what a prebuilt [`EngineArtifact`] must
+    /// have been built at to be usable here.
+    ///
+    /// Call [`validate`](Self::validate) first: with both flags set (which validate
+    /// rejects) the answer would be arbitrary.
+    pub fn precision(&self) -> Precision {
+        match (self.fp16, self.bf16) {
+            (_, true) => Precision::Bf16,
+            (true, _) => Precision::Fp16,
+            _ => Precision::Fp32,
+        }
     }
 }
 
@@ -720,6 +784,82 @@ mod tests {
         assert_ne!(base.cache_tag(), diff_bf16.cache_tag());
         // Deterministic.
         assert_eq!(base.cache_tag(), EngineProfile::default().cache_tag());
+    }
+
+    /// A prebuilt is only served when its precision matches the request. Without this
+    /// an fp16 artifact answers a bf16 request — for a ViT that is the all-NaN engine,
+    /// delivered silently in preference to a correct on-device build.
+    #[test]
+    fn prebuilt_must_match_requested_precision() {
+        const ARTS: &[EngineArtifact] = &[
+            EngineArtifact {
+                filename: "m-fp16.engine",
+                sha256: "aa",
+                trt_version: "10.3.0.30",
+                sm: "87",
+                precision: Precision::Fp16,
+            },
+            EngineArtifact {
+                filename: "m-bf16.engine",
+                sha256: "bb",
+                trt_version: "10.3.0.30",
+                sm: "87",
+                precision: Precision::Bf16,
+            },
+        ];
+        let pick = |p| pick_artifact(ARTS, "10.3.0.30", "87", p).map(|a| a.filename);
+        assert_eq!(pick(Precision::Fp16), Some("m-fp16.engine"));
+        assert_eq!(pick(Precision::Bf16), Some("m-bf16.engine"));
+        // No fp32 artifact listed → build on-device rather than serving either of these.
+        assert_eq!(pick(Precision::Fp32), None);
+        // trt/sm still gate independently.
+        assert_eq!(
+            pick_artifact(ARTS, "10.4.0.0", "87", Precision::Fp16).map(|a| a.filename),
+            None
+        );
+        assert_eq!(
+            pick_artifact(ARTS, "10.3.0.30", "86", Precision::Fp16).map(|a| a.filename),
+            None
+        );
+    }
+
+    /// The flags a profile carries must map to the precision a prebuilt is matched on.
+    #[test]
+    fn profile_precision_maps_from_flags() {
+        let p = |fp16, bf16| {
+            EngineProfile {
+                fp16,
+                bf16,
+                ..EngineProfile::default()
+            }
+            .precision()
+        };
+        assert_eq!(p(true, false), Precision::Fp16);
+        assert_eq!(p(false, true), Precision::Bf16);
+        assert_eq!(p(false, false), Precision::Fp32);
+    }
+
+    /// Every registry artifact must be reachable: its precision has to equal what the
+    /// owning crate's `engine_profile()` asks for, or the prebuilt is dead weight and
+    /// every user silently pays for an on-device build instead.
+    #[test]
+    fn registry_engine_precisions_match_their_filenames() {
+        for spec in REGISTRY {
+            for e in spec.engines {
+                let want = if e.filename.contains("-bf16.") {
+                    Precision::Bf16
+                } else if e.filename.contains("-fp16.") {
+                    Precision::Fp16
+                } else {
+                    Precision::Fp32
+                };
+                assert_eq!(
+                    e.precision, want,
+                    "{}: precision {:?} disagrees with filename",
+                    e.filename, e.precision
+                );
+            }
+        }
     }
 
     #[test]
