@@ -39,7 +39,7 @@ pub type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>;
 pub use buffer::{DeviceBuffer, PinnedBuffer, Stream};
 pub use cudarc;
 pub use cudarc::driver::CudaStream;
-pub use dtype::DType;
+pub use dtype::{DType, Precision};
 pub use engine::{DataType, Engine, TensorMode, TensorSpec};
 pub use error::{Result, TrtError};
 pub use logger::Logger;

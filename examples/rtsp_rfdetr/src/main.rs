@@ -66,7 +66,7 @@ fn main() -> Res<()> {
             break;
         }; // recv(camera) + enqueue copy
         let t1 = Instant::now();
-        detr.submit(frame.image(), &mut out)?; // model enqueue (async, no sync)
+        detr.submit(&frame.data, &mut out)?; // model enqueue (async, no sync)
         let t2 = Instant::now();
         stream.synchronize()?; // the one sync completes source + model
         let t3 = Instant::now();

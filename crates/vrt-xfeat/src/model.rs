@@ -119,6 +119,7 @@ impl XFeat {
                 vec![1, 3, 1088, 1920],
             )),
             fp16: true,
+            bf16: false,
             workspace_mb: 2048,
         }
     }

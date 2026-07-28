@@ -74,15 +74,18 @@ fn main() -> Res<()> {
             break;
         }; // recv(camera) + enqueue copy
         let t1 = Instant::now();
-        seg.submit(frame.image(), &mut d)?; // detect enqueue (async, no sync)
-        depth.submit(frame.image(), &mut z)?; // depth enqueue (same frame + stream, no sync)
+        seg.submit(&frame.data, &mut d)?; // detect enqueue (async, no sync)
+        depth.submit(&frame.data, &mut z)?; // depth enqueue (same frame + stream, no sync)
         let t2 = Instant::now();
         // Depth-at-mask fusion: one masked reduction per instance, enqueued on the
         // same stream (reads the just-enqueued masks + depth map). Returns a device
         // [count] z buffer, valid after the sync below.
-        let zs = z
-            .depth_image()
-            .sample_masks(d.masks_slice(), d.mask_size(), d.count_slice(), &stream)?;
+        let zs = z.depth_image().sample_masks(
+            d.masks_slice(),
+            d.mask_size(),
+            d.count_slice(),
+            &stream,
+        )?;
         let t3 = Instant::now();
         stream.synchronize()?; // the one sync completes source + detect + depth + fusion
         let t4 = Instant::now();
@@ -97,7 +100,7 @@ fn main() -> Res<()> {
         // one annotated PNG (masks tinted, boxes, per-object depth labels) plus a
         // colorized depth map. Off the timed path (takes the on-demand host copies).
         if let Some(path) = out_png.take_if(|_| n == 60) {
-            save_overlays(&path, frame.image(), &stream, &d, &z, &z_m)?;
+            save_overlays(&path, &frame.data, &stream, &d, &z, &z_m)?;
         }
 
         n += 1;
@@ -159,11 +162,28 @@ fn save_overlays(
         // Per-object metric-depth label near the box top-left (e.g. "1.8m").
         let z_val = z_m.get(i).copied().unwrap_or(0.0);
         let [x1, y1, _, _] = inst.bbox;
-        draw_label(&mut buf, w, h, x1 as i32 + 2, y1 as i32 + 2, &format!("{z_val:.1}m"), color);
+        draw_label(
+            &mut buf,
+            w,
+            h,
+            x1 as i32 + 2,
+            y1 as i32 + 2,
+            &format!("{z_val:.1}m"),
+            color,
+        );
     }
-    let img = Image::<u8, 3>::new(ImageSize { width: w, height: h }, buf)?;
+    let img = Image::<u8, 3>::new(
+        ImageSize {
+            width: w,
+            height: h,
+        },
+        buf,
+    )?;
     write_image_png_rgb8(path, &img)?;
-    println!("     saved detect+depth overlay → {path} ({} instances)", instances.len());
+    println!(
+        "     saved detect+depth overlay → {path} ({} instances)",
+        instances.len()
+    );
 
     // Colorized depth map (Turbo) at the model's map resolution. Normalize valid
     // (positive) metric depths to 0..255, invert so near = warm.
@@ -188,8 +208,20 @@ fn save_overlays(
             }
         })
         .collect();
-    let gray_img = Image::<u8, 1>::new(ImageSize { width: mw, height: mh }, gray)?;
-    let mut colored = Image::<u8, 3>::from_size_val(ImageSize { width: mw, height: mh }, 0)?;
+    let gray_img = Image::<u8, 1>::new(
+        ImageSize {
+            width: mw,
+            height: mh,
+        },
+        gray,
+    )?;
+    let mut colored = Image::<u8, 3>::from_size_val(
+        ImageSize {
+            width: mw,
+            height: mh,
+        },
+        0,
+    )?;
     apply_colormap(&gray_img, &mut colored, ColormapType::Turbo)?;
     let depth_path = depth_png_path(path);
     write_image_png_rgb8(&depth_path, &colored)?;
@@ -241,13 +273,24 @@ fn draw_instance(buf: &mut [u8], w: usize, h: usize, inst: &Instance, color: [u8
         ((x2, y2), (x1, y2)),
         ((x1, y2), (x1, y1)),
     ] {
-        draw_line(buf, w, h, a.0 as i32, a.1 as i32, b.0 as i32, b.1 as i32, color);
+        draw_line(
+            buf, w, h, a.0 as i32, a.1 as i32, b.0 as i32, b.1 as i32, color,
+        );
     }
 }
 
 /// Bresenham line, clipped to the frame.
 #[allow(clippy::too_many_arguments)]
-fn draw_line(buf: &mut [u8], w: usize, h: usize, x0: i32, y0: i32, x1: i32, y1: i32, color: [u8; 3]) {
+fn draw_line(
+    buf: &mut [u8],
+    w: usize,
+    h: usize,
+    x0: i32,
+    y0: i32,
+    x1: i32,
+    y1: i32,
+    color: [u8; 3],
+) {
     let (dx, dy) = ((x1 - x0).abs(), -(y1 - y0).abs());
     let (sx, sy) = (if x0 < x1 { 1 } else { -1 }, if y0 < y1 { 1 } else { -1 });
     let (mut x, mut y, mut err) = (x0, y0, dx + dy);
@@ -342,17 +385,95 @@ fn coco_name(id: u32) -> &'static str {
 }
 
 const COCO91: [&str; 91] = [
-    "background", "person", "bicycle", "car", "motorcycle", "airplane", "bus",
-    "train", "truck", "boat", "traffic light", "fire hydrant", "N/A", "stop sign",
-    "parking meter", "bench", "bird", "cat", "dog", "horse", "sheep", "cow",
-    "elephant", "bear", "zebra", "giraffe", "N/A", "backpack", "umbrella", "N/A",
-    "N/A", "handbag", "tie", "suitcase", "frisbee", "skis", "snowboard",
-    "sports ball", "kite", "baseball bat", "baseball glove", "skateboard",
-    "surfboard", "tennis racket", "bottle", "N/A", "wine glass", "cup", "fork",
-    "knife", "spoon", "bowl", "banana", "apple", "sandwich", "orange", "broccoli",
-    "carrot", "hot dog", "pizza", "donut", "cake", "chair", "couch", "potted plant",
-    "bed", "N/A", "dining table", "N/A", "N/A", "toilet", "N/A", "tv", "laptop",
-    "mouse", "remote", "keyboard", "cell phone", "microwave", "oven", "toaster",
-    "sink", "refrigerator", "N/A", "book", "clock", "vase", "scissors",
-    "teddy bear", "hair drier", "toothbrush",
+    "background",
+    "person",
+    "bicycle",
+    "car",
+    "motorcycle",
+    "airplane",
+    "bus",
+    "train",
+    "truck",
+    "boat",
+    "traffic light",
+    "fire hydrant",
+    "N/A",
+    "stop sign",
+    "parking meter",
+    "bench",
+    "bird",
+    "cat",
+    "dog",
+    "horse",
+    "sheep",
+    "cow",
+    "elephant",
+    "bear",
+    "zebra",
+    "giraffe",
+    "N/A",
+    "backpack",
+    "umbrella",
+    "N/A",
+    "N/A",
+    "handbag",
+    "tie",
+    "suitcase",
+    "frisbee",
+    "skis",
+    "snowboard",
+    "sports ball",
+    "kite",
+    "baseball bat",
+    "baseball glove",
+    "skateboard",
+    "surfboard",
+    "tennis racket",
+    "bottle",
+    "N/A",
+    "wine glass",
+    "cup",
+    "fork",
+    "knife",
+    "spoon",
+    "bowl",
+    "banana",
+    "apple",
+    "sandwich",
+    "orange",
+    "broccoli",
+    "carrot",
+    "hot dog",
+    "pizza",
+    "donut",
+    "cake",
+    "chair",
+    "couch",
+    "potted plant",
+    "bed",
+    "N/A",
+    "dining table",
+    "N/A",
+    "N/A",
+    "toilet",
+    "N/A",
+    "tv",
+    "laptop",
+    "mouse",
+    "remote",
+    "keyboard",
+    "cell phone",
+    "microwave",
+    "oven",
+    "toaster",
+    "sink",
+    "refrigerator",
+    "N/A",
+    "book",
+    "clock",
+    "vase",
+    "scissors",
+    "teddy bear",
+    "hair drier",
+    "toothbrush",
 ];

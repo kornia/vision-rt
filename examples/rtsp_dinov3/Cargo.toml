@@ -1,28 +1,26 @@
-# Standalone example: RTSP → RF-DETR-Seg + Depth Anything V2 + BoT-SORT tracking,
-# device end-to-end. The mask-sampled metric depth feeds each detection's `pz`, so
-# the 3D Kalman tracks metric depth + approach velocity (not just an image-plane box).
-# Kept OUT of the vision-rt workspace (private `sensor-rtsp` git dep + GStreamer).
+# Standalone example: RTSP → DINOv3 global descriptor → keyframe bank retrieval,
+# device end-to-end. Kept OUT of the vision-rt workspace (see root `[workspace] exclude`)
+# because it depends on the private `sensor-rtsp` (kornia/sensor-rt) + GStreamer. Build
+# it directly on-device.
 [package]
-name = "rtsp_track"
+name = "rtsp_dinov3"
 version = "0.1.0"
 edition = "2021"
 publish = false
 
 [[bin]]
-name = "rtsp_track"
+name = "rtsp_dinov3"
 path = "src/main.rs"
 
 [dependencies]
-vrt-depth-anything = { path = "../../crates/vrt-depth-anything" }
-vrt-rfdetr-seg = { path = "../../crates/vrt-rfdetr-seg" }
-vrt-track = { path = "../../crates/vrt-track", features = ["appearance"] }
-vrt-osnet = { path = "../../crates/vrt-osnet" }
-vrt-types = { path = "../../crates/vrt-types" }
-# CPU rendering + MJPEG/GIF/PNG viz. `turbojpeg` = SIMD JPEG for the live stream.
+vrt-dinov3 = { path = "../../crates/vrt-dinov3" }
+# Live view: H.264 over WebSocket, decoded in-browser by WebCodecs.
 vrt-viz = { path = "../../crates/vrt-viz", features = ["h264"] }
 # Private git dep (kornia/sensor-rt) — needs CARGO_NET_GIT_FETCH_WITH_CLI=true.
 sensor-rtsp = { git = "https://github.com/kornia/sensor-rt", rev = "11737f555a3679f8e50d31fc6468f29e33f9dab2" }
-kornia-image = { git = "https://github.com/kornia/kornia-rs", tag = "v0.1.15-rc.5", features = ["cuda"] }
+# Must match the workspace feature set EXACTLY (see the root Cargo.toml comment): a
+# mismatch forks the cudarc build, and then `Arc<CudaStream>` is a different type on
+# each side of the boundary and nothing type-checks.
 cudarc = { version = "0.19", default-features = false, features = [
   "cuda-version-from-build-system",
   "driver",
@@ -31,8 +29,9 @@ cudarc = { version = "0.19", default-features = false, features = [
   "fallback-dynamic-loading",
   "fallback-latest",
 ] }
+# CLI parsing — argh over clap, a fraction of the compile time (matches sensor-rt).
+argh = "0.1"
 env_logger = "0.11"
-log = "0.4"
 
 # Build this example against the LOCAL vision-rt, not upstream's pinned snapshot.
 #

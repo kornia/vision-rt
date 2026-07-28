@@ -40,6 +40,7 @@ fn main() -> Result<(), vrt::BoxError> {
             vec![1, 3, 1088, 1920],
         )),
         fp16: true,
+        bf16: false,
         workspace_mb: 2048,
     };
     let engine_path =
@@ -54,7 +55,7 @@ fn main() -> Result<(), vrt::BoxError> {
 
     // Load native image; keep the host copy for drawing, upload a device copy.
     let src = read_image_any_rgb8(image_path)?; // Rgb8 (derefs to Image<u8,3>)
-    let dev = src.0.to_cuda(&stream)?; // device Image<u8,3>
+    let dev = src.to_cuda(&stream)?; // device Image<u8,3>
     let host = src.0; // host Image<u8,3>
 
     // Async flow (the only shape the lib exposes): allocate a caller-owned output,

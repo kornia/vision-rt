@@ -14,11 +14,11 @@ path = "src/main.rs"
 [dependencies]
 vrt-rfdetr-seg = { path = "../../crates/vrt-rfdetr-seg" }
 # Private git dep (kornia/sensor-rt) — needs CARGO_NET_GIT_FETCH_WITH_CLI=true.
-sensor-rtsp = { git = "https://github.com/kornia/sensor-rt", rev = "d3b369c95b259c9b14e9b4f69581c2d609dbb2cc" }
+sensor-rtsp = { git = "https://github.com/kornia/sensor-rt", rev = "11737f555a3679f8e50d31fc6468f29e33f9dab2" }
 # For the optional debug-overlay dump (device frame → host + PNG). Pinned to the
 # same kornia rev as the workspace so cudarc unifies to one build.
-kornia-image = { git = "https://github.com/kornia/kornia-rs", tag = "v0.1.15-rc.4", features = ["cudarc"] }
-kornia-io = { git = "https://github.com/kornia/kornia-rs", tag = "v0.1.15-rc.4" }
+kornia-image = { git = "https://github.com/kornia/kornia-rs", tag = "v0.1.15-rc.5", features = ["cuda"] }
+kornia-io = { git = "https://github.com/kornia/kornia-rs", tag = "v0.1.15-rc.5" }
 cudarc = { version = "0.19", default-features = false, features = [
   "cuda-version-from-build-system",
   "driver",
@@ -28,3 +28,19 @@ cudarc = { version = "0.19", default-features = false, features = [
   "fallback-latest",
 ] }
 env_logger = "0.11"
+
+# Build this example against the LOCAL vision-rt, not upstream's pinned snapshot.
+#
+# `sensor-rtsp`'s dev-dependencies reference kornia/vision-rt at a fixed rev. Without this
+# patch cargo would happily resolve both that snapshot and the local path crates, and the
+# example would exercise whichever it picked — silently testing upstream's `vrt` rather
+# than the working tree you are editing. Redirect the git source so the whole graph is one
+# copy: the local one.
+#
+# (This also used to be load-bearing for a different reason — `vrt` was a normal dependency
+# of the sensor-rtsp *library*, so its `trt-sys` and ours both declared `links = "nvinfer"`
+# and cargo refused to resolve at all. kornia/sensor-rt#9 moved `vrt` to dev-dependencies,
+# so that collision is gone; the reason above is why the patch stays.)
+[patch."https://github.com/kornia/vision-rt"]
+trt-sys    = { path = "../../crates/trt-sys" }
+vrt        = { path = "../../crates/vrt" }

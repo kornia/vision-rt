@@ -26,6 +26,7 @@ extern "C" int32_t btrt_build_engine_from_onnx(
     btrt_logger_t* logger,
     const char*    onnx_path,
     int32_t        fp16,
+    int32_t        bf16,
     const char*    input_name,
     const int64_t* min_dims,
     const int64_t* opt_dims,
@@ -96,6 +97,9 @@ extern "C" int32_t btrt_build_engine_from_onnx(
             static_cast<std::size_t>(workspace_bytes));
         if (fp16) {
             config->setFlag(nvinfer1::BuilderFlag::kFP16);
+        }
+        if (bf16) {
+            config->setFlag(nvinfer1::BuilderFlag::kBF16);
         }
 
         if (input_name && ndims > 0 && min_dims && opt_dims && max_dims) {

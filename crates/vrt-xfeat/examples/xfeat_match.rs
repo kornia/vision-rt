@@ -57,6 +57,7 @@ fn main() -> Result<(), vrt::BoxError> {
             vec![1, 3, 1088, 1920],
         )),
         fp16: true,
+        bf16: false,
         workspace_mb: 2048,
     };
     let engine_path =
@@ -136,8 +137,8 @@ fn load(
     path: &str,
 ) -> Result<(Image<u8, 3>, Image<u8, 3>), vrt::BoxError> {
     let src = read_image_any_rgb8(path)?; // Rgb8 (derefs to Image<u8,3>)
-    let dev = src.0.to_cuda(stream)?; // device Image<u8,3>
-    Ok((dev, src.0))
+    let dev = src.to_cuda(stream)?; // device Rgb8
+    Ok((dev.0, src.0))
 }
 
 // ── Visualization ─────────────────────────────────────────────────────────────

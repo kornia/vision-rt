@@ -23,6 +23,7 @@ fn main() -> Result<(), vrt::BoxError> {
     let profile = vrt_hub::EngineProfile {
         input: None,
         fp16: true,
+        bf16: false,
         workspace_mb: 2048,
     };
     let engine_path =
@@ -30,7 +31,7 @@ fn main() -> Result<(), vrt::BoxError> {
     let mut pose = RfDetrKpts::from_engine_file(&engine_path, stream.clone(), conf)?;
 
     let src = read_image_any_rgb8(image_path)?;
-    let dev = src.0.to_cuda(&stream)?;
+    let dev = src.to_cuda(&stream)?;
     let mut out = pose.alloc_result()?;
 
     // Per-stage accumulators (µs), tracking mean + peak over the timed window.

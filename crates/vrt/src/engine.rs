@@ -16,6 +16,9 @@ pub enum TensorMode {
 }
 
 /// Data type of a tensor.
+///
+/// Discriminants mirror `nvinfer1::DataType` exactly (NvInferRuntimeBase.h) — the
+/// bridge returns that enum's raw `int32_t`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DataType {
     Float32 = 0,
@@ -24,6 +27,8 @@ pub enum DataType {
     Int32 = 3,
     Bool = 4,
     UInt8 = 5,
+    /// `kBF16` — reachable since engines can be built with `BuilderFlag::kBF16`.
+    Bf16 = 7,
 }
 
 /// Metadata for one engine I/O tensor (discovered via named-tensor API).
@@ -127,14 +132,24 @@ fn discover_specs(engine: *mut btrt_engine_t) -> Result<Vec<TensorSpec>> {
             2 => TensorMode::Output,
             _ => TensorMode::None,
         };
-        let dtype = match unsafe { btrt_engine_tensor_dtype(engine, c_name.as_ptr()) } {
+        // No catch-all to Float32: that made every dtype this crate does not model
+        // (kFP8=6, kINT64=8, kINT4=9) claim to be f32, so `f32_ptr()` handed out a
+        // pointer to differently-sized elements and the decode kernels read garbage
+        // with no error anywhere. Fail the load instead.
+        let raw_dtype = unsafe { btrt_engine_tensor_dtype(engine, c_name.as_ptr()) };
+        let dtype = match raw_dtype {
             0 => DataType::Float32,
             1 => DataType::Float16,
             2 => DataType::Int8,
             3 => DataType::Int32,
             4 => DataType::Bool,
             5 => DataType::UInt8,
-            _ => DataType::Float32,
+            7 => DataType::Bf16,
+            other => {
+                return Err(TrtError::Trt(format!(
+                    "tensor '{name}' has unsupported nvinfer1::DataType {other}"
+                )))
+            }
         };
         let mut raw_dims = [0i64; 8];
         let mut ndims = 0i32;

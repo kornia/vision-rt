@@ -34,6 +34,7 @@ fn main() -> Result<(), vrt::BoxError> {
         let profile = vrt_hub::EngineProfile {
             input: None,
             fp16: true,
+            bf16: false,
             workspace_mb: 2048,
         };
         let engine_path =
@@ -42,7 +43,7 @@ fn main() -> Result<(), vrt::BoxError> {
     };
 
     let src = read_image_any_rgb8(image_path)?; // Rgb8 (derefs to Image<u8,3>)
-    let dev = src.0.to_cuda(&stream)?;
+    let dev = src.to_cuda(&stream)?;
 
     // Async: submit → one caller sync → read.
     let mut out = det.alloc_result()?;

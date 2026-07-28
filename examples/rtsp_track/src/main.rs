@@ -21,6 +21,19 @@
 //!   `out.gif`         — a ~10 s animated-GIF clip, then exit
 //!   `serve` | `:PORT` — H.264/WebSocket live stream (browser WebCodecs); open
 //!                       `http://<jetson-ip>:PORT` in a phone browser (same LAN)
+//!
+//! **The per-frame profiler and track list are silent by default** — with no output arg
+//! and no `RUST_LOG`, a healthy run prints its startup banner and then nothing at all,
+//! which looks exactly like a hang. Turn them on with:
+//!
+//! ```text
+//!   RUST_LOG=rtsp_track=debug cargo run --release ... -- <seg.engine> <depth.engine> <url>
+//! ```
+//!
+//! That yields, every 100 frames, the stage timings (`source / enqueue / fusion /
+//! sync(GPU) / readout / track`) plus each confirmed track's class and metric 3D
+//! position — the same shape as the always-on profilers in the sibling `rtsp_*`
+//! examples.
 
 use std::collections::HashSet;
 use std::time::Instant;
@@ -65,6 +78,10 @@ fn main() -> Res<()> {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 4 {
         eprintln!("Usage: rtsp_track <seg.engine> <depth.engine> <rtsp://url> [conf] [out.png|out.gif|serve|:PORT]");
+        eprintln!(
+            "\nProfiler + track list are OFF by default — a healthy run prints the startup\n\
+             banner then stays silent. Enable with:  RUST_LOG=rtsp_track=debug"
+        );
         std::process::exit(1);
     }
     let (seg_engine, depth_engine, url) = (&args[1], &args[2], &args[3]);
@@ -288,7 +305,7 @@ fn main() -> Res<()> {
         };
         let pts_ns = frame.meta.pts_ns; // camera capture timestamp (ns), if the decoder set one
         let t1 = Instant::now();
-        undist.apply(frame.image(), &mut rect, &stream)?; // rectify on the shared stream
+        undist.apply(&frame.data, &mut rect, &stream)?; // rectify on the shared stream
         seg.submit(&rect, &mut d)?;
         depth.submit(&rect, &mut z)?;
         let t2 = Instant::now();
@@ -396,6 +413,15 @@ fn main() -> Res<()> {
                     "wall-clock arrival (no decoder PTS)"
                 }
             );
+            // Say so once, on the last startup line, rather than leaving a working run
+            // looking identical to a hang: with no output arg and no RUST_LOG this is
+            // the final thing printed, however long it runs.
+            if !log::log_enabled!(log::Level::Debug) {
+                println!(
+                    "     (running — profiler/tracks silent; \
+                     RUST_LOG=rtsp_track=debug to see them)"
+                );
+            }
             pts_mode_logged = true;
         }
         let dt = if ema_dt > 0.0 {

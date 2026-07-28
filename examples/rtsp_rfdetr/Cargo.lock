@@ -1255,8 +1255,8 @@ dependencies = [
 
 [[package]]
 name = "kornia-algebra"
-version = "0.1.15-rc.4"
-source = "git+https://github.com/kornia/kornia-rs?tag=v0.1.15-rc.4#c0d5609ba5967d23944eac63925baa6ac7e91f5d"
+version = "0.1.15-rc.5"
+source = "git+https://github.com/kornia/kornia-rs?tag=v0.1.15-rc.5#3ee6dfe40bcdad7077c77f8d16d8c5bea8240f0f"
 dependencies = [
  "glam 0.33.2",
  "nalgebra",
@@ -1266,8 +1266,8 @@ dependencies = [
 
 [[package]]
 name = "kornia-image"
-version = "0.1.15-rc.4"
-source = "git+https://github.com/kornia/kornia-rs?tag=v0.1.15-rc.4#c0d5609ba5967d23944eac63925baa6ac7e91f5d"
+version = "0.1.15-rc.5"
+source = "git+https://github.com/kornia/kornia-rs?tag=v0.1.15-rc.5#3ee6dfe40bcdad7077c77f8d16d8c5bea8240f0f"
 dependencies = [
  "cudarc",
  "kornia-tensor",
@@ -1278,8 +1278,8 @@ dependencies = [
 
 [[package]]
 name = "kornia-imgproc"
-version = "0.1.15-rc.4"
-source = "git+https://github.com/kornia/kornia-rs?tag=v0.1.15-rc.4#c0d5609ba5967d23944eac63925baa6ac7e91f5d"
+version = "0.1.15-rc.5"
+source = "git+https://github.com/kornia/kornia-rs?tag=v0.1.15-rc.5#3ee6dfe40bcdad7077c77f8d16d8c5bea8240f0f"
 dependencies = [
  "cudarc",
  "half",
@@ -1294,8 +1294,8 @@ dependencies = [
 
 [[package]]
 name = "kornia-tensor"
-version = "0.1.15-rc.4"
-source = "git+https://github.com/kornia/kornia-rs?tag=v0.1.15-rc.4#c0d5609ba5967d23944eac63925baa6ac7e91f5d"
+version = "0.1.15-rc.5"
+source = "git+https://github.com/kornia/kornia-rs?tag=v0.1.15-rc.5#3ee6dfe40bcdad7077c77f8d16d8c5bea8240f0f"
 dependencies = [
  "cudarc",
  "num-traits",
@@ -1543,7 +1543,7 @@ checksum = "830b246a0e5f20af87141b25c173cd1b609bd7779a4617d6ec582abaf90870f3"
 [[package]]
 name = "nvbuf-sys"
 version = "0.1.0"
-source = "git+https://github.com/kornia/sensor-rt?rev=d3b369c95b259c9b14e9b4f69581c2d609dbb2cc#d3b369c95b259c9b14e9b4f69581c2d609dbb2cc"
+source = "git+https://github.com/kornia/sensor-rt?rev=11737f555a3679f8e50d31fc6468f29e33f9dab2#11737f555a3679f8e50d31fc6468f29e33f9dab2"
 dependencies = [
  "cc",
 ]
@@ -2054,7 +2054,7 @@ dependencies = [
 [[package]]
 name = "sensor-rtsp"
 version = "0.1.0"
-source = "git+https://github.com/kornia/sensor-rt?rev=d3b369c95b259c9b14e9b4f69581c2d609dbb2cc#d3b369c95b259c9b14e9b4f69581c2d609dbb2cc"
+source = "git+https://github.com/kornia/sensor-rt?rev=11737f555a3679f8e50d31fc6468f29e33f9dab2#11737f555a3679f8e50d31fc6468f29e33f9dab2"
 dependencies = [
  "cudarc",
  "gstreamer",
@@ -2062,8 +2062,14 @@ dependencies = [
  "kornia-image",
  "kornia-tensor",
  "nvbuf-sys",
+ "sensor-types",
  "thiserror 2.0.18",
 ]
+
+[[package]]
+name = "sensor-types"
+version = "0.1.0"
+source = "git+https://github.com/kornia/sensor-rt?rev=11737f555a3679f8e50d31fc6468f29e33f9dab2#11737f555a3679f8e50d31fc6468f29e33f9dab2"
 
 [[package]]
 name = "serde"

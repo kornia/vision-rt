@@ -27,6 +27,7 @@ pub type ShapeProfile = (String, Vec<i64>, Vec<i64>, Vec<i64>);
 pub struct EngineBuilder {
     onnx_path: String,
     fp16: bool,
+    bf16: bool,
     workspace_bytes: i64,
     profile: Option<ShapeProfile>,
 }
@@ -38,14 +39,36 @@ impl EngineBuilder {
         Self {
             onnx_path: path.into(),
             fp16: true,
+            bf16: false,
             workspace_bytes: 2048 << 20,
             profile: None,
         }
     }
 
     /// Enable/disable FP16 kernels (default: enabled).
+    ///
+    /// **Not the right choice for transformers.** FP16's largest finite value is
+    /// 65504, and ViT attention logits routinely exceed it (measured 2.1e6 on
+    /// DINOv3 ViT-S/16), overflowing to `inf` and turning `softmax` into NaN.
+    /// Use [`bf16`](Self::bf16) there — same speed class, fp32's exponent range.
     pub fn fp16(mut self, on: bool) -> Self {
         self.fp16 = on;
+        self
+    }
+
+    /// Enable/disable BF16 kernels (default: disabled).  Requires Ampere or
+    /// newer (SM80+; the Jetson Orin's SM87 qualifies).
+    ///
+    /// BF16 trades mantissa bits for fp32's 8-bit exponent, so it tolerates the
+    /// large dynamic range transformers produce where [`fp16`](Self::fp16)
+    /// overflows.  On DINOv3 ViT-S/16 @336 (Orin, TRT 10.3): fp32 13.4 ms,
+    /// **bf16 7.6 ms** at cosine 0.999568 vs the PyTorch reference, fp16 NaN.
+    ///
+    /// Enabling **both** `fp16` and `bf16` lets TensorRT pick per layer — it
+    /// chooses on speed, with no knowledge of dynamic range, and on that model
+    /// picks fp16 for attention and reintroduces the NaN.  Pick one.
+    pub fn bf16(mut self, on: bool) -> Self {
+        self.bf16 = on;
         self
     }
 
@@ -74,6 +97,16 @@ impl EngineBuilder {
     /// Slow (minutes for real models — TRT exhaustively times kernels).
     /// `logger` receives TRT's build diagnostics.
     pub fn build_serialized(&self, logger: &Logger) -> Result<Vec<u8>> {
+        // Enforced, not just documented: `from_onnx` defaults `fp16` to true, so a
+        // caller who only writes `.bf16(true)` would otherwise get BOTH flags — the
+        // one combination that is always wrong (TRT then picks per layer on speed
+        // alone and can reintroduce the fp16 overflow bf16 was chosen to avoid).
+        if self.fp16 && self.bf16 {
+            return Err(TrtError::Create(
+                "fp16 and bf16 are mutually exclusive — pass .fp16(false) alongside \
+                 .bf16(true) (see EngineBuilder::bf16)",
+            ));
+        }
         let c_path = std::ffi::CString::new(self.onnx_path.as_str())
             .map_err(|_| TrtError::Create("onnx path contains NUL"))?;
 
@@ -110,6 +143,7 @@ impl EngineBuilder {
                 logger.as_ptr(),
                 c_path.as_ptr(),
                 self.fp16 as i32,
+                self.bf16 as i32,
                 c_input.as_ref().map_or(std::ptr::null(), |c| c.as_ptr()),
                 min,
                 opt,
