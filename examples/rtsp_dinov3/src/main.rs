@@ -154,7 +154,7 @@ fn main() -> Res<()> {
 
     // Allocated ONCE, reused every frame — the only per-frame allocation is none.
     let mut r = dino.alloc_result()?;
-    let mut scores = stream.alloc_zeros::<f32>(cfg.capacity)?;
+    let mut scores = bank.alloc_scores()?;
 
     println!(
         "stream {w}x{h} → DINOv3 {}x{} input ({gw}x{gh} patches, dim {dim}) | \
@@ -228,7 +228,7 @@ fn main() -> Res<()> {
         // cheaper and simpler than a GPU argmax reduction at this size.
         let (mut best_id, mut best) = (0usize, 0.0f32);
         if !bank.is_empty() {
-            let s = stream.clone_dtoh(&scores.slice(0..bank.len()))?;
+            let s = &scores.to_host_image(&stream)?.into_vec()[..bank.len()];
             // Seed with -inf, not 0: unrelated scenes score down to ~-0.001 (see the
             // crate README's measured separation), so a 0-seeded max reports a
             // fabricated 0.000 and leaves `best_id` at 0 — the wrong keyframe.

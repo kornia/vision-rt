@@ -28,12 +28,12 @@
 //! ) -> Result<Vec<f32>, vrt::BoxError> {
 //!     // In a real loop both of these are allocated ONCE, outside it.
 //!     let mut r = dino.alloc_result()?;
-//!     let mut scores = stream.alloc_zeros::<f32>(bank.capacity())?;
+//!     let mut scores = bank.alloc_scores()?;
 //!
 //!     dino.submit(img, &mut r)?;                            // enqueue, no sync
 //!     bank.match_into(r.descriptor_slice(), &mut scores)?;   // enqueue, no sync
 //!     stream.synchronize()?;                                // ONE sync drains both
-//!     Ok(stream.clone_dtoh(&scores.slice(0..bank.len()))?)   // tiny D2H, post-sync
+//!     Ok(scores.to_host_image(stream)?.into_vec())          // tiny D2H, post-sync
 //! }
 //! ```
 //!
@@ -88,6 +88,10 @@ pub enum DinoError {
     DimMismatch { got: usize, want: usize },
     #[error("scores buffer holds {got} slots, need {want}")]
     ScoresTooSmall { got: usize, want: usize },
+    #[error(
+        "scores buffer is not device-resident — allocate it with DescriptorBank::alloc_scores"
+    )]
+    ScoresNotOnDevice,
     #[error("bank is full ({capacity} descriptors)")]
     BankFull { capacity: usize },
     #[error("no such bank slot {id} (only {len} enrolled)")]
@@ -564,7 +568,10 @@ fn red_cfg(rows: usize) -> LaunchConfig {
 /// Both the stored rows and the query are unit-norm, so matching is one dot product per
 /// row: at `capacity = 512, dim = 384` that is ~196k MACs, free next to the backbone.
 pub struct DescriptorBank {
-    data: CudaSlice<f32>, // [capacity*dim] device; rows 0..len live
+    /// `capacity x dim` device image — one row per stored descriptor, rows `0..len` live.
+    /// An `Image` for the same reason as `DinoV3Result`'s buffers: the gallery's shape
+    /// travels with the allocation instead of living in `capacity`/`dim` alone.
+    data: Image<f32, 1>,
     len: usize,
     capacity: usize,
     dim: usize,
@@ -577,7 +584,13 @@ impl DescriptorBank {
     pub fn new(capacity: usize, dim: usize, stream: Arc<CudaStream>) -> Result<Self, DinoError> {
         let match_k = CudaKernel::compile(stream.context(), MATCH_SRC, "cosine_bank")?;
         Ok(Self {
-            data: stream.alloc_zeros::<f32>(capacity * dim)?,
+            data: Image::<f32, 1>::zeros_cuda(
+                ImageSize {
+                    width: dim,
+                    height: capacity,
+                },
+                &stream,
+            )?,
             len: 0,
             capacity,
             dim,
@@ -608,7 +621,22 @@ impl DescriptorBank {
 
     /// GPU-resident descriptor rows `[capacity*dim]`, rows `0..len()` live.
     pub fn data_slice(&self) -> &CudaSlice<f32> {
-        &self.data
+        self.data
+            .as_cudaslice()
+            .expect("bank storage is device-resident (zeros_cuda)")
+    }
+
+    /// Allocate the caller-owned scores buffer this bank writes into — `1 x capacity`,
+    /// so it is sized correctly by construction rather than by the caller remembering
+    /// `capacity`. Allocate once, reuse every frame.
+    pub fn alloc_scores(&self) -> Result<Image<f32, 1>, DinoError> {
+        Ok(Image::<f32, 1>::zeros_cuda(
+            ImageSize {
+                width: self.capacity,
+                height: 1,
+            },
+            &self.stream,
+        )?)
     }
 
     /// Enqueue the cosine of `q` against every live row into `scores[0..len()]`.
@@ -619,7 +647,7 @@ impl DescriptorBank {
     pub fn match_into(
         &self,
         q: &CudaSlice<f32>,
-        scores: &mut CudaSlice<f32>,
+        scores: &mut Image<f32, 1>,
     ) -> Result<(), DinoError> {
         if self.len == 0 {
             return Ok(());
@@ -630,15 +658,18 @@ impl DescriptorBank {
                 want: self.dim,
             });
         }
-        if scores.len() < self.len {
+        let scores_dev = scores
+            .as_cudaslice_mut()
+            .ok_or(DinoError::ScoresNotOnDevice)?;
+        if scores_dev.len() < self.len {
             return Err(DinoError::ScoresTooSmall {
-                got: scores.len(),
+                got: scores_dev.len(),
                 want: self.len,
             });
         }
-        let bank_raw = self.data.device_ptr(self.stream.as_ref()).0;
+        let bank_raw = self.data_slice().device_ptr(self.stream.as_ref()).0;
         let q_raw = q.device_ptr(self.stream.as_ref()).0;
-        let sc_raw = scores.device_ptr_mut(self.stream.as_ref()).0;
+        let sc_raw = scores_dev.device_ptr_mut(self.stream.as_ref()).0;
         let (ni, dimi) = (self.len as i32, self.dim as i32);
         self.match_k
             .launch_builder(&self.stream)
@@ -666,9 +697,7 @@ impl DescriptorBank {
             });
         }
         let id = self.len;
-        let stream = self.stream.clone();
-        let mut dst = self.data.slice_mut(id * self.dim..(id + 1) * self.dim);
-        stream.memcpy_dtod(q, &mut dst)?;
+        self.write_row(id, q)?;
         self.len += 1;
         Ok(id)
     }
@@ -692,8 +721,19 @@ impl DescriptorBank {
         if id >= self.len {
             return Err(DinoError::NoSuchSlot { id, len: self.len });
         }
+        self.write_row(id, q)
+    }
+
+    /// Device-to-device copy of one descriptor into row `id`. Shared by `enroll` and
+    /// `replace`, which differ only in which row they target and whether `len` grows.
+    fn write_row(&mut self, id: usize, q: &CudaSlice<f32>) -> Result<(), DinoError> {
         let stream = self.stream.clone();
-        let mut dst = self.data.slice_mut(id * self.dim..(id + 1) * self.dim);
+        let dim = self.dim;
+        let data = self
+            .data
+            .as_cudaslice_mut()
+            .expect("bank storage is device-resident (zeros_cuda)");
+        let mut dst = data.slice_mut(id * dim..(id + 1) * dim);
         stream.memcpy_dtod(q, &mut dst)?;
         Ok(())
     }

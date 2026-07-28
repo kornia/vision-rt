@@ -27,6 +27,8 @@ kornia-imgproc = { workspace = true }
 thiserror   = "2.0"
 
 [dev-dependencies]
+# Example CLIs only — argh over clap, a fraction of the compile time.
+argh       = "0.1"
 vrt-hub   = { path = "../vrt-hub", features = ["builder"] }
 kornia-io = { workspace = true }
 env_logger = "0.11"

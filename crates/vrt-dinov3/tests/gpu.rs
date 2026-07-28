@@ -256,14 +256,13 @@ fn bank_matches_host_cosine() {
     // Re-submit the first image; it must match bank row 0 at ~1.0.
     let dev = Image(synth_image(w, h, 1).0.to_cuda(&stream).expect("h2d"));
     dino.submit(&dev, &mut r).expect("submit");
-    let mut scores = stream.alloc_zeros::<f32>(8).expect("scores");
+    let mut scores = bank.alloc_scores().expect("scores");
     bank.match_into(r.descriptor_slice(), &mut scores)
         .expect("match");
     stream.synchronize().expect("sync");
 
-    let got = stream
-        .clone_dtoh(&scores.slice(0..bank.len()))
-        .expect("d2h");
+    let host = scores.to_host_image(&stream).expect("d2h").into_vec();
+    let got = &host[..bank.len()];
     let q = r.descriptor_host().expect("d2h");
     for (i, (g, stored)) in got.iter().zip(&hosts).enumerate() {
         let want = cosine(&q, stored);

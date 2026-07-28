@@ -18,12 +18,12 @@ let stream = vrt::Stream::new_standalone()?.cuda_stream().clone();
 let mut dino = DinoV3::from_hub(stream.clone())?;      // or from_engine_file / from_onnx
 let mut bank = DescriptorBank::new(512, dino.dim(), stream.clone())?;
 let mut r = dino.alloc_result()?;                      // allocated ONCE
-let mut scores = stream.alloc_zeros::<f32>(512)?;      // allocated ONCE
+let mut scores = bank.alloc_scores()?;                 // allocated ONCE
 
 dino.submit(&img, &mut r)?;                            // enqueue, no sync
 bank.match_into(r.descriptor_slice(), &mut scores)?;   // enqueue, no sync
 stream.synchronize()?;                                  // the ONE sync
-let s = stream.clone_dtoh(&scores.slice(0..bank.len()))?;   // 2 KB, post-sync
+let s = scores.to_host_image(&stream)?.into_vec();      // 2 KB, post-sync
 ```
 
 ## Engine I/O

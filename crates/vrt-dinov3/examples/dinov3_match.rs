@@ -9,17 +9,29 @@
 //!   cargo run --release -p vrt-dinov3 --example dinov3_match -- \
 //!       <dinov3.engine> <image> <image> [image ...]
 
+use argh::FromArgs;
 use kornia_io::functional::read_image_any_rgb8;
 use vrt_dinov3::DinoV3;
 
+#[derive(FromArgs)]
+/// Print the cosine similarity between the DINOv3 descriptors of two or more images.
+struct Args {
+    /// path to the DINOv3 .engine, or "hub" to pull it from Hugging Face
+    #[argh(positional)]
+    engine: String,
+
+    /// two or more image paths; with exactly two, prints one number, otherwise the
+    /// full similarity matrix
+    #[argh(positional, greedy)]
+    images: Vec<String>,
+}
+
 fn main() -> Result<(), vrt::BoxError> {
-    let args: Vec<String> = std::env::args().collect();
-    if args.len() < 4 {
-        eprintln!("Usage: dinov3_match <dinov3.engine> <image> <image> [image ...]");
-        std::process::exit(1);
+    let args: Args = argh::from_env();
+    if args.images.len() < 2 {
+        return Err("need at least two images to compare".into());
     }
-    let engine = &args[1];
-    let paths = &args[2..];
+    let (engine, paths) = (&args.engine, &args.images[..]);
 
     let stream = vrt::Stream::new_standalone()?.cuda_stream().clone();
     let mut dino = if engine == "hub" {
