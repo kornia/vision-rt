@@ -90,6 +90,8 @@ pub enum DinoError {
     ScoresTooSmall { got: usize, want: usize },
     #[error("bank is full ({capacity} descriptors)")]
     BankFull { capacity: usize },
+    #[error("no such bank slot {id} (only {len} enrolled)")]
+    NoSuchSlot { id: usize, len: usize },
 }
 
 // One block per row: L2-normalize `[n, dim]` into the caller's device buffer, so the
@@ -638,6 +640,31 @@ impl DescriptorBank {
         stream.memcpy_dtod(q, &mut dst)?;
         self.len += 1;
         Ok(id)
+    }
+
+    /// Overwrite an existing slot's descriptor (device-to-device), keeping its id.
+    ///
+    /// The eviction primitive: a full bank that can only append stops learning, so a
+    /// long run keeps matching against whatever it happened to see first. Replacing a
+    /// slot lets a caller retire the least useful keyframe — least-recently-matched,
+    /// say — while every id already handed out stays valid.
+    ///
+    /// Errors if `id` is not a live slot, so a stale id can never silently scribble
+    /// over a live one.
+    pub fn replace(&mut self, id: usize, q: &CudaSlice<f32>) -> Result<(), DinoError> {
+        if q.len() != self.dim {
+            return Err(DinoError::DimMismatch {
+                got: q.len(),
+                want: self.dim,
+            });
+        }
+        if id >= self.len {
+            return Err(DinoError::NoSuchSlot { id, len: self.len });
+        }
+        let stream = self.stream.clone();
+        let mut dst = self.data.slice_mut(id * self.dim..(id + 1) * self.dim);
+        stream.memcpy_dtod(q, &mut dst)?;
+        Ok(())
     }
 
     /// Drop every enrolled descriptor. The allocation is kept for reuse.

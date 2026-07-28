@@ -101,27 +101,26 @@ fn parse_args() -> Res<Cfg> {
 
 /// Decide whether the current frame becomes a new keyframe.
 ///
-/// **TODO(you): this is the policy that decides whether the demo works**, and it is a
-/// real trade-off rather than a detail. The default below is *threshold + minimum frame
-/// gap*. Alternatives worth trying:
+/// The policy is **threshold + minimum frame gap**, chosen against measured data rather
+/// than tuned by feel.
 ///
-/// Measured separation on this engine (`examples/dinov3_match`, real images) says the
-/// threshold is not delicate: two views of the same place score **~0.95–0.96**, unrelated
-/// scenes **−0.001 … 0.11**. The default `tau = 0.75` sits in a wide empty band, so
-/// anything around 0.5–0.9 behaves the same. The *gap* policy is the interesting knob.
+/// `examples/dinov3_match` on real images puts two views of one place at **~0.95–0.96**
+/// and unrelated scenes at **−0.001 … 0.11**. That band is wide and empty, so the
+/// threshold is not delicate — anything from roughly 0.5 to 0.9 behaves identically, and
+/// `tau = 0.75` sits in the middle of it. A plain threshold is therefore enough on the
+/// score axis; the interesting failure is on the *time* axis.
 ///
-/// - **fixed threshold alone** — simplest, but `tau` is scene-dependent. Too low and the
-///   bank never grows, so nothing is ever recognized; too high and it enrolls on every
-///   frame until capacity, which also recognizes nothing.
-/// - **threshold + min gap** (the default) — the gap stops a burst of near-identical
-///   keyframes while the camera is moving. Two constants instead of one.
-/// - **adaptive** — track the running distribution of best-match scores and enroll on an
-///   outlier. No magic constant and it travels across scenes, but it needs state and a
-///   warm-up period.
+/// That failure is bursting. While the camera pans, every frame is below `tau`, so a
+/// threshold alone enrols on all of them and fills the bank with near-duplicates of one
+/// sweep — after which nothing is recognised, because the bank describes a blur rather
+/// than a set of places. `min_gap` is the fix: at least that many frames must pass
+/// between enrolments, so a pan contributes a handful of keyframes instead of hundreds.
 ///
-/// Also open: what to do at capacity. This currently just stops enrolling (see the call
-/// site); evicting the least-recently-matched, or reservoir-sampling, would keep the bank
-/// representative over a long run.
+/// An adaptive variant (track the running distribution of best-match scores, enrol on an
+/// outlier) would drop the `tau` constant and travel better across scenes. It is not used
+/// here because the measured separation makes the constant nearly free, and adaptivity
+/// costs a warm-up period during which the bank is enrolling on noise — a bad trade for a
+/// demo whose first seconds are the interesting ones.
 fn should_enroll(bank_len: usize, best: f32, frames_since: u64, tau: f32, min_gap: u64) -> bool {
     // The first frame always becomes keyframe 0 — with an empty bank there is nothing to
     // match against, so `best` is meaningless.
@@ -204,7 +203,10 @@ fn main() -> Res<()> {
     let mut thumbs: Vec<Vec<u8>> = Vec::new(); // host RGB, TH_W x TH_H, one per keyframe
     let mut hist: Vec<f32> = Vec::with_capacity(HIST);
     let mut frames_since_enroll = u64::MAX; // so the min-gap never blocks keyframe 0
-    let mut capacity_warned = false;
+                                            // Frame number at which each keyframe was last the best match — the LRU key used to
+                                            // pick a victim once the bank is full. Seeded with the enrolling frame so a brand-new
+                                            // keyframe is never the immediate next victim.
+    let mut last_matched: Vec<u64> = Vec::new();
 
     let ms = |d: std::time::Duration| d.as_secs_f64() * 1e3;
     let (mut n, t_start) = (0u64, Instant::now());
@@ -253,29 +255,53 @@ fn main() -> Res<()> {
             None => None,
         };
 
+        // Recognising a keyframe refreshes it, so places you keep revisiting survive
+        // eviction and one-off glimpses age out.
+        if !bank.is_empty() && best >= cfg.tau {
+            last_matched[best_id] = n;
+        }
+
         frames_since_enroll = frames_since_enroll.saturating_add(1);
         if should_enroll(bank.len(), best, frames_since_enroll, cfg.tau, cfg.min_gap) {
+            let thumb = host_frame
+                .as_ref()
+                .map(|host| downscale(host, w, h, TH_W, TH_H));
             if bank.len() == bank.capacity() {
-                if !capacity_warned {
-                    println!(
-                        "── bank full at {} keyframes; stopped enrolling",
-                        bank.capacity()
-                    );
-                    capacity_warned = true;
+                // Full: evict the least-recently-matched keyframe rather than stop
+                // learning. Halting enrolment freezes the bank on whatever the first
+                // `capacity` frames happened to be, so a long run keeps matching against
+                // a stale set and never adapts to where the camera has since been
+                // pointed. LRU keeps the places actually being revisited.
+                let victim = last_matched
+                    .iter()
+                    .enumerate()
+                    .min_by_key(|(_, &t)| t)
+                    .map(|(i, _)| i)
+                    .expect("bank is at capacity, so it is non-empty");
+                bank.replace(victim, r.descriptor_slice())?;
+                if let Some(t) = thumb {
+                    thumbs[victim] = t;
                 }
+                println!(
+                    "── frame {n}: bank full — evicted keyframe {victim} \
+                     (last matched at frame {}), re-enrolled in its slot",
+                    last_matched[victim]
+                );
+                last_matched[victim] = n;
             } else {
                 let id = bank.enroll(r.descriptor_slice())?;
                 // Pushed exactly when `host_frame` is Some, i.e. all-or-nothing across the
                 // run — so `thumbs[i]` stays aligned with bank id `i` whenever it is used.
-                if let Some(host) = &host_frame {
-                    thumbs.push(downscale(host, w, h, TH_W, TH_H));
+                if let Some(t) = thumb {
+                    thumbs.push(t);
                 }
-                frames_since_enroll = 0;
+                last_matched.push(n);
                 println!(
                     "── frame {n}: enrolled keyframe {id} (best match was {best:.3} < tau {})",
                     cfg.tau
                 );
             }
+            frames_since_enroll = 0;
         }
 
         if hist.len() == HIST {
