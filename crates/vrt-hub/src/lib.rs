@@ -40,6 +40,10 @@ use std::process::Command;
 
 use sha2::{Digest, Sha256};
 
+/// Re-exported from `vrt` core, where it sits alongside `DType` so the builder and
+/// this registry reason about precision through one type.
+pub use vrt::Precision;
+
 /// Errors from model resolution and engine building.
 #[derive(Debug, thiserror::Error)]
 pub enum HubError {
@@ -77,21 +81,6 @@ pub enum HubError {
 pub struct ModelFile {
     pub filename: &'static str,
     pub sha256: &'static str,
-}
-
-/// Numeric precision an engine was built at.
-///
-/// Part of a prebuilt's identity, not a performance hint: an engine's precision
-/// changes its *outputs*, so serving an artifact built at one precision to a caller
-/// asking for another is silently wrong numerics, not merely a slower or faster
-/// path. DINOv3 is the worked example — its fp16 engine emits all-NaN where bf16 is
-/// correct, so an fp16 prebuilt handed to a bf16 request would poison every
-/// descriptor with no error anywhere.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Precision {
-    Fp32,
-    Fp16,
-    Bf16,
 }
 
 /// An OPTIONAL prebuilt TensorRT engine, guarded by the exact environment it was

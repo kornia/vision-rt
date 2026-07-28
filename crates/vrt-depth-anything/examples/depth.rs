@@ -37,7 +37,7 @@ fn main() -> Result<(), vrt::BoxError> {
     };
 
     let src = read_image_any_rgb8(image_path)?;
-    let dev = src.0.to_cuda(&stream)?;
+    let dev = src.to_cuda(&stream)?;
 
     // Async: submit (no sync, no host copy) → one caller sync → host copy of the
     // metric depth map (meters) for CPU colorization.

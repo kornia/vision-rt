@@ -51,7 +51,7 @@ fn main() -> Result<(), vrt::BoxError> {
     // Load RGB8 at native resolution, upload to device once. Reused every iteration.
     let src = read_image_any_rgb8(image_path)?;
     let (sw, sh) = (src.width(), src.height());
-    let img = src.0.to_cuda(&stream)?; // device-resident Image<u8,3>
+    let img = src.to_cuda(&stream)?; // device-resident Image<u8,3>
 
     println!(
         "XFeat detector @ {sw}×{sh} → model {}×{} (floor-32), top_k={TOP_K}",

@@ -44,6 +44,7 @@
 
 use std::time::Instant;
 
+use argh::FromArgs;
 use cudarc::driver::CudaContext;
 use sensor_rtsp::RtspSource;
 use vrt_dinov3::{DescriptorBank, DinoV3};
@@ -60,53 +61,36 @@ const TH_H: usize = 90;
 const HIST: usize = 256;
 const STREAM_FPS: i32 = 30;
 
+#[derive(FromArgs)]
+/// RTSP -> DINOv3 global descriptor -> keyframe-bank retrieval.
 struct Cfg {
+    /// path to the DINOv3 .engine (build with scripts/build_engine.sh)
+    #[argh(positional)]
     engine: String,
-    url: String,
-    tau: f32,
-    capacity: usize,
-    min_gap: u64,
-    port: Option<u16>,
-}
 
-fn parse_args() -> Res<Cfg> {
-    let a: Vec<String> = std::env::args().collect();
-    if a.len() < 3 {
-        eprintln!(
-            "Usage: rtsp_dinov3 <dinov3.engine> <rtsp://url> \
-             [--tau F] [--capacity N] [--min-gap N] [--port N]\n\
-             \n  --tau       enroll when the best match falls below this cosine (default 0.75)\
-             \n  --capacity  max keyframes in the bank (default 512)\
-             \n  --min-gap   min frames between enrollments (default 15)\
-             \n  --port      serve the live H.264/WebSocket view (default: off, stays fully on-GPU)"
-        );
-        std::process::exit(1);
-    }
-    let mut c = Cfg {
-        engine: a[1].clone(),
-        url: a[2].clone(),
-        tau: 0.75,
-        capacity: 512,
-        min_gap: 15,
-        port: None,
-    };
-    let mut i = 3;
-    while i < a.len() {
-        let val = || -> Res<String> {
-            a.get(i + 1)
-                .cloned()
-                .ok_or_else(|| format!("{} needs a value", a[i]).into())
-        };
-        match a[i].as_str() {
-            "--tau" => c.tau = val()?.parse()?,
-            "--capacity" => c.capacity = val()?.parse()?,
-            "--min-gap" => c.min_gap = val()?.parse()?,
-            "--port" => c.port = Some(val()?.parse()?),
-            other => return Err(format!("unknown flag {other}").into()),
-        }
-        i += 2;
-    }
-    Ok(c)
+    /// rtsp:// URL of the camera
+    #[argh(positional)]
+    url: String,
+
+    /// enroll a keyframe when the best match falls below this cosine (default 0.75)
+    #[argh(option, default = "0.75")]
+    tau: f32,
+
+    /// max keyframes in the bank; at capacity the least-recently-matched is evicted
+    /// (default 512)
+    #[argh(option, default = "512")]
+    capacity: usize,
+
+    /// minimum frames between enrollments, which stops a camera pan filling the bank
+    /// with near-duplicates of one sweep (default 15)
+    #[argh(option, default = "15")]
+    min_gap: u64,
+
+    /// serve the live H.264/WebSocket view on this port. Off by default: it is the only
+    /// full-frame device-to-host copy in the program, so without it the pipeline stays
+    /// entirely on the GPU.
+    #[argh(option)]
+    port: Option<u16>,
 }
 
 /// Decide whether the current frame becomes a new keyframe.
@@ -155,7 +139,7 @@ fn stack_h(left: &[u8], lw: usize, right: &[u8], rw: usize, h: usize) -> Vec<u8>
 
 fn main() -> Res<()> {
     env_logger::init();
-    let cfg = parse_args()?;
+    let cfg: Cfg = argh::from_env();
 
     // One shared CUDA stream: the source's un-pitch copy, DINOv3 inference and the bank
     // match all enqueue on it, so a single sync completes the frame.

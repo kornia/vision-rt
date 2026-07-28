@@ -29,6 +29,8 @@ cudarc = { version = "0.19", default-features = false, features = [
   "fallback-dynamic-loading",
   "fallback-latest",
 ] }
+# CLI parsing — argh over clap, a fraction of the compile time (matches sensor-rt).
+argh = "0.1"
 env_logger = "0.11"
 
 # Build this example against the LOCAL vision-rt, not upstream's pinned snapshot.

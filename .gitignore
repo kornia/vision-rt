@@ -22,3 +22,6 @@ models/
 
 # ReID backbone probe (research + data — not for public repo)
 scripts/reid_probe/
+
+# Vite/npm scratch for the vrt-viz browser client — never committed.
+crates/vrt-viz/client/node_modules/

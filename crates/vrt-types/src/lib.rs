@@ -110,8 +110,6 @@ macro_rules! typed_image {
 
             #[doc = concat!("Upload to a device-resident ", stringify!($name), " (H2D).")]
             pub fn to_cuda(&self, stream: &Arc<CudaStream>) -> Result<Self, ImageError> {
-                // kornia rc.5 renamed `Image::to_cuda_image` -> `to_cuda` (its
-                // `to_host_image` counterpart kept the old name).
                 Ok(Self(self.0.to_cuda(stream)?))
             }
 

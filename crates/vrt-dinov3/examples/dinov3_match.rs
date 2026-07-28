@@ -49,7 +49,7 @@ fn main() -> Result<(), vrt::BoxError> {
     let mut descs: Vec<Vec<f32>> = Vec::with_capacity(paths.len());
     for p in paths {
         let src = read_image_any_rgb8(p)?;
-        let dev = src.0.to_cuda(&stream)?;
+        let dev = src.to_cuda(&stream)?;
         dino.submit(&dev, &mut r)?; // enqueue, no sync
         stream.synchronize()?; // the one sync
         descs.push(r.descriptor_host()?);
