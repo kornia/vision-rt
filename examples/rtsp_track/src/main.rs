@@ -305,7 +305,7 @@ fn main() -> Res<()> {
         };
         let pts_ns = frame.meta.pts_ns; // camera capture timestamp (ns), if the decoder set one
         let t1 = Instant::now();
-        undist.apply(frame.image(), &mut rect, &stream)?; // rectify on the shared stream
+        undist.apply(&frame.data, &mut rect, &stream)?; // rectify on the shared stream
         seg.submit(&rect, &mut d)?;
         depth.submit(&rect, &mut z)?;
         let t2 = Instant::now();

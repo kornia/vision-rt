@@ -66,7 +66,7 @@ fn main() -> Res<()> {
             break;
         }; // recv(camera) + enqueue copy
         let t1 = Instant::now();
-        seg.submit(frame.image(), &mut out)?; // model enqueue (async, no sync)
+        seg.submit(&frame.data, &mut out)?; // model enqueue (async, no sync)
         let t2 = Instant::now();
         stream.synchronize()?; // the one sync completes source + model
         let t3 = Instant::now();
@@ -79,7 +79,7 @@ fn main() -> Res<()> {
         // annotated PNG (takes the on-demand copies, so it's off the timed path).
         if let Some(path) = debug_png.take_if(|_| n == 60) {
             let (dw, dh) = (w as usize, h as usize);
-            let host = frame.image().to_host(&stream)?; // device Rgb8 → host
+            let host = frame.data.to_host_image(&stream)?; // device Rgb8 → host
             let mut buf = host.as_slice().to_vec();
             let instances = out.instances()?; // boxes + masks to host
             for (i, inst) in instances.iter().enumerate() {
@@ -93,7 +93,10 @@ fn main() -> Res<()> {
                 buf,
             )?;
             write_image_png_rgb8(&path, &img)?;
-            println!("     saved debug overlay → {path} ({} instances)", instances.len());
+            println!(
+                "     saved debug overlay → {path} ({} instances)",
+                instances.len()
+            );
         }
 
         n += 1;
@@ -167,13 +170,24 @@ fn draw_instance(buf: &mut [u8], w: usize, h: usize, inst: &Instance, color: [u8
         ((x2, y2), (x1, y2)),
         ((x1, y2), (x1, y1)),
     ] {
-        draw_line(buf, w, h, a.0 as i32, a.1 as i32, b.0 as i32, b.1 as i32, color);
+        draw_line(
+            buf, w, h, a.0 as i32, a.1 as i32, b.0 as i32, b.1 as i32, color,
+        );
     }
 }
 
 /// Bresenham line, clipped to the frame.
 #[allow(clippy::too_many_arguments)]
-fn draw_line(buf: &mut [u8], w: usize, h: usize, x0: i32, y0: i32, x1: i32, y1: i32, color: [u8; 3]) {
+fn draw_line(
+    buf: &mut [u8],
+    w: usize,
+    h: usize,
+    x0: i32,
+    y0: i32,
+    x1: i32,
+    y1: i32,
+    color: [u8; 3],
+) {
     let (dx, dy) = ((x1 - x0).abs(), -(y1 - y0).abs());
     let (sx, sy) = (if x0 < x1 { 1 } else { -1 }, if y0 < y1 { 1 } else { -1 });
     let (mut x, mut y, mut err) = (x0, y0, dx + dy);
@@ -204,17 +218,95 @@ fn coco_name(id: u32) -> &'static str {
 }
 
 const COCO91: [&str; 91] = [
-    "background", "person", "bicycle", "car", "motorcycle", "airplane", "bus",
-    "train", "truck", "boat", "traffic light", "fire hydrant", "N/A", "stop sign",
-    "parking meter", "bench", "bird", "cat", "dog", "horse", "sheep", "cow",
-    "elephant", "bear", "zebra", "giraffe", "N/A", "backpack", "umbrella", "N/A",
-    "N/A", "handbag", "tie", "suitcase", "frisbee", "skis", "snowboard",
-    "sports ball", "kite", "baseball bat", "baseball glove", "skateboard",
-    "surfboard", "tennis racket", "bottle", "N/A", "wine glass", "cup", "fork",
-    "knife", "spoon", "bowl", "banana", "apple", "sandwich", "orange", "broccoli",
-    "carrot", "hot dog", "pizza", "donut", "cake", "chair", "couch", "potted plant",
-    "bed", "N/A", "dining table", "N/A", "N/A", "toilet", "N/A", "tv", "laptop",
-    "mouse", "remote", "keyboard", "cell phone", "microwave", "oven", "toaster",
-    "sink", "refrigerator", "N/A", "book", "clock", "vase", "scissors",
-    "teddy bear", "hair drier", "toothbrush",
+    "background",
+    "person",
+    "bicycle",
+    "car",
+    "motorcycle",
+    "airplane",
+    "bus",
+    "train",
+    "truck",
+    "boat",
+    "traffic light",
+    "fire hydrant",
+    "N/A",
+    "stop sign",
+    "parking meter",
+    "bench",
+    "bird",
+    "cat",
+    "dog",
+    "horse",
+    "sheep",
+    "cow",
+    "elephant",
+    "bear",
+    "zebra",
+    "giraffe",
+    "N/A",
+    "backpack",
+    "umbrella",
+    "N/A",
+    "N/A",
+    "handbag",
+    "tie",
+    "suitcase",
+    "frisbee",
+    "skis",
+    "snowboard",
+    "sports ball",
+    "kite",
+    "baseball bat",
+    "baseball glove",
+    "skateboard",
+    "surfboard",
+    "tennis racket",
+    "bottle",
+    "N/A",
+    "wine glass",
+    "cup",
+    "fork",
+    "knife",
+    "spoon",
+    "bowl",
+    "banana",
+    "apple",
+    "sandwich",
+    "orange",
+    "broccoli",
+    "carrot",
+    "hot dog",
+    "pizza",
+    "donut",
+    "cake",
+    "chair",
+    "couch",
+    "potted plant",
+    "bed",
+    "N/A",
+    "dining table",
+    "N/A",
+    "N/A",
+    "toilet",
+    "N/A",
+    "tv",
+    "laptop",
+    "mouse",
+    "remote",
+    "keyboard",
+    "cell phone",
+    "microwave",
+    "oven",
+    "toaster",
+    "sink",
+    "refrigerator",
+    "N/A",
+    "book",
+    "clock",
+    "vase",
+    "scissors",
+    "teddy bear",
+    "hair drier",
+    "toothbrush",
 ];

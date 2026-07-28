@@ -21,8 +21,8 @@ vrt-types = { path = "../../crates/vrt-types" }
 # CPU rendering + MJPEG/GIF/PNG viz. `turbojpeg` = SIMD JPEG for the live stream.
 vrt-viz = { path = "../../crates/vrt-viz", features = ["h264"] }
 # Private git dep (kornia/sensor-rt) — needs CARGO_NET_GIT_FETCH_WITH_CLI=true.
-sensor-rtsp = { git = "https://github.com/kornia/sensor-rt", rev = "d3b369c95b259c9b14e9b4f69581c2d609dbb2cc" }
-kornia-image = { git = "https://github.com/kornia/kornia-rs", tag = "v0.1.15-rc.4", features = ["cudarc"] }
+sensor-rtsp = { git = "https://github.com/kornia/sensor-rt", rev = "e91f9c09abd40f01a9a1cf9e39e223412cb70627" }
+kornia-image = { git = "https://github.com/kornia/kornia-rs", tag = "v0.1.15-rc.5", features = ["cuda"] }
 cudarc = { version = "0.19", default-features = false, features = [
   "cuda-version-from-build-system",
   "driver",
@@ -33,3 +33,13 @@ cudarc = { version = "0.19", default-features = false, features = [
 ] }
 env_logger = "0.11"
 log = "0.4"
+
+# `sensor-rtsp` depends on the PUBLIC upstream kornia/vision-rt at a pinned rev. Without
+# this, that pinned copy and the local path crates are two different packages both
+# declaring `links = "nvinfer"` (via trt-sys), which cargo rejects outright. Redirect the
+# git source at the working tree so the whole graph resolves to one copy — and so this
+# example actually exercises the local changes rather than upstream's snapshot.
+[patch."https://github.com/kornia/vision-rt"]
+trt-sys    = { path = "../../crates/trt-sys" }
+vrt        = { path = "../../crates/vrt" }
+vrt-types  = { path = "../../crates/vrt-types" }

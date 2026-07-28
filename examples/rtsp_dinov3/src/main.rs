@@ -16,7 +16,14 @@
 //! CUDA address space (`cudaImportExternalMemory` — a true zero-copy), and its un-pitch
 //! pass drops alpha (pitched RGBA → tight RGB) so the frame is model-ready. From there
 //! it is device buffers all the way to the K-float score readout, which is 2 KB at the
-//! default capacity. Stages 1–3 only *enqueue*.
+//! default capacity.
+//!
+//! Stages 2–3 only *enqueue*; stage 1 does not. `next_frame` **syncs internally** before
+//! releasing its transient NVMM import, so the source's pack no longer overlaps the
+//! model's inference the way it did when frames came from a reference-counted ring.
+//! Measured cost on a 15 fps camera: the light pipelines here still hold 15.0 fps, while
+//! the heavier sibling examples (depth, track) lose ~2–3% and see their enqueue time
+//! rise. Worth knowing before reading the profiler as pure GPU time.
 //!
 //! The live view (`--port`) is the one place a full frame comes back to the host, which
 //! is why it is **opt-in**: without it the whole pipeline stays on the GPU. Keyframe
@@ -214,14 +221,16 @@ fn main() -> Res<()> {
 
     loop {
         let t0 = Instant::now();
-        // `frame` must stay alive until after the sync — dropping it returns its buffer
-        // to the source's ring, where the next frame's pack kernel would overwrite the
-        // pixels the GPU is still reading.
+        // `frame.data` is a self-owned device `Image` — `next_frame` allocates it and
+        // syncs its pack before returning, so there is no ring slot to be recycled out
+        // from under us and no lifetime rule to honour beyond ordinary borrows. (The
+        // older reference-counted-ring API did have one: the frame had to outlive the
+        // sync or the next pack kernel would overwrite pixels still being read.)
         let Some(frame) = source.next_frame() else {
             break;
         };
         let t1 = Instant::now();
-        dino.submit(frame.image(), &mut r)?; // enqueue (async, no sync)
+        dino.submit(&frame.data, &mut r)?; // enqueue (async, no sync)
         let t2 = Instant::now();
         bank.match_into(r.descriptor_slice(), &mut scores)?; // enqueue AFTER submit
         let t3 = Instant::now();
@@ -251,7 +260,7 @@ fn main() -> Res<()> {
         // keeps the default run entirely on the GPU — thumbnails exist purely to be
         // looked at, so capturing them with no viewer would be pure waste.
         let host_frame: Option<Vec<u8>> = match live {
-            Some(_) => Some(frame.image().to_host(&stream)?.0.into_vec()),
+            Some(_) => Some(frame.data.to_host_image(&stream)?.into_vec()),
             None => None,
         };
 
