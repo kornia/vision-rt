@@ -1040,7 +1040,7 @@ dependencies = [
 [[package]]
 name = "nvbuf-sys"
 version = "0.1.0"
-source = "git+https://github.com/kornia/sensor-rt?rev=e91f9c09abd40f01a9a1cf9e39e223412cb70627#e91f9c09abd40f01a9a1cf9e39e223412cb70627"
+source = "git+https://github.com/kornia/sensor-rt?rev=11737f555a3679f8e50d31fc6468f29e33f9dab2#11737f555a3679f8e50d31fc6468f29e33f9dab2"
 dependencies = [
  "cc",
 ]
@@ -1357,7 +1357,7 @@ dependencies = [
 [[package]]
 name = "sensor-rtsp"
 version = "0.1.0"
-source = "git+https://github.com/kornia/sensor-rt?rev=e91f9c09abd40f01a9a1cf9e39e223412cb70627#e91f9c09abd40f01a9a1cf9e39e223412cb70627"
+source = "git+https://github.com/kornia/sensor-rt?rev=11737f555a3679f8e50d31fc6468f29e33f9dab2#11737f555a3679f8e50d31fc6468f29e33f9dab2"
 dependencies = [
  "cudarc",
  "gstreamer",
@@ -1367,13 +1367,12 @@ dependencies = [
  "nvbuf-sys",
  "sensor-types",
  "thiserror 2.0.18",
- "vrt",
 ]
 
 [[package]]
 name = "sensor-types"
 version = "0.1.0"
-source = "git+https://github.com/kornia/sensor-rt?rev=e91f9c09abd40f01a9a1cf9e39e223412cb70627#e91f9c09abd40f01a9a1cf9e39e223412cb70627"
+source = "git+https://github.com/kornia/sensor-rt?rev=11737f555a3679f8e50d31fc6468f29e33f9dab2#11737f555a3679f8e50d31fc6468f29e33f9dab2"
 
 [[package]]
 name = "serde"

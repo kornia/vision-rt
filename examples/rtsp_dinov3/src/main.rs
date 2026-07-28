@@ -19,11 +19,14 @@
 //! default capacity.
 //!
 //! Stages 2–3 only *enqueue*; stage 1 does not. `next_frame` **syncs internally** before
-//! releasing its transient NVMM import, so the source's pack no longer overlaps the
-//! model's inference the way it did when frames came from a reference-counted ring.
-//! Measured cost on a 15 fps camera: the light pipelines here still hold 15.0 fps, while
-//! the heavier sibling examples (depth, track) lose ~2–3% and see their enqueue time
-//! rise. Worth knowing before reading the profiler as pure GPU time.
+//! releasing its transient NVMM import, and allocates a fresh image per frame, where the
+//! older reference-counted-ring API did neither. So the source's pack no longer overlaps
+//! the model's inference, and `source` in the profiler is not pure wait.
+//!
+//! That is a structural observation, not a measured cost: on this 15 fps camera the whole
+//! `rtsp_*` suite still runs at 14.8–15.0 fps with GPU sync unchanged, and the camera is
+//! the bottleneck throughout (`source` ~36–58 ms against a 66 ms interval). Any cost is
+//! inside that slack. Don't read the profiler's `source` as pure GPU idle.
 //!
 //! The live view (`--port`) is the one place a full frame comes back to the host, which
 //! is why it is **opt-in**: without it the whole pipeline stays on the GPU. Keyframe
