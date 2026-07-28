@@ -38,12 +38,15 @@ cudarc = { version = "0.19", default-features = false, features = [
   "fallback-dynamic-loading",
   "fallback-latest",
 ] }
-# kornia GPU image/tensor types — `cudarc` feature enables the device backend +
-# custom kernels. Git-pinned to a fixed cuda-preprocess rev (reproducible build).
-kornia-image   = { git = "https://github.com/kornia/kornia-rs", tag = "v0.1.15-rc.4", features = ["cudarc"] }
-kornia-tensor  = { git = "https://github.com/kornia/kornia-rs", tag = "v0.1.15-rc.4", features = ["cudarc"] }
-kornia-imgproc = { git = "https://github.com/kornia/kornia-rs", tag = "v0.1.15-rc.4", features = ["cudarc"] }
-kornia-io      = { git = "https://github.com/kornia/kornia-rs", tag = "v0.1.15-rc.4" }
+# kornia GPU image/tensor types — the `cuda` feature enables the device backend +
+# custom kernels. Git-pinned to a fixed rev (reproducible build).
+# Bumped rc.4 -> rc.5: rc.5 RENAMED this feature `cudarc` -> `cuda`. sensor-rt was already on
+# rc.5/`cuda`, so rc.4 here was the last thing pinning the old name and blocking a single unified
+# kornia tree (flux patches kornia-imgproc to a local checkout for SIFT, which needs `cuda`).
+kornia-image   = { git = "https://github.com/kornia/kornia-rs", tag = "v0.1.15-rc.5", features = ["cuda"] }
+kornia-tensor  = { git = "https://github.com/kornia/kornia-rs", tag = "v0.1.15-rc.5", features = ["cuda"] }
+kornia-imgproc = { git = "https://github.com/kornia/kornia-rs", tag = "v0.1.15-rc.5", features = ["cuda"] }
+kornia-io      = { git = "https://github.com/kornia/kornia-rs", tag = "v0.1.15-rc.5" }
 
 [workspace.package]
 version = "0.1.0"
