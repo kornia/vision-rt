@@ -56,7 +56,7 @@ use std::sync::Arc;
 
 use cudarc::driver::sys::CUdeviceptr;
 use cudarc::driver::{CudaSlice, CudaStream, DevicePtr, DevicePtrMut, LaunchConfig};
-use kornia_image::Image;
+use kornia_image::{Image, ImageSize};
 use kornia_imgproc::preprocess::{Normalize, Preprocessor, PreprocessorBuilder, ResizeMode};
 use kornia_tensor::{zeros_cuda, CudaKernel, Tensor};
 use vrt::cuda::{cfg_1d, cfg_per_item};
@@ -253,8 +253,14 @@ fn resolve_io(inp: &[i64], outs: &[(String, Vec<i64>)]) -> Result<EngineIo, Stri
 /// filled async by [`DinoV3::submit`]. Allocate once via [`DinoV3::alloc_result`] and
 /// reuse every frame.
 pub struct DinoV3Result {
-    descriptor: CudaSlice<f32>, // [dim] device, L2-normed — the headline output
-    patches: Option<CudaSlice<f32>>, // [gh*gw*dim] device, raw (not normed), registers stripped
+    /// `1 x dim` device image, L2-normed — the headline output. An `Image` rather than a
+    /// bare `CudaSlice` so the buffer carries its own shape and gets kornia's H2D/D2H and
+    /// `as_cudaslice` for free, matching how `vrt-depth-anything`'s `DepthResult` holds a
+    /// `DepthImage`.
+    descriptor: Image<f32, 1>,
+    /// `(gh*gw) x dim` device image — one row per patch, raw (not normed), registers
+    /// stripped. `None` when the engine exposes no token output.
+    patches: Option<Image<f32, 1>>,
     stream: Arc<CudaStream>,
     dim: usize,
     gh: usize,
@@ -275,20 +281,27 @@ impl DinoV3Result {
     /// GPU-resident L2-normed global descriptor `[dim]`. Cosine-ready: dot it against
     /// another unit descriptor. Valid after the caller's stream sync.
     pub fn descriptor_slice(&self) -> &CudaSlice<f32> {
-        &self.descriptor
+        self.descriptor
+            .as_cudaslice()
+            .expect("descriptor is device-resident (zeros_cuda)")
     }
 
     /// GPU-resident dense patch tokens `[gh*gw, dim]`, row-major, **registers stripped**
     /// — `None` when the engine does not expose the token output. Raw (not normalized);
     /// normalize downstream if you need cosine over patches. Valid after the sync.
     pub fn patch_tokens_slice(&self) -> Option<&CudaSlice<f32>> {
-        self.patches.as_ref()
+        Some(
+            self.patches
+                .as_ref()?
+                .as_cudaslice()
+                .expect("patch tokens are device-resident (zeros_cuda)"),
+        )
     }
 
     /// Copy the global descriptor to host. Call **after** the stream sync that follows
     /// [`DinoV3::submit`].
     pub fn descriptor_host(&self) -> Result<Vec<f32>, DinoError> {
-        Ok(self.stream.clone_dtoh(&self.descriptor)?)
+        Ok(self.descriptor.to_host_image(&self.stream)?.into_vec())
     }
 
     /// Copy the patch tokens to host, one `dim`-vector per patch in row-major grid order.
@@ -296,9 +309,13 @@ impl DinoV3Result {
     pub fn patch_tokens_host(&self) -> Option<Result<Vec<Vec<f32>>, DinoError>> {
         let p = self.patches.as_ref()?;
         Some(
-            self.stream
-                .clone_dtoh(p)
-                .map(|flat| flat.chunks_exact(self.dim).map(<[f32]>::to_vec).collect())
+            p.to_host_image(&self.stream)
+                .map(|h| {
+                    h.into_vec()
+                        .chunks_exact(self.dim)
+                        .map(<[f32]>::to_vec)
+                        .collect()
+                })
                 .map_err(DinoError::from),
         )
     }
@@ -440,15 +457,25 @@ impl DinoV3 {
 
     /// Allocate a reusable output for this extractor.
     pub fn alloc_result(&self) -> Result<DinoV3Result, DinoError> {
+        // `width = dim`, so each row is one descriptor / one patch token.
         let patches = match self.tok_name {
-            Some(_) => Some(
-                self.stream
-                    .alloc_zeros::<f32>(self.gh * self.gw * self.dim)?,
-            ),
+            Some(_) => Some(Image::<f32, 1>::zeros_cuda(
+                ImageSize {
+                    width: self.dim,
+                    height: self.gh * self.gw,
+                },
+                &self.stream,
+            )?),
             None => None,
         };
         Ok(DinoV3Result {
-            descriptor: self.stream.alloc_zeros::<f32>(self.dim)?,
+            descriptor: Image::<f32, 1>::zeros_cuda(
+                ImageSize {
+                    width: self.dim,
+                    height: 1,
+                },
+                &self.stream,
+            )?,
             patches,
             stream: self.stream.clone(),
             dim: self.dim,
@@ -485,7 +512,7 @@ impl DinoV3 {
             .get(&self.desc_name)
             .ok_or_else(|| DinoError::MissingOutput(self.desc_name.clone()))?
             .f32_ptr()? as usize as CUdeviceptr;
-        let dst_raw = out.descriptor.device_ptr(self.stream.as_ref()).0;
+        let dst_raw = out.descriptor_slice().device_ptr(self.stream.as_ref()).0;
         let (one, dimi) = (1i32, self.dim as i32);
         self.norm_k
             .launch_builder(&self.stream)
@@ -504,7 +531,11 @@ impl DinoV3 {
                 .f32_ptr()? as usize as CUdeviceptr;
             let src = base + (self.prefix * self.dim * std::mem::size_of::<f32>()) as CUdeviceptr;
             let n = self.gh * self.gw * self.dim;
-            let tok_dst = dst.device_ptr(self.stream.as_ref()).0;
+            let tok_dst = dst
+                .as_cudaslice()
+                .expect("patch tokens are device-resident (zeros_cuda)")
+                .device_ptr(self.stream.as_ref())
+                .0;
             let ni = n as i32;
             self.copy_k
                 .launch_builder(&self.stream)
