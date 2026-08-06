@@ -9,9 +9,15 @@
 //! 128-D descriptors instead of 64-D.
 //!
 //! Everything stays on the **GPU** and the pipeline is fully **async / caller-owned**
-//! (VPI-style), mirroring the sibling crates: `submit` enqueues resize → TRT → copies
-//! into the caller-owned [`RaCoAlikedResult`] with **no sync and no host copy**; the
-//! caller syncs the shared stream once, then pulls what it needs.
+//! (VPI-style), mirroring the sibling crates: `submit` enqueues resize → TRT with **no
+//! sync and no host copy**; the caller syncs the shared stream once, then pulls what it
+//! needs.
+//!
+//! There is no copy-out step. `submit` binds the [`RaCoAlikedResult`]'s buffers as the
+//! engine's output tensors, so TensorRT writes the keypoints and descriptors directly
+//! where the caller wants them. That is also what makes several results safe to hold at
+//! once — extract two frames, then match them — without any of them aliasing memory the
+//! next `submit` would overwrite.
 //!
 //! # Engine I/O
 //!
@@ -56,12 +62,10 @@
 
 use std::sync::Arc;
 
-use cudarc::driver::sys::CUdeviceptr;
 use cudarc::driver::{CudaSlice, CudaStream, DevicePtr};
 use kornia_image::Image;
 use kornia_imgproc::preprocess::Preprocessor;
-use kornia_tensor::{zeros_cuda, CudaKernel, Tensor};
-use vrt::cuda::cfg_1d;
+use kornia_tensor::{zeros_cuda, Tensor};
 use vrt::{BoxError, Engine, ModelSession};
 
 /// ALIKED descriptor dimensionality. Fixed by the `aliked-n16` weights the export
@@ -94,16 +98,26 @@ pub enum RaCoAlikedError {
     InputTooSmall(usize, usize),
     #[error("result was allocated for K={0} but the engine emits K={1}")]
     CapacityMismatch(usize, usize),
+    /// The engine refused this frame's model dimensions.
+    ///
+    /// Almost always means the frame's floor-of-32 size falls outside the min/max of
+    /// the shape profile the engine was built with. TensorRT's own message for this is
+    /// frequently empty, so the dimensions are carried here — without them the failure
+    /// surfaces as a bare `Trt("")`, which tells the caller nothing.
+    #[error(
+        "engine rejected model input {mw}x{mh} (from source {sw}x{sh}) — most likely \
+         outside the min/max of the engine's shape profile; rebuild the engine to cover \
+         this resolution, or resize the frame first"
+    )]
+    ShapeRejected {
+        sw: usize,
+        sh: usize,
+        mw: usize,
+        mh: usize,
+        #[source]
+        source: vrt::TrtError,
+    },
 }
-
-// TRT output views alias session memory that the next `run` reuses, so a result that
-// must outlive the next frame needs a copy into caller-owned buffers.
-const COPY_SRC: &str = r#"
-extern "C" __global__ void raco_copy(const float* __restrict__ src, int n, float* __restrict__ dst) {
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i < n) dst[i] = src[i];
-}
-"#;
 
 /// Caller-owned extraction output (VPI-style): GPU-resident keypoints and descriptors,
 /// filled async by [`RaCoAliked::submit`]. Allocate once with
@@ -190,7 +204,6 @@ pub struct RaCoAliked {
     /// Model dims `(mh, mw)` the input is currently sized for.
     cur: (usize, usize),
     k: usize,
-    copy_k: CudaKernel,
 }
 
 impl RaCoAliked {
@@ -244,7 +257,6 @@ impl RaCoAliked {
         // Stretch + /255 only — the ImageNet normalisation is baked into the graph.
         let preproc = Preprocessor::stretch(stream.clone())?;
         let input = zeros_cuda::<f32, 4>([1, 3, SEED_DIM, SEED_DIM], &stream)?;
-        let copy_k = CudaKernel::compile(stream.context(), COPY_SRC, "raco_copy")?;
         let model = ModelSession::new(engine, Arc::clone(&stream))?;
 
         Ok(Self {
@@ -254,7 +266,6 @@ impl RaCoAliked {
             input,
             cur: (SEED_DIM, SEED_DIM),
             k,
-            copy_k,
         })
     }
 
@@ -355,28 +366,93 @@ impl RaCoAliked {
             self.cur = (mh, mw);
         }
 
-        self.preproc.run(img, &mut self.input)?;
-        let tmap = self.model.run(&self.input)?;
-
+        // Point TensorRT straight at this result's buffers, so inference writes where
+        // the caller already wants the data. Rebinding per submit is what lets several
+        // results be outstanding at once (extract left, extract right, then match)
+        // without any of them aliasing session memory.
+        //
+        // SAFETY: the buffers belong to `out`, which the caller holds across the stream
+        // sync that completes this work; each name is bound to a distinct allocation.
         for (name, dst, n) in [
             ("keypoints", &out.kpts, self.k * 2),
             ("normalized_keypoints", &out.norm_kpts, self.k * 2),
             ("descriptors", &out.descs, self.k * DESC_DIM),
         ] {
-            let src = tmap
-                .get(name)
-                .ok_or(RaCoAlikedError::MissingOutput(name))?
-                .f32_ptr()? as usize as CUdeviceptr;
-            let dst_raw = dst.device_ptr(self.stream.as_ref()).0;
-            self.copy_k
-                .launch_builder(&self.stream)
-                .arg(&src)
-                .arg(&(n as i32))
-                .arg(&dst_raw)
-                .launch_cfg(cfg_1d(n, 256))?;
+            let ptr = dst.device_ptr(self.stream.as_ref()).0;
+            unsafe {
+                self.model
+                    .bind_output(name, ptr, n * std::mem::size_of::<f32>())?
+            };
         }
+
+        self.preproc.run(img, &mut self.input)?;
+        // Attach the dimensions on failure: the usual cause is a frame outside the
+        // engine's shape profile, and TensorRT reports that with an empty message.
+        self.model
+            .run(&self.input)
+            .map_err(|source| RaCoAlikedError::ShapeRejected {
+                sw,
+                sh,
+                mw,
+                mh,
+                source,
+            })?;
 
         out.scale = (rw, rh);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A frame outside the engine's shape profile must say so, with the dimensions.
+    ///
+    /// TensorRT reports this failure with an empty message, so before the dimensions
+    /// were attached the whole thing surfaced as `Trt(Trt(""))` — the most likely user
+    /// mistake producing the least actionable error in the crate. Both formattings are
+    /// pinned: `Display` carries the guidance, `Debug` carries the numbers (which is
+    /// what `fn main() -> Result<_, _>` actually prints).
+    #[test]
+    fn shape_rejection_reports_the_dimensions_and_the_likely_cause() {
+        let e = RaCoAlikedError::ShapeRejected {
+            sw: 700,
+            sh: 455,
+            mw: 672,
+            mh: 448,
+            source: vrt::TrtError::Trt(String::new()),
+        };
+
+        let shown = e.to_string();
+        assert!(shown.contains("672x448"), "model dims missing: {shown}");
+        assert!(shown.contains("700x455"), "source dims missing: {shown}");
+        assert!(shown.contains("shape profile"), "no cause hinted: {shown}");
+
+        let debugged = format!("{e:?}");
+        assert!(debugged.contains("672"), "Debug drops model dims: {debugged}");
+        assert!(debugged.contains("700"), "Debug drops source dims: {debugged}");
+    }
+
+    /// The floor-of-32 rescale is what maps keypoints back to source pixels, so an
+    /// error here silently shifts every coordinate. Pinned against hand-worked values.
+    #[test]
+    fn floor32_model_dims_and_rescale_ratios() {
+        for (sw, sh, mw, mh) in [(640, 640, 640, 640), (633, 321, 608, 320), (700, 455, 672, 448)] {
+            assert_eq!(((sw / DIM_DIVISOR) * DIM_DIVISOR, (sh / DIM_DIVISOR) * DIM_DIVISOR), (mw, mh));
+            let (rw, rh) = (sw as f32 / mw as f32, sh as f32 / mh as f32);
+            assert!(rw >= 1.0 && rh >= 1.0, "flooring must never upscale: {rw} {rh}");
+            // A keypoint at the model's far edge must land at the source's far edge.
+            assert!((mw as f32 * rw - sw as f32).abs() < 1e-3);
+            assert!((mh as f32 * rh - sh as f32).abs() < 1e-3);
+        }
+    }
+
+    /// Anything under one 32px cell in either axis is rejected before touching the GPU.
+    #[test]
+    fn inputs_below_one_cell_are_rejected() {
+        for (w, h) in [(31, 200), (200, 31), (0, 0)] {
+            assert!((w / DIM_DIVISOR) * DIM_DIVISOR == 0 || (h / DIM_DIVISOR) * DIM_DIVISOR == 0);
+        }
     }
 }

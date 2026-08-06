@@ -78,6 +78,30 @@ impl ModelSession {
         }
     }
 
+    /// Have TensorRT write output `name` straight into a caller-owned device buffer,
+    /// so a result that must outlive the next `run` needs no copy out of session memory.
+    ///
+    /// See [`Session::bind_output`](crate::Session::bind_output) for the full contract.
+    /// Re-bind before each run when the destination changes (e.g. alternating result
+    /// buffers); clear with [`unbind_output`](Self::unbind_output).
+    ///
+    /// # Safety
+    /// `ptr` must be a device allocation of at least `bytes` that stays alive, unmoved,
+    /// and unaliased by another binding until the caller's next stream synchronize.
+    pub unsafe fn bind_output(&mut self, name: &str, ptr: u64, bytes: usize) -> Result<()> {
+        unsafe { self.session.bind_output(name, ptr, bytes) }
+    }
+
+    /// Return output `name` to the session-owned buffer.
+    pub fn unbind_output(&mut self, name: &str) {
+        self.session.unbind_output(name);
+    }
+
+    /// Drop every output binding.
+    pub fn unbind_all_outputs(&mut self) {
+        self.session.unbind_all_outputs();
+    }
+
     /// Run inference binding each named device input → device outputs.
     ///
     /// Leaves outputs in GPU memory; the caller (the pipeline) syncs the stream
