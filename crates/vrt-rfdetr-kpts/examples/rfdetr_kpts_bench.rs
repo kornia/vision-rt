@@ -21,7 +21,7 @@ fn main() -> Result<(), vrt::BoxError> {
 
     let stream = vrt::Stream::new_standalone()?.cuda_stream().clone();
     let profile = vrt_hub::EngineProfile {
-        input: None,
+        inputs: vec![],
         fp16: true,
         bf16: false,
         workspace_mb: 2048,

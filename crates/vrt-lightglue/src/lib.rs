@@ -236,6 +236,64 @@ impl LightGlue {
         Self::new(Engine::load(engine_path)?, stream)
     }
 
+    /// The engine build profile — both inputs are dynamic in the leading (pair) dim,
+    /// fp16. `K` must match the extractor's, so it is a parameter rather than a
+    /// constant: the k512…k3584 assets each bake in their own.
+    ///
+    /// This is the workspace's only multi-input shape profile, so it only builds
+    /// through vrt-hub's default trtexec path — the in-process `builder` feature binds
+    /// a single profile and will refuse it.
+    #[cfg(any(feature = "hub", feature = "builder"))]
+    pub fn engine_profile(k: usize) -> vrt_hub::EngineProfile {
+        let (k, d) = (k as i64, DESC_DIM as i64);
+        vrt_hub::EngineProfile {
+            inputs: vec![
+                (
+                    "normalized_keypoints".into(),
+                    vec![2, 1, k, 2],
+                    vec![2, 1, k, 2],
+                    vec![2, 1, k, 2],
+                ),
+                (
+                    "descriptors".into(),
+                    vec![2, 1, k, d],
+                    vec![2, 1, k, d],
+                    vec![2, 1, k, d],
+                ),
+            ],
+            fp16: true,
+            bf16: false,
+            workspace_mb: 2048,
+        }
+    }
+
+    /// Build (and cache) an engine from an ONNX file, then construct. `k` must match
+    /// the `K` the ONNX was split at. Requires feature `hub` or `builder`.
+    #[cfg(any(feature = "hub", feature = "builder"))]
+    pub fn from_onnx(
+        onnx_path: impl AsRef<std::path::Path>,
+        stream: Arc<CudaStream>,
+        k: usize,
+    ) -> Result<Self, BoxError> {
+        let model_path = onnx_path
+            .as_ref()
+            .to_str()
+            .ok_or("lightglue: onnx path is not valid UTF-8")?;
+        let engine_path = vrt_hub::EngineCache::default().resolve(
+            "lightglue-matcher",
+            model_path,
+            &Self::engine_profile(k),
+        )?;
+        Self::from_engine_file(engine_path, stream)
+    }
+
+    /// Pull from Hugging Face and construct. Requires feature `hub`.
+    #[cfg(feature = "hub")]
+    pub fn from_hub(stream: Arc<CudaStream>, k: usize) -> Result<Self, BoxError> {
+        let engine = vrt_hub::resolve_engine("lightglue-matcher", &Self::engine_profile(k))?;
+        Self::from_engine_file(engine, stream)
+    }
+
     /// Keypoints per image the engine was built for.
     pub fn num_keypoints(&self) -> usize {
         self.k

@@ -280,12 +280,12 @@ impl RaCoAliked {
     #[cfg(any(feature = "hub", feature = "builder"))]
     fn engine_profile() -> vrt_hub::EngineProfile {
         vrt_hub::EngineProfile {
-            input: Some((
+            inputs: vec![(
                 "images".into(),
                 vec![1, 3, 256, 256],
                 vec![2, 3, 512, 512],
                 vec![2, 3, 640, 640],
-            )),
+            )],
             fp16: true,
             bf16: false,
             workspace_mb: 2048,

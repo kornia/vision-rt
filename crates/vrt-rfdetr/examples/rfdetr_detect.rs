@@ -32,7 +32,7 @@ fn main() -> Result<(), vrt::BoxError> {
     } else {
         // .onnx → on-device engine cache (static shapes); .engine → used directly.
         let profile = vrt_hub::EngineProfile {
-            input: None,
+            inputs: vec![],
             fp16: true,
             bf16: false,
             workspace_mb: 2048,

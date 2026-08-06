@@ -30,12 +30,12 @@ fn main() -> Result<(), vrt::BoxError> {
     // .onnx → on-device engine cache (built once); .engine → used directly.
     // H and W must be multiples of 32 (RaCo's input_dim_divisor).
     let profile = vrt_hub::EngineProfile {
-        input: Some((
+        inputs: vec![(
             "images".into(),
             vec![1, 3, 256, 256],
             vec![1, 3, 512, 512],
             vec![1, 3, 768, 768],
-        )),
+        )],
         fp16: true,
         bf16: false,
         workspace_mb: 2048,
