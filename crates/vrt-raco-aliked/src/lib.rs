@@ -94,10 +94,43 @@ pub enum RaCoAlikedError {
     InputTooSmall(usize, usize),
     #[error("result was allocated for K={0} but the engine emits K={1}")]
     CapacityMismatch(usize, usize),
+    /// The engine refused this frame's model dimensions.
+    ///
+    /// Almost always means the frame's floor-of-32 size falls outside the min/max of
+    /// the shape profile the engine was built with. TensorRT's own message for this is
+    /// frequently empty, so the dimensions are carried here — without them the failure
+    /// surfaces as a bare `Trt("")`, which tells the caller nothing.
+    #[error(
+        "engine rejected model input {mw}x{mh} (from source {sw}x{sh}) — most likely \
+         outside the min/max of the engine's shape profile; rebuild the engine to cover \
+         this resolution, or resize the frame first"
+    )]
+    ShapeRejected {
+        sw: usize,
+        sh: usize,
+        mw: usize,
+        mh: usize,
+        #[source]
+        source: vrt::TrtError,
+    },
 }
 
-// TRT output views alias session memory that the next `run` reuses, so a result that
-// must outlive the next frame needs a copy into caller-owned buffers.
+// Why this exists: `ModelSession` owns its output buffers and REUSES them on every
+// `run`, so a `RaCoAlikedResult` that must outlive the next `submit` needs its own copy.
+// That is not a hypothetical — matching a pair extracts both images before matching:
+//
+//     raco.submit(&left,  &mut l)?;
+//     raco.submit(&right, &mut r)?;   // would overwrite l's descriptors in place
+//     glue.submit_match(&l, &r, ...)?;
+//
+// Without the copy `l` and `r` would alias one buffer and both hold the RIGHT image's
+// descriptors — silently, still producing matches, just wrong ones. The copy costs
+// K*(2+2+128) floats and three launches per frame, tens of microseconds against ~55 ms
+// of inference.
+//
+// It is a consequence of vrt's design rather than TensorRT's: `setTensorAddress` binds
+// output tensors too, so if `Session` let a caller supply its own output buffers, TRT
+// would write straight into the result and this kernel would go away.
 const COPY_SRC: &str = r#"
 extern "C" __global__ void raco_copy(const float* __restrict__ src, int n, float* __restrict__ dst) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -356,7 +389,18 @@ impl RaCoAliked {
         }
 
         self.preproc.run(img, &mut self.input)?;
-        let tmap = self.model.run(&self.input)?;
+        // Attach the dimensions on failure: the usual cause is a frame outside the
+        // engine's shape profile, and TensorRT reports that with an empty message.
+        let tmap = self
+            .model
+            .run(&self.input)
+            .map_err(|source| RaCoAlikedError::ShapeRejected {
+                sw,
+                sh,
+                mw,
+                mh,
+                source,
+            })?;
 
         for (name, dst, n) in [
             ("keypoints", &out.kpts, self.k * 2),
@@ -378,5 +422,59 @@ impl RaCoAliked {
 
         out.scale = (rw, rh);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A frame outside the engine's shape profile must say so, with the dimensions.
+    ///
+    /// TensorRT reports this failure with an empty message, so before the dimensions
+    /// were attached the whole thing surfaced as `Trt(Trt(""))` — the most likely user
+    /// mistake producing the least actionable error in the crate. Both formattings are
+    /// pinned: `Display` carries the guidance, `Debug` carries the numbers (which is
+    /// what `fn main() -> Result<_, _>` actually prints).
+    #[test]
+    fn shape_rejection_reports_the_dimensions_and_the_likely_cause() {
+        let e = RaCoAlikedError::ShapeRejected {
+            sw: 700,
+            sh: 455,
+            mw: 672,
+            mh: 448,
+            source: vrt::TrtError::Trt(String::new()),
+        };
+
+        let shown = e.to_string();
+        assert!(shown.contains("672x448"), "model dims missing: {shown}");
+        assert!(shown.contains("700x455"), "source dims missing: {shown}");
+        assert!(shown.contains("shape profile"), "no cause hinted: {shown}");
+
+        let debugged = format!("{e:?}");
+        assert!(debugged.contains("672"), "Debug drops model dims: {debugged}");
+        assert!(debugged.contains("700"), "Debug drops source dims: {debugged}");
+    }
+
+    /// The floor-of-32 rescale is what maps keypoints back to source pixels, so an
+    /// error here silently shifts every coordinate. Pinned against hand-worked values.
+    #[test]
+    fn floor32_model_dims_and_rescale_ratios() {
+        for (sw, sh, mw, mh) in [(640, 640, 640, 640), (633, 321, 608, 320), (700, 455, 672, 448)] {
+            assert_eq!(((sw / DIM_DIVISOR) * DIM_DIVISOR, (sh / DIM_DIVISOR) * DIM_DIVISOR), (mw, mh));
+            let (rw, rh) = (sw as f32 / mw as f32, sh as f32 / mh as f32);
+            assert!(rw >= 1.0 && rh >= 1.0, "flooring must never upscale: {rw} {rh}");
+            // A keypoint at the model's far edge must land at the source's far edge.
+            assert!((mw as f32 * rw - sw as f32).abs() < 1e-3);
+            assert!((mh as f32 * rh - sh as f32).abs() < 1e-3);
+        }
+    }
+
+    /// Anything under one 32px cell in either axis is rejected before touching the GPU.
+    #[test]
+    fn inputs_below_one_cell_are_rejected() {
+        for (w, h) in [(31, 200), (200, 31), (0, 0)] {
+            assert!((w / DIM_DIVISOR) * DIM_DIVISOR == 0 || (h / DIM_DIVISOR) * DIM_DIVISOR == 0);
+        }
     }
 }
