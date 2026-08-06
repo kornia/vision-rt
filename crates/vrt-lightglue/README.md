@@ -73,6 +73,65 @@ crates/vrt-raco-aliked/scripts/build_engine.sh \
 Extractor and matcher must be split from the same `kN` asset — the `K` is baked into
 both, and `LightGlue::new` rejects a mismatch.
 
+## Benchmarks — `examples/bench_vs_xfeat`
+
+Same pair, same box, both engines built min=opt=max at 640×640 so neither runs off its
+optimum profile. Jetson Orin Nano at **MAXN_SUPER**, TRT 10.3.0.30, fp16, K=1024,
+XFeat `top_k=1024`, 30 iterations:
+
+| | extract ×2 | match | E2E median | E2E min |
+|---|---|---|---|---|
+| **RaCo-ALIKED + LightGlue+** | 110.5 ms | 22.4 ms | **133.0 ms** | 131.8 ms |
+| XFeat + mutual-NN | 6.8 ms | 0.9 ms | **7.7 ms** | 7.7 ms |
+
+**17.3× slower**, and that ratio holds on every input.
+
+### Match quality
+
+Scored against a **ground-truth affine** — a match counts as an inlier only if it lands
+within 2 px of where the transform says it should, so this measures correctness rather
+than self-consistency:
+
+| rotation | RaCo-ALIKED + LightGlue+ | XFeat + mutual-NN |
+|---|---|---|
+| 0° | 708 matches, **100.0%** | 647 matches, 98.0% |
+| 15° | 764 matches, **99.2%** | 516 matches, 59.3% |
+| 30° | 688 matches, **98.3%** | 444 matches, 49.1% |
+| 45° | 690 matches, **98.0%** | 261 matches, 28.7% |
+| 90° | 872 matches, **97.8%** | 62 matches, **0.0%** |
+
+So the trade is *not* "17× slower for a marginal gain". On pure translation XFeat is
+nearly as good and vastly cheaper — **choosing this pipeline there would be the wrong
+call**. Under rotation XFeat degrades and then fails outright, while this holds ~98%
+inliers throughout. That is exactly the axis RaCo claims, and the only reason to pay.
+
+```bash
+cargo run --release -p vrt-lightglue --example bench_vs_xfeat -- \
+    <raco_extractor.engine> <lightglue.engine> <xfeat_backbone.engine> \
+    left.png right.png 30 [gt_affine.txt]
+```
+
+Without a ground-truth affine it falls back to consistency against the pair's own median
+displacement — exact for pure translation, a proxy otherwise, and it only rewards a
+matcher for agreeing with itself. Read it alongside the raw match count.
+
+### Two caveats on the numbers
+
+**Contention, not thermals.** Latency is data-independent, as CNN cost must be (extract
+110.5 / 110.5 / 110.6 ms across three different inputs). A first pass showed extract
+swinging 110→235 ms and XFeat 6.8→16.7 ms; that was unrelated GPU work on the box (load
+average 4.2), *not* throttling — the SoC sat at 60 °C with no throttle asserted. The
+example reports E2E min alongside median so contention is visible rather than silently
+inflating the result. Measure on an idle machine.
+
+**Not comparable to the upstream blog post.** [The
+write-up](https://fabio-sim.github.io/blog/gpt-5-6-sol-discovers-tensorrt-optimizations-raco-aliked-lightglue/)
+reports a *speedup ratio* (2.67× median) against an fp16 `torch.compile` baseline on an
+RTX 4080 Laptop; these are absolute milliseconds on an Orin Nano. Its "39.5 → 4.1 ms" is
+the RaCo **detector alone** at 1280²/3584 keypoints, whereas the 110.5 ms here covers
+RaCo **plus** ALIKED **plus** preprocessing for **two** images at 640²/1024 keypoints.
+Reproducing that ratio would need a PyTorch baseline of the same graph.
+
 ## Model credit and licences
 
 This crate ships no weights. LightGlue is Apache-2.0

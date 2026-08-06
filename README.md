@@ -87,6 +87,23 @@ camera it held **~14.8 fps — sensor-capped** at 15 fps (RTSP receive ~36 ms/fr
 **~2× GPU headroom** for a faster sensor, a second camera, or another model. Spend less
 GPU by running depth at a lower cadence and letting the tracker **coast** between updates.
 
+### Feature extraction + matching (640², K=1024)
+
+Two pipelines for the same job — keypoints, descriptors, and correspondences between a
+pair of frames. Both engines built min=opt=max at the benchmark resolution so neither
+runs off its optimum profile (`vrt-lightglue`, `examples/bench_vs_xfeat`, 30 iters):
+
+| Pipeline | extract ×2 | match | End-to-end | Inliers @0° / 45° / 90° rotation |
+|---|---:|---:|---:|---|
+| `vrt-xfeat` + mutual-NN | 6.8 ms | 0.9 ms | **7.7 ms** | 98.0% / 28.7% / **0.0%** |
+| `vrt-raco-aliked` + `vrt-lightglue` | 110.5 ms | 22.4 ms | **133.0 ms** | **100.0% / 98.0% / 97.8%** |
+
+**XFeat is 17.3× faster and, on a pure-translation pair, essentially as accurate** — it
+is the right default. RaCo-ALIKED + LightGlue+ buys rotation robustness: XFeat degrades
+past ~15° and fails completely at 90°, where RaCo still returns 872 matches at 97.8%
+inliers. Inlier % is measured against a known ground-truth affine (within 2 px), not
+self-consistency.
+
 ## Quickstart
 
 **Requirements** — NVIDIA Jetson Orin (aarch64, SM87; Nano / NX / AGX), JetPack 6.x
