@@ -488,15 +488,34 @@ impl EngineProfile {
     /// cache key changes when the profile does (different precision or shape
     /// profile must NOT collide with a previously-built engine).
     fn cache_tag(&self) -> String {
-        let mut s = format!(
-            "fp16={};bf16={};ws={};",
-            self.fp16, self.bf16, self.workspace_mb
-        );
-        for (input, min, opt, max) in &self.inputs {
-            s.push_str(&format!("in={input};min={min:?};opt={opt:?};max={max:?};"));
-        }
         let mut h = Sha256::new();
-        h.update(s.as_bytes());
+        // Scalars keep their original textual form so that a static-shape profile
+        // (`inputs: vec![]`) still hashes exactly as it did when this field was an
+        // `Option`, and existing cached engines for those models stay valid.
+        h.update(
+            format!(
+                "fp16={};bf16={};ws={};",
+                self.fp16, self.bf16, self.workspace_mb
+            )
+            .as_bytes(),
+        );
+        // Every variable-length field is length-prefixed, making each entry
+        // self-delimiting. Concatenating them into one `;`-delimited string instead
+        // would let a tensor name containing the delimiter forge an entry boundary —
+        // an input named `x;min=[1];opt=[1];max=[1];in=y` would hash identically to two
+        // separate inputs `x` and `y`, and the cache would serve the wrong engine with
+        // no error. Unreachable with torch-exported names, but the failure is silent,
+        // so it is not worth relying on a naming convention we do not enforce.
+        for (input, min, opt, max) in &self.inputs {
+            h.update(format!("{}:", input.len()).as_bytes());
+            h.update(input.as_bytes());
+            for dims in [min, opt, max] {
+                h.update(format!("{}:", dims.len()).as_bytes());
+                for d in dims {
+                    h.update(d.to_le_bytes());
+                }
+            }
+        }
         format!("{:x}", h.finalize())[..8].to_string()
     }
 
@@ -796,6 +815,57 @@ mod tests {
         assert_ne!(base.cache_tag(), diff_bf16.cache_tag());
         // Deterministic.
         assert_eq!(base.cache_tag(), EngineProfile::default().cache_tag());
+    }
+
+    /// Two *different* input lists must never hash alike, or the cache silently serves
+    /// an engine built for other shapes — a wrong-answer failure, not a crash.
+    ///
+    /// The dangerous case is delimiter forgery. Concatenating entries into one
+    /// `;`-delimited string made an input named `x;min=[1];opt=[1];max=[1];in=y`
+    /// indistinguishable from two separate inputs `x` and `y`. Length-prefixing every
+    /// variable-length field closes it.
+    #[test]
+    fn cache_tag_cannot_be_forged_by_a_delimiter_in_a_tensor_name() {
+        let one = |name: &str| EngineProfile {
+            inputs: vec![(name.into(), vec![1], vec![1], vec![1])],
+            ..EngineProfile::default()
+        };
+        let forged = one("x;min=[1];opt=[1];max=[1];in=y");
+        let honest = EngineProfile {
+            inputs: vec![
+                ("x".into(), vec![1], vec![1], vec![1]),
+                ("y".into(), vec![1], vec![1], vec![1]),
+            ],
+            ..EngineProfile::default()
+        };
+        assert_ne!(forged.cache_tag(), honest.cache_tag());
+
+        // Adjacent fields must not run together either: a name absorbing the next
+        // field's digits, or dims of different lengths concatenating to the same bytes.
+        assert_ne!(one("ab").cache_tag(), one("a").cache_tag());
+        let split_dims = EngineProfile {
+            inputs: vec![("x".into(), vec![1, 1], vec![1], vec![1])],
+            ..EngineProfile::default()
+        };
+        assert_ne!(one("x").cache_tag(), split_dims.cache_tag());
+
+        // Order is part of the identity (a reordered profile is a different build).
+        let swapped = EngineProfile {
+            inputs: honest.inputs.iter().rev().cloned().collect(),
+            ..EngineProfile::default()
+        };
+        assert_ne!(honest.cache_tag(), swapped.cache_tag());
+    }
+
+    /// A static-shape profile must hash exactly as it did before `input: Option<_>`
+    /// became `inputs: Vec<_>`, so upgrading does not invalidate every cached engine
+    /// on a box where each rebuild costs minutes.
+    #[test]
+    fn static_profile_cache_tag_is_unchanged_by_the_vec_migration() {
+        let mut h = Sha256::new();
+        h.update(b"fp16=true;bf16=false;ws=2048;"); // the pre-migration string for `None`
+        let legacy = format!("{:x}", h.finalize())[..8].to_string();
+        assert_eq!(EngineProfile::default().cache_tag(), legacy);
     }
 
     /// A prebuilt is only served when its precision matches the request. Without this
