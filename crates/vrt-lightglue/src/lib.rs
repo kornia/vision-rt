@@ -8,7 +8,9 @@
 //! against descriptors stored in a map or relocalization database.
 //!
 //! Same async contract as the rest of vrt: `submit_match` enqueues pack → TRT with
-//! **no sync**; the caller syncs the shared stream once, then reads.
+//! **no sync**; the caller syncs the shared stream once, then reads. The engine writes
+//! its correspondences straight into the caller's [`LightGlueResult`] — there is no
+//! copy-out step.
 //!
 //! # Engine I/O
 //!
@@ -66,30 +68,19 @@ pub enum LightGlueError {
     Driver(#[from] cudarc::driver::DriverError),
     #[error("kornia CUDA: {0}")]
     Cuda(#[from] kornia_tensor::CudaError),
-    #[error("engine output '{0}' missing")]
-    MissingOutput(&'static str),
     #[error("engine expects K={0} keypoints but the {1} result holds K={2}")]
     KeypointMismatch(usize, &'static str, usize),
 }
 
-// Pack one image's keypoints/descriptors into its slot of the interleaved pair buffer,
-// and copy the TRT outputs into caller-owned memory (output views alias session memory
-// that the next run reuses).
+// Pack one image's keypoints/descriptors into its slot of the interleaved pair buffer.
+// This is an INPUT layout step, not a copy-out: the graph wants both images contiguous
+// in one tensor. The outputs need no kernel — they are bound straight to the caller's
+// result buffers (see `Session::bind_output`).
 const KERNEL_SRC: &str = r#"
 extern "C" __global__ void lg_pack(const float* __restrict__ src, int n,
                                    float* __restrict__ dst, int dst_off) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < n) dst[dst_off + i] = src[i];
-}
-extern "C" __global__ void lg_copy_i32(const int* __restrict__ src, int n,
-                                       int* __restrict__ dst) {
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i < n) dst[i] = src[i];
-}
-extern "C" __global__ void lg_copy_f32(const float* __restrict__ src, int n,
-                                       float* __restrict__ dst) {
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i < n) dst[i] = src[i];
 }
 "#;
 
@@ -160,8 +151,8 @@ impl LightGlueResult {
     }
 }
 
-/// LightGlue+ matcher (payload): TRT session + interleaved pair buffers + pack/copy
-/// kernels + shared stream. Build once, reuse for every pair.
+/// LightGlue+ matcher (payload): TRT session + interleaved pair buffers + the pack
+/// kernel + shared stream. Build once, reuse for every pair.
 pub struct LightGlue {
     model: ModelSession,
     stream: Arc<CudaStream>,
@@ -170,8 +161,6 @@ pub struct LightGlue {
     descs_in: Tensor<f32, 4>,
     k: usize,
     pack_k: CudaKernel,
-    copy_i32: CudaKernel,
-    copy_f32: CudaKernel,
 }
 
 impl LightGlue {
@@ -212,8 +201,6 @@ impl LightGlue {
         let descs_in = zeros_cuda::<f32, 4>([2, 1, k, DESC_DIM], &stream)?;
         let ctx = stream.context();
         let pack_k = CudaKernel::compile(ctx, KERNEL_SRC, "lg_pack")?;
-        let copy_i32 = CudaKernel::compile(ctx, KERNEL_SRC, "lg_copy_i32")?;
-        let copy_f32 = CudaKernel::compile(ctx, KERNEL_SRC, "lg_copy_f32")?;
         let model = ModelSession::new(engine, Arc::clone(&stream))?;
 
         Ok(Self {
@@ -223,8 +210,6 @@ impl LightGlue {
             descs_in,
             k,
             pack_k,
-            copy_i32,
-            copy_f32,
         })
     }
 
@@ -351,35 +336,23 @@ impl LightGlue {
             )?;
         }
 
-        let tmap = self.model.run_inputs(&[
+        // Let TensorRT write the correspondences straight into the caller's result.
+        //
+        // SAFETY: both buffers belong to `out`, which the caller holds across the stream
+        // sync that completes this work; the two names bind distinct allocations.
+        let m_ptr = out.matches.device_ptr(self.stream.as_ref()).0;
+        let s_ptr = out.scores.device_ptr(self.stream.as_ref()).0;
+        unsafe {
+            self.model
+                .bind_output("matches0", m_ptr, self.k * std::mem::size_of::<i32>())?;
+            self.model
+                .bind_output("mscores0", s_ptr, self.k * std::mem::size_of::<f32>())?;
+        }
+
+        self.model.run_inputs(&[
             ("normalized_keypoints", &self.kpts_in),
             ("descriptors", &self.descs_in),
         ])?;
-
-        let m_src = tmap
-            .get("matches0")
-            .ok_or(LightGlueError::MissingOutput("matches0"))?
-            .i32_ptr()? as usize as CUdeviceptr;
-        let s_src = tmap
-            .get("mscores0")
-            .ok_or(LightGlueError::MissingOutput("mscores0"))?
-            .f32_ptr()? as usize as CUdeviceptr;
-
-        let m_dst = out.matches.device_ptr(self.stream.as_ref()).0;
-        self.copy_i32
-            .launch_builder(&self.stream)
-            .arg(&m_src)
-            .arg(&(self.k as i32))
-            .arg(&m_dst)
-            .launch_cfg(cfg_1d(self.k, 256))?;
-
-        let s_dst = out.scores.device_ptr(self.stream.as_ref()).0;
-        self.copy_f32
-            .launch_builder(&self.stream)
-            .arg(&s_src)
-            .arg(&(self.k as i32))
-            .arg(&s_dst)
-            .launch_cfg(cfg_1d(self.k, 256))?;
 
         Ok(())
     }
