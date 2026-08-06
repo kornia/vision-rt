@@ -92,8 +92,6 @@ pub enum RaCoAlikedError {
     Preproc(#[from] kornia_imgproc::preprocess::PreprocessError),
     #[error(transparent)]
     Image(#[from] kornia_image::ImageError),
-    #[error("engine output '{0}' missing")]
-    MissingOutput(&'static str),
     #[error("input {0}x{1} is smaller than one {DIM_DIVISOR}px cell in some dimension")]
     InputTooSmall(usize, usize),
     #[error("result was allocated for K={0} but the engine emits K={1}")]
