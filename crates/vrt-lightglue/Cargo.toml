@@ -27,6 +27,8 @@ thiserror = "2.0"
 
 [dev-dependencies]
 vrt-hub = { path = "../vrt-hub", features = ["builder"] }
+# examples/bench_vs_xfeat compares against the workspace's other feature extractor.
+vrt-xfeat = { path = "../vrt-xfeat" }
 kornia-image = { workspace = true }
 kornia-io = { workspace = true }
 env_logger = "0.11"
