@@ -226,7 +226,7 @@ impl OsNetReid {
     #[cfg(any(feature = "hub", feature = "builder"))]
     fn engine_profile() -> vrt_hub::EngineProfile {
         vrt_hub::EngineProfile {
-            input: None,
+            inputs: vec![],
             fp16: false,
             bf16: false,
             workspace_mb: 1024,

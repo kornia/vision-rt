@@ -22,8 +22,8 @@
 //!
 //! // Engine: cache hit returns instantly; miss builds on-device (~minutes, once).
 //! let profile = EngineProfile {
-//!     input:  Some(("image".into(),
-//!                   vec![1,3,240,320], vec![1,3,640,640], vec![1,3,1088,1920])),
+//!     inputs: vec![("image".into(),
+//!                   vec![1,3,240,320], vec![1,3,640,640], vec![1,3,1088,1920])],
 //!     fp16: true,
 //!     bf16: false,   // transformers want bf16 instead — see EngineProfile::bf16
 //!     workspace_mb: 2048,
@@ -453,8 +453,12 @@ pub type ShapeProfile = (String, Vec<i64>, Vec<i64>, Vec<i64>);
 
 /// Optimization profile + build options for an engine.
 pub struct EngineProfile {
-    /// Profile for dynamic-shape models; None = static shapes.
-    pub input: Option<ShapeProfile>,
+    /// One profile per dynamic-shape input; empty = static shapes.
+    ///
+    /// Multi-input models (e.g. a matcher taking keypoints *and* descriptors) need a
+    /// profile for each. The trtexec path supports any number; the in-process
+    /// `builder` path is limited to one and errors above that.
+    pub inputs: Vec<ShapeProfile>,
     pub fp16: bool,
     /// Enable BF16 kernels (Ampere+/SM80+, which includes the Orin's SM87).
     ///
@@ -471,7 +475,7 @@ pub struct EngineProfile {
 impl Default for EngineProfile {
     fn default() -> Self {
         Self {
-            input: None,
+            inputs: vec![],
             fp16: true,
             bf16: false,
             workspace_mb: 2048,
@@ -484,15 +488,34 @@ impl EngineProfile {
     /// cache key changes when the profile does (different precision or shape
     /// profile must NOT collide with a previously-built engine).
     fn cache_tag(&self) -> String {
-        let mut s = format!(
-            "fp16={};bf16={};ws={};",
-            self.fp16, self.bf16, self.workspace_mb
-        );
-        if let Some((input, min, opt, max)) = &self.input {
-            s.push_str(&format!("in={input};min={min:?};opt={opt:?};max={max:?}"));
-        }
         let mut h = Sha256::new();
-        h.update(s.as_bytes());
+        // Scalars keep their original textual form so that a static-shape profile
+        // (`inputs: vec![]`) still hashes exactly as it did when this field was an
+        // `Option`, and existing cached engines for those models stay valid.
+        h.update(
+            format!(
+                "fp16={};bf16={};ws={};",
+                self.fp16, self.bf16, self.workspace_mb
+            )
+            .as_bytes(),
+        );
+        // Every variable-length field is length-prefixed, making each entry
+        // self-delimiting. Concatenating them into one `;`-delimited string instead
+        // would let a tensor name containing the delimiter forge an entry boundary —
+        // an input named `x;min=[1];opt=[1];max=[1];in=y` would hash identically to two
+        // separate inputs `x` and `y`, and the cache would serve the wrong engine with
+        // no error. Unreachable with torch-exported names, but the failure is silent,
+        // so it is not worth relying on a naming convention we do not enforce.
+        for (input, min, opt, max) in &self.inputs {
+            h.update(format!("{}:", input.len()).as_bytes());
+            h.update(input.as_bytes());
+            for dims in [min, opt, max] {
+                h.update(format!("{}:", dims.len()).as_bytes());
+                for d in dims {
+                    h.update(d.to_le_bytes());
+                }
+            }
+        }
         format!("{:x}", h.finalize())[..8].to_string()
     }
 
@@ -650,7 +673,16 @@ fn build_engine(onnx: &Path, profile: &EngineProfile) -> Result<Vec<u8>, HubErro
         .fp16(profile.fp16)
         .bf16(profile.bf16)
         .workspace_mb(profile.workspace_mb);
-    if let Some((input, min, opt, max)) = &profile.input {
+    // The C shim binds a single optimization profile, so multi-input models must go
+    // through the trtexec path (which is the default — `builder` is opt-in).
+    if profile.inputs.len() > 1 {
+        return Err(HubError::Build(format!(
+            "the in-process 'builder' path supports one shape profile, got {} — \
+             build this model through the default trtexec path instead",
+            profile.inputs.len()
+        )));
+    }
+    if let Some((input, min, opt, max)) = profile.inputs.first() {
         b = b.shape_profile(input.clone(), min, opt, max);
     }
     Ok(b.build_serialized(&logger)?)
@@ -677,10 +709,20 @@ fn build_engine(onnx: &Path, profile: &EngineProfile) -> Result<Vec<u8>, HubErro
     if profile.bf16 {
         cmd.arg("--bf16");
     }
-    if let Some((input, min, opt, max)) = &profile.input {
-        cmd.arg(format!("--minShapes={input}:{}", dims_x(min)))
-            .arg(format!("--optShapes={input}:{}", dims_x(opt)))
-            .arg(format!("--maxShapes={input}:{}", dims_x(max)));
+    // trtexec takes all inputs in one comma-separated flag per bound:
+    //   --minShapes=images:1x3x256x256,mask:1x1x256x256
+    if !profile.inputs.is_empty() {
+        let join = |pick: fn(&ShapeProfile) -> &Vec<i64>| {
+            profile
+                .inputs
+                .iter()
+                .map(|p| format!("{}:{}", p.0, dims_x(pick(p))))
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+        cmd.arg(format!("--minShapes={}", join(|p| &p.1)))
+            .arg(format!("--optShapes={}", join(|p| &p.2)))
+            .arg(format!("--maxShapes={}", join(|p| &p.3)));
     }
 
     let status = cmd.status()?;
@@ -759,12 +801,12 @@ mod tests {
             ..EngineProfile::default()
         };
         let shaped = EngineProfile {
-            input: Some((
+            inputs: vec![(
                 "x".into(),
                 vec![1, 3, 64, 64],
                 vec![1, 3, 64, 64],
                 vec![1, 3, 64, 64],
-            )),
+            )],
             ..EngineProfile::default()
         };
         assert_ne!(base.cache_tag(), diff_prec.cache_tag());
@@ -773,6 +815,57 @@ mod tests {
         assert_ne!(base.cache_tag(), diff_bf16.cache_tag());
         // Deterministic.
         assert_eq!(base.cache_tag(), EngineProfile::default().cache_tag());
+    }
+
+    /// Two *different* input lists must never hash alike, or the cache silently serves
+    /// an engine built for other shapes — a wrong-answer failure, not a crash.
+    ///
+    /// The dangerous case is delimiter forgery. Concatenating entries into one
+    /// `;`-delimited string made an input named `x;min=[1];opt=[1];max=[1];in=y`
+    /// indistinguishable from two separate inputs `x` and `y`. Length-prefixing every
+    /// variable-length field closes it.
+    #[test]
+    fn cache_tag_cannot_be_forged_by_a_delimiter_in_a_tensor_name() {
+        let one = |name: &str| EngineProfile {
+            inputs: vec![(name.into(), vec![1], vec![1], vec![1])],
+            ..EngineProfile::default()
+        };
+        let forged = one("x;min=[1];opt=[1];max=[1];in=y");
+        let honest = EngineProfile {
+            inputs: vec![
+                ("x".into(), vec![1], vec![1], vec![1]),
+                ("y".into(), vec![1], vec![1], vec![1]),
+            ],
+            ..EngineProfile::default()
+        };
+        assert_ne!(forged.cache_tag(), honest.cache_tag());
+
+        // Adjacent fields must not run together either: a name absorbing the next
+        // field's digits, or dims of different lengths concatenating to the same bytes.
+        assert_ne!(one("ab").cache_tag(), one("a").cache_tag());
+        let split_dims = EngineProfile {
+            inputs: vec![("x".into(), vec![1, 1], vec![1], vec![1])],
+            ..EngineProfile::default()
+        };
+        assert_ne!(one("x").cache_tag(), split_dims.cache_tag());
+
+        // Order is part of the identity (a reordered profile is a different build).
+        let swapped = EngineProfile {
+            inputs: honest.inputs.iter().rev().cloned().collect(),
+            ..EngineProfile::default()
+        };
+        assert_ne!(honest.cache_tag(), swapped.cache_tag());
+    }
+
+    /// A static-shape profile must hash exactly as it did before `input: Option<_>`
+    /// became `inputs: Vec<_>`, so upgrading does not invalidate every cached engine
+    /// on a box where each rebuild costs minutes.
+    #[test]
+    fn static_profile_cache_tag_is_unchanged_by_the_vec_migration() {
+        let mut h = Sha256::new();
+        h.update(b"fp16=true;bf16=false;ws=2048;"); // the pre-migration string for `None`
+        let legacy = format!("{:x}", h.finalize())[..8].to_string();
+        assert_eq!(EngineProfile::default().cache_tag(), legacy);
     }
 
     /// A prebuilt is only served when its precision matches the request. Without this
@@ -911,12 +1004,12 @@ mod integration {
         assert!(onnx.exists(), "test needs the local xfeat ONNX");
 
         let profile = EngineProfile {
-            input: Some((
+            inputs: vec![(
                 "image".into(),
                 vec![1, 3, 240, 320],
                 vec![1, 3, 240, 320],
                 vec![1, 3, 240, 320],
-            )),
+            )],
             fp16: true,
             bf16: false,
             workspace_mb: 1024,
