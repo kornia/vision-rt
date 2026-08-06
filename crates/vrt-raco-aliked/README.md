@@ -65,8 +65,8 @@ crates/vrt-raco-aliked/scripts/build_engine.sh \
 ```
 
 The split needs only `onnx` — no torch, no onnxruntime, no Python 3.12 — so it runs
-on the Jetson's stock `python3`. The matcher half is consumed by the `vrt-lightglue`
-crate, which lands separately.
+on the Jetson's stock `python3`. The matcher half feeds
+[`vrt-lightglue`](../vrt-lightglue).
 
 Verify a split before trusting it (requires `onnxruntime`):
 

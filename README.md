@@ -130,6 +130,7 @@ The 5th arg picks the sink: `serve` / `:PORT` (live stream), `out.png` (one fram
 | `vrt-depth-anything` | Depth Anything V2 **metric depth** + depth-at-mask/box fusion |
 | `vrt-xfeat` | XFeat keypoints + descriptors + GPU mutual-NN matching |
 | `vrt-raco-aliked` | RaCo keypoint detection + ALIKED 128-D descriptors (rotation-robust) |
+| `vrt-lightglue` | LightGlue+ transformer matching over two `vrt-raco-aliked` results |
 | `vrt-track` | Pure-CPU **3D multi-object tracker** (ByteTrack assoc + depth-gated 3D Kalman) |
 | `vrt-viz` | CPU render (masks / boxes / BEV) + **H.264 / WebSocket live view** (WebCodecs) |
 
