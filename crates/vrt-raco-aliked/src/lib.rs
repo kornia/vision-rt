@@ -9,9 +9,15 @@
 //! 128-D descriptors instead of 64-D.
 //!
 //! Everything stays on the **GPU** and the pipeline is fully **async / caller-owned**
-//! (VPI-style), mirroring the sibling crates: `submit` enqueues resize → TRT → copies
-//! into the caller-owned [`RaCoAlikedResult`] with **no sync and no host copy**; the
-//! caller syncs the shared stream once, then pulls what it needs.
+//! (VPI-style), mirroring the sibling crates: `submit` enqueues resize → TRT with **no
+//! sync and no host copy**; the caller syncs the shared stream once, then pulls what it
+//! needs.
+//!
+//! There is no copy-out step. `submit` binds the [`RaCoAlikedResult`]'s buffers as the
+//! engine's output tensors, so TensorRT writes the keypoints and descriptors directly
+//! where the caller wants them. That is also what makes several results safe to hold at
+//! once — extract two frames, then match them — without any of them aliasing memory the
+//! next `submit` would overwrite.
 //!
 //! # Engine I/O
 //!
@@ -56,12 +62,10 @@
 
 use std::sync::Arc;
 
-use cudarc::driver::sys::CUdeviceptr;
 use cudarc::driver::{CudaSlice, CudaStream, DevicePtr};
 use kornia_image::Image;
 use kornia_imgproc::preprocess::Preprocessor;
-use kornia_tensor::{zeros_cuda, CudaKernel, Tensor};
-use vrt::cuda::cfg_1d;
+use kornia_tensor::{zeros_cuda, Tensor};
 use vrt::{BoxError, Engine, ModelSession};
 
 /// ALIKED descriptor dimensionality. Fixed by the `aliked-n16` weights the export
@@ -114,29 +118,6 @@ pub enum RaCoAlikedError {
         source: vrt::TrtError,
     },
 }
-
-// Why this exists: `ModelSession` owns its output buffers and REUSES them on every
-// `run`, so a `RaCoAlikedResult` that must outlive the next `submit` needs its own copy.
-// That is not a hypothetical — matching a pair extracts both images before matching:
-//
-//     raco.submit(&left,  &mut l)?;
-//     raco.submit(&right, &mut r)?;   // would overwrite l's descriptors in place
-//     glue.submit_match(&l, &r, ...)?;
-//
-// Without the copy `l` and `r` would alias one buffer and both hold the RIGHT image's
-// descriptors — silently, still producing matches, just wrong ones. The copy costs
-// K*(2+2+128) floats and three launches per frame, tens of microseconds against ~55 ms
-// of inference.
-//
-// It is a consequence of vrt's design rather than TensorRT's: `setTensorAddress` binds
-// output tensors too, so if `Session` let a caller supply its own output buffers, TRT
-// would write straight into the result and this kernel would go away.
-const COPY_SRC: &str = r#"
-extern "C" __global__ void raco_copy(const float* __restrict__ src, int n, float* __restrict__ dst) {
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i < n) dst[i] = src[i];
-}
-"#;
 
 /// Caller-owned extraction output (VPI-style): GPU-resident keypoints and descriptors,
 /// filled async by [`RaCoAliked::submit`]. Allocate once with
@@ -223,7 +204,6 @@ pub struct RaCoAliked {
     /// Model dims `(mh, mw)` the input is currently sized for.
     cur: (usize, usize),
     k: usize,
-    copy_k: CudaKernel,
 }
 
 impl RaCoAliked {
@@ -277,7 +257,6 @@ impl RaCoAliked {
         // Stretch + /255 only — the ImageNet normalisation is baked into the graph.
         let preproc = Preprocessor::stretch(stream.clone())?;
         let input = zeros_cuda::<f32, 4>([1, 3, SEED_DIM, SEED_DIM], &stream)?;
-        let copy_k = CudaKernel::compile(stream.context(), COPY_SRC, "raco_copy")?;
         let model = ModelSession::new(engine, Arc::clone(&stream))?;
 
         Ok(Self {
@@ -287,7 +266,6 @@ impl RaCoAliked {
             input,
             cur: (SEED_DIM, SEED_DIM),
             k,
-            copy_k,
         })
     }
 
@@ -388,11 +366,29 @@ impl RaCoAliked {
             self.cur = (mh, mw);
         }
 
+        // Point TensorRT straight at this result's buffers, so inference writes where
+        // the caller already wants the data. Rebinding per submit is what lets several
+        // results be outstanding at once (extract left, extract right, then match)
+        // without any of them aliasing session memory.
+        //
+        // SAFETY: the buffers belong to `out`, which the caller holds across the stream
+        // sync that completes this work; each name is bound to a distinct allocation.
+        for (name, dst, n) in [
+            ("keypoints", &out.kpts, self.k * 2),
+            ("normalized_keypoints", &out.norm_kpts, self.k * 2),
+            ("descriptors", &out.descs, self.k * DESC_DIM),
+        ] {
+            let ptr = dst.device_ptr(self.stream.as_ref()).0;
+            unsafe {
+                self.model
+                    .bind_output(name, ptr, n * std::mem::size_of::<f32>())?
+            };
+        }
+
         self.preproc.run(img, &mut self.input)?;
         // Attach the dimensions on failure: the usual cause is a frame outside the
         // engine's shape profile, and TensorRT reports that with an empty message.
-        let tmap = self
-            .model
+        self.model
             .run(&self.input)
             .map_err(|source| RaCoAlikedError::ShapeRejected {
                 sw,
@@ -401,24 +397,6 @@ impl RaCoAliked {
                 mh,
                 source,
             })?;
-
-        for (name, dst, n) in [
-            ("keypoints", &out.kpts, self.k * 2),
-            ("normalized_keypoints", &out.norm_kpts, self.k * 2),
-            ("descriptors", &out.descs, self.k * DESC_DIM),
-        ] {
-            let src = tmap
-                .get(name)
-                .ok_or(RaCoAlikedError::MissingOutput(name))?
-                .f32_ptr()? as usize as CUdeviceptr;
-            let dst_raw = dst.device_ptr(self.stream.as_ref()).0;
-            self.copy_k
-                .launch_builder(&self.stream)
-                .arg(&src)
-                .arg(&(n as i32))
-                .arg(&dst_raw)
-                .launch_cfg(cfg_1d(n, 256))?;
-        }
 
         out.scale = (rw, rh);
         Ok(())
