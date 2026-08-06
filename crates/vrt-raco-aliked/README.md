@@ -30,6 +30,40 @@ images (B,3,H,W) f32   H,W multiples of 32, RGB in [0,1]
 unlike XFeat there is no threshold-dependent survivor count to read back —
 `count()` is always `K`.
 
+## Choosing K — pick k3072 unless you match every frame
+
+`K` is not just a keypoint count. Upstream's exporter selects a **structurally
+different graph** per K: at **K ≥ 3072 RaCo's learned ranker is omitted entirely**
+(`RankerMode.bypass`), at K=2560 and most of 1024–2560 it runs on a bounded boundary
+window, and below that it runs dense. The ranker is a second CNN over the image —
+nine residual conv blocks plus a 5×5 conv — that re-scores 2K candidates to pick the
+best K, and it is what buys rotation robustness.
+
+Dropping it makes extraction **roughly twice as fast while returning 3× the
+keypoints**, which is why the default here is k3072 and not the middle of the range:
+
+| K | ranker | extract (1 img) | matcher (1 pair) | E2E pair |
+|---|---|---|---|---|
+| 512 | dense | 49.1 ms | 7.9 ms | **106.0 ms** |
+| 1024 | boundary | 55.2 ms | 21.6 ms | 132.0 ms |
+| **3072** | **bypass** | **28.5 ms** | 126.5 ms | 183.5 ms |
+
+Extraction is **non-monotonic in K** — k3072 costs half of k1024. The matcher is the
+opposite: LightGlue's attention is O(K²), so it scales ~K^1.55 and dominates at k3072.
+
+So the choice is really about which side you pay on:
+
+- **Extraction-bound work — mapping, keyframe indexing, building a descriptor
+  database: k3072.** Twice the throughput and 2.5× more correct correspondences than
+  k1024 (see below). This is the default.
+- **Matching every frame against one other frame: k512.** Fastest end to end
+  (106 ms) and the *best* inlier rate of the three; you just get fewer matches.
+- **k1024 is the worst extractor of the three** and only middling end-to-end. It is
+  here for reference, not as a recommendation.
+
+Extractor and matcher must be split from the *same* `kN` asset — `LightGlue::new`
+rejects a mismatch.
+
 ## Two things that fail silently
 
 **Preprocessing.** Feed RGB in `[0,1]` and nothing else. The ImageNet mean/std live
@@ -54,14 +88,14 @@ statically-shaped halves; see the script header for why the cut lands where it d
 
 ```bash
 curl -sSLO https://github.com/fabio-sim/LightGlue-ONNX/releases/download/v3.0/\
-raco_aliked_lightglue_pipeline_k1024.onnx
+raco_aliked_lightglue_pipeline_k3072.onnx
 
 python3 crates/vrt-raco-aliked/scripts/split_raco_pipeline.py \
-    --input  models/onnx/raco/raco_aliked_lightglue_pipeline_k1024.onnx \
+    --input  models/onnx/raco/raco_aliked_lightglue_pipeline_k3072.onnx \
     --outdir models/onnx/raco
 
 crates/vrt-raco-aliked/scripts/build_engine.sh \
-    models/onnx/raco/raco_aliked_extractor_k1024.onnx
+    models/onnx/raco/raco_aliked_extractor_k3072.onnx
 ```
 
 The split needs only `onnx` — no torch, no onnxruntime, no Python 3.12 — so it runs
@@ -72,10 +106,10 @@ Verify a split before trusting it (requires `onnxruntime`):
 
 ```bash
 python3 crates/vrt-raco-aliked/scripts/check_split_parity.py \
-    --fused     models/onnx/raco/raco_aliked_lightglue_pipeline_k1024.onnx \
-    --extractor models/onnx/raco/raco_aliked_extractor_k1024.onnx \
-    --matcher   models/onnx/raco/lightglue_matcher_k1024.onnx \
-    --size 256 --dump-ref models/onnx/raco/ref_k1024
+    --fused     models/onnx/raco/raco_aliked_lightglue_pipeline_k3072.onnx \
+    --extractor models/onnx/raco/raco_aliked_extractor_k3072.onnx \
+    --matcher   models/onnx/raco/lightglue_matcher_k3072.onnx \
+    --size 256 --dump-ref models/onnx/raco/ref_k3072
 ```
 
 ## TensorRT notes
@@ -94,17 +128,24 @@ fp32 graph.
 
 ## Benchmarks
 
-Jetson Orin Nano at **MAXN_SUPER**, TRT 10.3.0.30, fp16, 640×640, K=1024. The engine was
-built with min=opt=max at the benchmark resolution so it is not penalised for running off
-its optimum profile. Extraction is **one image**; a pair costs twice this.
+Jetson Orin Nano at **MAXN_SUPER**, TRT 10.3.0.30, fp16, 640×640. Engines built with
+min=opt=max at the benchmark resolution so none is penalised for running off its optimum
+profile. Extraction is **one image**; a pair costs twice this.
 
 | | per image | engine build |
 |---|---|---|
-| **RaCo-ALIKED** (this crate) | **55.2 ms** | 810 s @640² static · 1301 s @ dynamic profile |
+| **RaCo-ALIKED k3072** (default) | **28.5 ms** | 345 s |
+| RaCo-ALIKED k1024 | 55.2 ms | 810 s @640² static · 1301 s @ dynamic profile |
+| RaCo-ALIKED k512 | 49.1 ms | 570 s |
 | XFeat (`vrt-xfeat`) | 3.4 ms | 114 s |
 
-Extraction is **~16× the cost of XFeat**. Latency is data-independent, as CNN cost must
-be — measured 110.5 / 110.5 / 110.6 ms for two images across three different inputs.
+Even at its cheapest, extraction is **~8× the cost of XFeat** (16× at k1024). Latency is
+data-independent, as CNN cost must be — measured 110.5 / 110.5 / 110.6 ms for two images
+across three different inputs.
+
+A **wide shape profile costs ~18%**: the dynamic 256²–640² engine is slower per image at
+512² than the static engine is at 640², because TensorRT tunes tactics across the whole
+range and sizes workspaces from the max. Build narrow.
 
 ### Why pay it
 
@@ -112,15 +153,36 @@ Because XFeat falls over under rotation and this does not. Matching two 640² cr
 against a known ground-truth affine, counting a match as an inlier only if it lands
 within 2 px of where the transform says it should:
 
-| rotation | RaCo-ALIKED + LightGlue+ | XFeat + mutual-NN |
-|---|---|---|
-| 0° | 708 matches, **100.0%** | 647 matches, 98.0% |
-| 45° | 690 matches, **98.0%** | 261 matches, 28.7% |
-| 90° | 872 matches, **97.8%** | 62 matches, **0.0%** |
+| rotation | RaCo k3072 | RaCo k1024 | XFeat + mutual-NN |
+|---|---|---|---|
+| 0° | 1913, 99.8% | 708, **100.0%** | 647, 98.0% |
+| 15° | 2098, 96.3% | 764, **99.2%** | 516, 59.3% |
+| 45° | 1872, 94.3% | 690, **98.0%** | 261, 28.7% |
+| 90° | 2297, 92.8% | 872, **97.8%** | 62, **0.0%** |
 
 On pure translation XFeat is nearly as good and vastly cheaper — **reaching for this
 crate there would be the wrong call**. It earns its cost only where orientation varies,
 which is exactly what RaCo is for.
+
+### What the ranker bypass actually costs
+
+Upstream describes bypass as a "modest rotation-yield loss", and that holds: k3072 drops
+from k1024's ~98% inliers to ~93% at 90°. But percentage is the wrong lens, because
+k3072 also returns ~2.6× more matches. In **absolute correct correspondences** — which
+is what a pose solver consumes:
+
+| rotation | k3072 inliers | k1024 inliers |
+|---|---|---|
+| 45° | **1765** | 676 |
+| 90° | **2132** | 853 |
+
+k3072 yields ~2.5× more usable matches *and* extracts twice as fast. The ranker earns
+its keep only if you need a high inlier *ratio* on few keypoints — e.g. feeding a solver
+with no outlier rejection. With RANSAC downstream, bypass wins on both axes.
+
+> Single image pair, synthetic rotations about the centre. The ordering is consistent
+> across four rotations and three K values, but do not read the exact percentages as
+> characteristic of real imagery.
 
 Full end-to-end numbers, the intermediate rotations, and the harness live in
 `vrt-lightglue` (`examples/bench_vs_xfeat`).
