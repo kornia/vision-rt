@@ -97,7 +97,17 @@ pub struct Session {
     // Only OUTPUT buffers are session-owned; inputs are the caller's device
     // pointers, bound per call in `run_device_inputs_on_device`.
     outputs: HashMap<String, TensorState>,
+    // Outputs the caller has taken over (see `bind_output`): TensorRT writes straight
+    // into these instead of the session-owned buffer above.
+    bound: HashMap<String, BoundOutput>,
     _not_sync: std::marker::PhantomData<std::cell::UnsafeCell<()>>,
+}
+
+/// A caller-supplied device buffer standing in for one session-owned output buffer.
+#[derive(Clone, Copy)]
+struct BoundOutput {
+    ptr: u64,
+    bytes: usize,
 }
 
 unsafe impl Send for Session {}
@@ -156,8 +166,77 @@ impl Session {
             _engine: engine,
             stream,
             outputs,
+            bound: HashMap::new(),
             _not_sync: std::marker::PhantomData,
         })
+    }
+
+    /// Have TensorRT write output `name` **directly into a caller-owned device buffer**
+    /// instead of the session-owned one.
+    ///
+    /// Without this, every result that must outlive the next `run_*` has to be copied
+    /// out of session memory, because the session reuses its output buffers on every
+    /// run. A pipeline holding two results at once (extract two frames, then match
+    /// them) therefore pays a device-to-device copy per output per frame purely to
+    /// dodge the aliasing. Binding removes both the copy and the aliasing: the buffer
+    /// TensorRT fills *is* the caller's.
+    ///
+    /// **A binding lasts exactly one run** and is cleared afterwards, so bind before
+    /// every `run_*`. That is deliberate: a persistent binding would let a caller drop
+    /// the result buffer and have the next run write into freed device memory. With
+    /// per-run bindings, forgetting to bind sends the output to the session's own
+    /// buffer — the wrong destination, but memory-safe and obvious.
+    ///
+    /// Two outputs may not share one buffer; the second bind is rejected.
+    ///
+    /// The buffer must be large enough for the output at its **resolved** shape, which
+    /// for a dynamic engine is only known once input shapes are set — so the size is
+    /// checked on every run, not here, and a too-small buffer fails the run rather than
+    /// overflowing.
+    ///
+    /// # Safety
+    /// `ptr` must be a CUDA device allocation of at least `bytes`, and must stay alive,
+    /// unmoved, and not aliased by any other binding until the caller's next stream
+    /// synchronize — the GPU writes to it during that window, after `run_*` returns.
+    /// The one-run lifetime above bounds how long that must hold, but it does not
+    /// remove the requirement: the buffer must outlive the sync, not just the call.
+    pub unsafe fn bind_output(&mut self, name: &str, ptr: u64, bytes: usize) -> Result<()> {
+        if !self.outputs.contains_key(name) {
+            return Err(TrtError::UnknownTensor(name.into()));
+        }
+        if ptr == 0 {
+            return Err(TrtError::Shape(format!(
+                "output '{name}': cannot bind a null device pointer"
+            )));
+        }
+        // Two outputs sharing one buffer would have TensorRT write both into the same
+        // memory, and whichever landed second would win — silently, with no error and
+        // plausible-looking data. Cheap to catch here (the map holds a handful of
+        // entries) and impossible to debug later.
+        if let Some((other, _)) = self
+            .bound
+            .iter()
+            .find(|(other, b)| b.ptr == ptr && other.as_str() != name)
+        {
+            return Err(TrtError::Shape(format!(
+                "output '{name}': device pointer {ptr:#x} is already bound to output \
+                 '{other}'; each bound output needs its own buffer"
+            )));
+        }
+        self.bound.insert(name.to_string(), BoundOutput { ptr, bytes });
+        Ok(())
+    }
+
+    /// Drop a binding before the run that would consume it, returning the output to the
+    /// session-owned buffer. Bindings clear themselves after each run, so this is only
+    /// needed to cancel one you have already made.
+    pub fn unbind_output(&mut self, name: &str) {
+        self.bound.remove(name);
+    }
+
+    /// Drop every output binding.
+    pub fn unbind_all_outputs(&mut self) {
+        self.bound.clear();
     }
 
     /// Run inference with inputs **already in CUDA device memory**, leaving the
@@ -205,7 +284,12 @@ impl Session {
     fn enqueue_outputs_only(&mut self) -> Result<HashMap<String, OutputView>> {
         for (name, state) in &self.outputs {
             let c_name = CString::new(name.as_str()).unwrap();
-            let dev_ptr = state.buf.as_device_ptr(&self.stream);
+            // A bound output redirects TensorRT at the caller's buffer, so the result
+            // lands where it is needed and no copy-out is required.
+            let dev_ptr = match self.bound.get(name) {
+                Some(b) => b.ptr as usize as *mut std::ffi::c_void,
+                None => state.buf.as_device_ptr(&self.stream),
+            };
             let code =
                 unsafe { btrt_context_set_tensor_address(self.ctx, c_name.as_ptr(), dev_ptr) };
             if code != 0 {
@@ -222,13 +306,29 @@ impl Session {
         for (name, state) in &self.outputs {
             // Borrows a Session-owned output buffer; the validity window
             // (until next run_* / Session drop) is the documented caller contract.
+            // A bound output instead points at the caller's own buffer, which they
+            // already own and which outlives the next run.
             let view = OutputView {
-                ptr: state.buf.as_device_ptr(&self.stream),
+                ptr: match self.bound.get(name) {
+                    Some(b) => b.ptr as usize as *mut std::ffi::c_void,
+                    None => state.buf.as_device_ptr(&self.stream),
+                },
                 shape: state.shape.iter().map(|&d| d as usize).collect(),
                 dtype: dtype_of(state.dtype),
             };
             result.insert(name.clone(), view);
         }
+        // Bindings last exactly one run. Persisting them would make the dangerous case
+        // the default: a caller that binds a result's buffers, drops the result, then
+        // runs again would have TensorRT write into freed device memory, with nothing
+        // in the type system to catch it. Clearing here means a forgotten re-bind lands
+        // the output in the session's own buffer instead — the wrong destination, but
+        // memory-safe and immediately visible as stale data rather than heap corruption.
+        //
+        // Safe to clear now: the addresses are already set in the execution context and
+        // the views above already captured the caller's pointers, so the in-flight run
+        // still writes where it was told.
+        self.bound.clear();
         Ok(result)
     }
 
@@ -251,7 +351,18 @@ impl Session {
             let shape = self.resolved_output_shape(&name)?;
             let dtype = self.outputs[&name].dtype;
             let new_len = buf_bytes(&shape, dtype);
-            if self.outputs[&name].buf.len_bytes != new_len {
+            if let Some(b) = self.bound.get(&name) {
+                // Caller owns this buffer: never reallocate it, but the resolved shape
+                // is only known now, so this is the one place the size can be checked.
+                // Failing here beats letting TensorRT overrun a short buffer.
+                if b.bytes < new_len {
+                    return Err(TrtError::Shape(format!(
+                        "output '{name}': bound buffer is {} bytes but the resolved \
+                         shape {shape:?} needs {new_len}",
+                        b.bytes
+                    )));
+                }
+            } else if self.outputs[&name].buf.len_bytes != new_len {
                 self.outputs.get_mut(&name).unwrap().buf =
                     DeviceBuffer::alloc_with_stream(self.stream.cuda_stream(), new_len)?;
             }
