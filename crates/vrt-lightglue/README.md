@@ -63,15 +63,39 @@ an additional tightening, so `0.0` keeps all of them.
 
 ```bash
 python3 crates/vrt-raco-aliked/scripts/split_raco_pipeline.py \
-    --input  models/onnx/raco/raco_aliked_lightglue_pipeline_k1024.onnx \
+    --input  models/onnx/raco/raco_aliked_lightglue_pipeline_k3072.onnx \
     --outdir models/onnx/raco
 
 crates/vrt-raco-aliked/scripts/build_engine.sh \
-    models/onnx/raco/lightglue_matcher_k1024.onnx
+    models/onnx/raco/lightglue_matcher_k3072.onnx
 ```
 
 Extractor and matcher must be split from the same `kN` asset — the `K` is baked into
 both, and `LightGlue::new` rejects a mismatch.
+
+## Matching cost scales badly in K — read before picking an asset
+
+LightGlue's attention is **O(K²)**, so the matcher is the one part of this pipeline that
+punishes a large keypoint budget. Measured on Orin Nano at MAXN_SUPER, fp16, one pair,
+alongside the extraction cost from [`vrt-raco-aliked`](../vrt-raco-aliked):
+
+| K | matcher (1 pair) | extract ×2 | **E2E pair** |
+|---|---|---|---|
+| 512 | **7.9 ms** | 98.2 ms | **106.0 ms** |
+| 1024 | 21.6 ms | 110.4 ms | 132.0 ms |
+| 3072 | 126.5 ms | **57.0 ms** | 183.5 ms |
+
+Matcher cost grows ~K^1.55, while extraction *falls* from k1024 to k3072 (RaCo's ranker
+is bypassed at K≥3072). The two pull in opposite directions:
+
+- **Matching every frame → k512.** Fastest end to end, and the best inlier rate of the
+  three.
+- **Extraction-bound work → k3072**, which is `vrt-raco-aliked`'s default — but then
+  match sparingly, or against something cheaper than this crate (a mutual-NN over the
+  128-D descriptors) rather than paying 126 ms per pair.
+
+Extractor and matcher must come from the same `kN` asset; `LightGlue::new` rejects a
+mismatch.
 
 ## Benchmarks — `examples/bench_vs_xfeat`
 

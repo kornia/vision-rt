@@ -87,22 +87,29 @@ camera it held **~14.8 fps — sensor-capped** at 15 fps (RTSP receive ~36 ms/fr
 **~2× GPU headroom** for a faster sensor, a second camera, or another model. Spend less
 GPU by running depth at a lower cadence and letting the tracker **coast** between updates.
 
-### Feature extraction + matching (640², K=1024)
+### Feature extraction + matching (640²)
 
 Two pipelines for the same job — keypoints, descriptors, and correspondences between a
-pair of frames. Both engines built min=opt=max at the benchmark resolution so neither
-runs off its optimum profile (`vrt-lightglue`, `examples/bench_vs_xfeat`, 30 iters):
+pair of frames. All engines built min=opt=max at the benchmark resolution so none runs
+off its optimum profile (`vrt-lightglue`, `examples/bench_vs_xfeat`, 30 iters):
 
-| Pipeline | extract ×2 | match | End-to-end | Inliers @0° / 45° / 90° rotation |
+| Pipeline | extract ×2 | match | End-to-end | Inliers @0° / 45° / 90° |
 |---|---:|---:|---:|---|
 | `vrt-xfeat` + mutual-NN | 6.8 ms | 0.9 ms | **7.7 ms** | 98.0% / 28.7% / **0.0%** |
-| `vrt-raco-aliked` + `vrt-lightglue` | 110.5 ms | 22.4 ms | **133.0 ms** | **100.0% / 98.0% / 97.8%** |
+| `vrt-raco-aliked` + `vrt-lightglue`, k512 | 98.2 ms | 7.9 ms | **106.0 ms** | 100.0% / 99.1% / 98.0% |
+| …k3072 (the extractor's default) | **57.0 ms** | 126.5 ms | 183.5 ms | 99.8% / 94.3% / 92.8% |
 
-**XFeat is 17.3× faster and, on a pure-translation pair, essentially as accurate** — it
-is the right default. RaCo-ALIKED + LightGlue+ buys rotation robustness: XFeat degrades
-past ~15° and fails completely at 90°, where RaCo still returns 872 matches at 97.8%
-inliers. Inlier % is measured against a known ground-truth affine (within 2 px), not
-self-consistency.
+**XFeat is ~14× faster and, on a pure-translation pair, essentially as accurate** — it
+stays the right default. RaCo-ALIKED + LightGlue+ buys rotation robustness: XFeat
+degrades past ~15° and fails completely at 90°, where RaCo still returns thousands of
+matches at >92% inliers. Inlier % is against a known ground-truth affine (within 2 px),
+not self-consistency.
+
+`K` selects a structurally different graph rather than just a keypoint count — at K≥3072
+RaCo's learned ranker is bypassed, **halving extraction** while the O(K²) matcher grows.
+So **k3072 for extraction-bound work** (mapping, keyframe indexing — 28.5 ms/image and
+2.5× more correct correspondences than k1024) and **k512 when matching every frame**.
+Full table in [`vrt-raco-aliked`](crates/vrt-raco-aliked).
 
 ## Quickstart
 
