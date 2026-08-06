@@ -5,6 +5,7 @@ members = [
     "crates/vrt",
     "crates/vrt-hub",
     "crates/vrt-xfeat",
+    "crates/vrt-raco-aliked",
     "crates/vrt-rfdetr",
     "crates/vrt-rfdetr-kpts",
     "crates/vrt-rfdetr-seg",

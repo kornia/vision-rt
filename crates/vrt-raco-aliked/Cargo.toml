@@ -1,0 +1,33 @@
+[package]
+name = "vrt-raco-aliked"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+description = "RaCo keypoint detection + ALIKED 128-D descriptors on TensorRT"
+readme = "README.md"
+
+[lib]
+name = "vrt_raco_aliked"
+
+[features]
+default = []
+# Auto-pull the pinned ONNX from Hugging Face (via vrt-hub). Engine is built on first
+# run through the trtexec subprocess unless `builder` is also on.
+hub = ["dep:vrt-hub", "vrt-hub/hub"]
+# Build the engine in-process via nvonnxparser instead of the trtexec subprocess.
+builder = ["dep:vrt-hub", "vrt-hub/builder"]
+
+[dependencies]
+kornia-image = { workspace = true }
+kornia-tensor = { workspace = true }
+kornia-imgproc = { workspace = true }
+cudarc = { workspace = true }
+vrt = { path = "../vrt" }
+vrt-hub = { path = "../vrt-hub", optional = true }
+thiserror = "2.0"
+
+[dev-dependencies]
+vrt-hub = { path = "../vrt-hub", features = ["builder"] }
+kornia-io = { workspace = true }
+env_logger = "0.11"
