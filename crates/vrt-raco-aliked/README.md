@@ -92,6 +92,45 @@ fp16's 65504 limit, so the export lowers that division to integer floor-division
 Do **not** convert the ONNX itself to fp16 — let TensorRT pick precision from the
 fp32 graph.
 
+## Benchmarks
+
+Jetson Orin Nano at **MAXN_SUPER**, TRT 10.3.0.30, fp16, 640×640, K=1024. The engine was
+built with min=opt=max at the benchmark resolution so it is not penalised for running off
+its optimum profile. Extraction is **one image**; a pair costs twice this.
+
+| | per image | engine build |
+|---|---|---|
+| **RaCo-ALIKED** (this crate) | **55.2 ms** | 810 s @640² static · 1301 s @ dynamic profile |
+| XFeat (`vrt-xfeat`) | 3.4 ms | 114 s |
+
+Extraction is **~16× the cost of XFeat**. Latency is data-independent, as CNN cost must
+be — measured 110.5 / 110.5 / 110.6 ms for two images across three different inputs.
+
+### Why pay it
+
+Because XFeat falls over under rotation and this does not. Matching two 640² crops
+against a known ground-truth affine, counting a match as an inlier only if it lands
+within 2 px of where the transform says it should:
+
+| rotation | RaCo-ALIKED + LightGlue+ | XFeat + mutual-NN |
+|---|---|---|
+| 0° | 708 matches, **100.0%** | 647 matches, 98.0% |
+| 45° | 690 matches, **98.0%** | 261 matches, 28.7% |
+| 90° | 872 matches, **97.8%** | 62 matches, **0.0%** |
+
+On pure translation XFeat is nearly as good and vastly cheaper — **reaching for this
+crate there would be the wrong call**. It earns its cost only where orientation varies,
+which is exactly what RaCo is for.
+
+Full end-to-end numbers, the intermediate rotations, and the harness live in
+`vrt-lightglue` (`examples/bench_vs_xfeat`).
+
+> Measure on an idle box. These figures come from a machine where unrelated GPU work
+> (load average 4.2) inflated a first pass from 110 ms to 235 ms for the *same* input —
+> contention, not thermal throttling; the SoC sat at 60 °C with no throttle asserted.
+> The benchmark reports E2E min alongside median so that shows up rather than silently
+> skewing the result.
+
 ## Model credit and licences
 
 This crate ships no weights. The ONNX it consumes is derived from three separately
