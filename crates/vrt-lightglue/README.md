@@ -129,6 +129,11 @@ nearly as good and vastly cheaper — **choosing this pipeline there would be th
 call**. Under rotation XFeat degrades and then fails outright, while this holds ~98%
 inliers throughout. That is exactly the axis RaCo claims, and the only reason to pay.
 
+**The gap is the model, not the keypoint budget.** `bench_vs_xfeat` sets XFeat's `top_k`
+from the RaCo engine's `K`, so the two are always compared at the same budget. Giving
+XFeat more keypoints does not rescue it — at 45° it scores 31.0% inliers at K=512 and
+29.2% at K=3072, against RaCo's 99.1% and 94.3%.
+
 ```bash
 cargo run --release -p vrt-lightglue --example bench_vs_xfeat -- \
     <raco_extractor.engine> <lightglue.engine> <xfeat_backbone.engine> \

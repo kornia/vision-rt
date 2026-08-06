@@ -105,6 +105,10 @@ degrades past ~15° and fails completely at 90°, where RaCo still returns thous
 matches at >92% inliers. Inlier % is against a known ground-truth affine (within 2 px),
 not self-consistency.
 
+The XFeat row runs at `top_k=1024`. Re-running it at a **matched** budget does not rescue
+it — at 45° it scores 31.0% inliers with `top_k=512` and 29.2% with `top_k=3072`, against
+RaCo's 99.1% and 94.3%. The rotation gap is the model, not the keypoint budget.
+
 `K` selects a structurally different graph rather than just a keypoint count — at K≥3072
 RaCo's learned ranker is bypassed, **halving extraction** while the O(K²) matcher grows.
 So **k3072 for extraction-bound work** (mapping, keyframe indexing — 28.5 ms/image and

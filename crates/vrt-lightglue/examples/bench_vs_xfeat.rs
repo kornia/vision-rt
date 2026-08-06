@@ -37,7 +37,6 @@ use vrt_lightglue::LightGlue;
 use vrt_raco_aliked::RaCoAliked;
 use vrt_xfeat::{Matcher, XFeat, XFeatParams};
 
-const TOP_K: usize = 1024; // match RaCo's baked-in K for an apples-to-apples count
 const XFEAT_THRESHOLD: f32 = 0.05;
 const MIN_COSSIM: f32 = 0.82;
 const LG_MIN_SCORE: f32 = 0.0; // LightGlue already filtered inside the graph
@@ -71,10 +70,14 @@ fn main() -> Result<(), vrt::BoxError> {
         left_src.height()
     );
 
+    // XFeat's keypoint budget is taken from the RaCo engine rather than fixed, so the
+    // two pipelines are compared at the SAME budget whichever kN asset is loaded — and
+    // so XFeat's own O(K^2) mutual-NN cost scales into view alongside LightGlue's.
     let raco = bench_raco(&stream, &a[1], &a[2], &left, &right, iters, &gt)?;
-    let xfeat = bench_xfeat(&stream, &a[3], &left, &right, iters, &gt)?;
+    let xfeat = bench_xfeat(&stream, &a[3], &left, &right, iters, &gt, raco.k)?;
 
     println!("\n{:-<74}", "");
+    println!("keypoint budget K = {}", raco.k);
     println!(
         "{:<28} {:>10} {:>10} {:>12} {:>10} {:>8}",
         "", "extract x2", "match", "E2E median", "E2E min", "matches"
@@ -116,6 +119,8 @@ fn main() -> Result<(), vrt::BoxError> {
 
 struct Row {
     name: &'static str,
+    /// Keypoint budget this row ran at (RaCo's baked-in K; XFeat's top_k).
+    k: usize,
     extract_ms: f64,
     match_ms: f64,
     total_ms: f64,
@@ -247,6 +252,7 @@ fn bench_raco(
     );
     Ok(Row {
         name: "RaCo-ALIKED + LightGlue+",
+        k: raco.num_keypoints(),
         extract_ms: median(&ext),
         match_ms: median(&mat),
         total_ms: median(&tot),
@@ -265,11 +271,13 @@ fn bench_xfeat(
     right: &Image<u8, 3>,
     iters: usize,
     gt: &Option<Affine>,
+    top_k: usize,
 ) -> Result<Row, vrt::BoxError> {
-    let mut xf = XFeat::from_engine_file(engine, stream.clone(), XFeatParams::new(TOP_K, XFEAT_THRESHOLD))?;
+    let mut xf =
+        XFeat::from_engine_file(engine, stream.clone(), XFeatParams::new(top_k, XFEAT_THRESHOLD))?;
     let matcher = Matcher::new(stream.clone())?;
     let (mut l, mut r) = (xf.alloc_result()?, xf.alloc_result()?);
-    let mut m = matcher.alloc_result(TOP_K)?;
+    let mut m = matcher.alloc_result(top_k)?;
 
     // XFeat's keypoint count is threshold-dependent and read back from the device, so
     // matching genuinely needs the extraction sync first — unlike RaCo, whose K is
@@ -314,13 +322,14 @@ fn bench_xfeat(
         inlier_pct = quality_gt(&pairs, &lk, &rk, m);
     }
     println!(
-        "XFeat: {} / {} kpts (top_k {TOP_K}, threshold {XFEAT_THRESHOLD}), {} matches",
+        "XFeat: {} / {} kpts (top_k {top_k}, threshold {XFEAT_THRESHOLD}), {} matches",
         l.count(),
         r.count(),
         pairs.len()
     );
     Ok(Row {
         name: "XFeat + mutual-NN",
+        k: top_k,
         extract_ms: median(&ext),
         match_ms: median(&mat),
         total_ms: median(&tot),
