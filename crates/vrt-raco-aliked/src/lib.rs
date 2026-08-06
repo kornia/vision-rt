@@ -156,6 +156,16 @@ impl RaCoAlikedResult {
         self.scale
     }
 
+    /// The stream this result's buffers live on.
+    ///
+    /// Exposed so a downstream consumer can verify it shares the stream. Reading these
+    /// buffers from a *different* stream is a data race: the extraction that fills them
+    /// is still queued, and nothing orders the two streams against each other. It
+    /// produces garbage rather than an error, so the check is worth making.
+    pub fn stream(&self) -> &Arc<CudaStream> {
+        &self.stream
+    }
+
     /// GPU-resident keypoints `[K*2]` in **model** pixels. Valid after the stream sync.
     pub fn kpts_slice(&self) -> &CudaSlice<f32> {
         &self.kpts
