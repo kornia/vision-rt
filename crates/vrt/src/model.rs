@@ -82,8 +82,9 @@ impl ModelSession {
     /// so a result that must outlive the next `run` needs no copy out of session memory.
     ///
     /// See [`Session::bind_output`](crate::Session::bind_output) for the full contract.
-    /// Re-bind before each run when the destination changes (e.g. alternating result
-    /// buffers); clear with [`unbind_output`](Self::unbind_output).
+    /// **A binding lasts exactly one run**, so bind before every `run_*`; a forgotten
+    /// bind sends the output to the session buffer rather than writing into a possibly
+    /// freed one. Two outputs may not share a buffer.
     ///
     /// # Safety
     /// `ptr` must be a device allocation of at least `bytes` that stays alive, unmoved,
