@@ -96,6 +96,17 @@ pub enum RaCoAlikedError {
     InputTooSmall(usize, usize),
     #[error("result was allocated for K={0} but the engine emits K={1}")]
     CapacityMismatch(usize, usize),
+    /// The result was allocated on a different CUDA stream than this extractor runs on.
+    ///
+    /// Its buffers would be filled by work queued on this stream while the caller reads
+    /// them ordered against another, with nothing synchronising the two — a race that
+    /// yields garbage rather than an error. Allocate the result from the extractor that
+    /// fills it.
+    #[error(
+        "result was allocated on a different CUDA stream than this extractor; call \
+         alloc_result() on the extractor that will fill it"
+    )]
+    StreamMismatch,
     /// The engine refused this frame's model dimensions.
     ///
     /// Almost always means the frame's floor-of-32 size falls outside the min/max of
@@ -359,6 +370,11 @@ impl RaCoAliked {
         if out.k != self.k {
             return Err(RaCoAlikedError::CapacityMismatch(out.k, self.k));
         }
+        // Enforced rather than trusted: a result from an extractor on another stream
+        // fails as a silent race, not an error.
+        if !Arc::ptr_eq(&out.stream, &self.stream) {
+            return Err(RaCoAlikedError::StreamMismatch);
+        }
 
         let (sw, sh) = (img.width(), img.height());
         let (mw, mh) = ((sw / DIM_DIVISOR) * DIM_DIVISOR, (sh / DIM_DIVISOR) * DIM_DIVISOR);
@@ -374,10 +390,17 @@ impl RaCoAliked {
             self.cur = (mh, mw);
         }
 
-        // Point TensorRT straight at this result's buffers, so inference writes where
-        // the caller already wants the data. Rebinding per submit is what lets several
-        // results be outstanding at once (extract left, extract right, then match)
-        // without any of them aliasing session memory.
+        self.preproc.run(img, &mut self.input)?;
+
+        // Point TensorRT straight at this result's buffers, so inference writes where the
+        // caller already wants the data. Rebinding per submit is what lets several results
+        // be outstanding at once (extract left, extract right, then match) without any of
+        // them aliasing session memory.
+        //
+        // Bound immediately before the run, never earlier: a binding is only consumed by
+        // a successful run, so anything fallible in between (preprocessing, buffer
+        // reallocation) would return with the binding still live and pointing at a result
+        // the caller may then drop.
         //
         // SAFETY: the buffers belong to `out`, which the caller holds across the stream
         // sync that completes this work; each name is bound to a distinct allocation.
@@ -392,8 +415,6 @@ impl RaCoAliked {
                     .bind_output(name, ptr, n * std::mem::size_of::<f32>())?
             };
         }
-
-        self.preproc.run(img, &mut self.input)?;
         // Attach the dimensions on failure: the usual cause is a frame outside the
         // engine's shape profile, and TensorRT reports that with an empty message.
         self.model
