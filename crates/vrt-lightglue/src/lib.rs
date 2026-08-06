@@ -70,6 +70,18 @@ pub enum LightGlueError {
     Cuda(#[from] kornia_tensor::CudaError),
     #[error("engine expects K={0} keypoints but the {1} result holds K={2}")]
     KeypointMismatch(usize, &'static str, usize),
+    /// A result was produced on a different CUDA stream than this matcher runs on.
+    ///
+    /// Packing it here would read buffers whose extraction is still queued on the other
+    /// stream, with nothing ordering the two — a data race that yields plausible-looking
+    /// garbage rather than an error. Build the extractor and the matcher on one shared
+    /// stream.
+    #[error(
+        "the {0} result was extracted on a different CUDA stream than this matcher; \
+         build both on one shared stream, or the match reads buffers that are still \
+         being written"
+    )]
+    StreamMismatch(&'static str),
 }
 
 // Pack one image's keypoints/descriptors into its slot of the interleaved pair buffer.
@@ -103,14 +115,13 @@ impl LightGlueResult {
         })
     }
 
-    /// Keypoint capacity (the engine's `K`).
-    pub fn len(&self) -> usize {
+    /// Keypoint capacity — the engine's `K`, i.e. how many entries `matches0` holds.
+    ///
+    /// Deliberately not `len()`/`is_empty()`: those read as "how many matches are there",
+    /// and the answer here would always have been `K` and `false`. The number of actual
+    /// correspondences comes from [`pairs`](Self::pairs).
+    pub fn capacity(&self) -> usize {
         self.k
-    }
-
-    /// Always false — the buffer is sized to the engine's fixed `K`.
-    pub fn is_empty(&self) -> bool {
-        self.k == 0
     }
 
     /// GPU-resident match indices `[K]` (`-1` = unmatched). Valid after the stream sync.
@@ -132,10 +143,15 @@ impl LightGlueResult {
     pub fn pairs(&self, min_score: f32) -> Result<Vec<(usize, usize)>, LightGlueError> {
         let m = self.stream.clone_dtoh(&self.matches)?;
         let s = self.stream.clone_dtoh(&self.scores)?;
+        // `j` indexes image 1's keypoints and callers use it to index their own
+        // arrays, so an out-of-range value from a mismatched or malformed engine would
+        // panic in user code. ArgMax over K cannot produce one, but the value crosses a
+        // graph boundary we do not control, so drop it here rather than trust it.
+        let k = self.k;
         Ok(m.iter()
             .zip(s.iter())
             .enumerate()
-            .filter(|(_, (&j, &sc))| j >= 0 && sc >= min_score)
+            .filter(|(_, (&j, &sc))| j >= 0 && (j as usize) < k && sc >= min_score)
             .map(|(i, (&j, _))| (i, j as usize))
             .collect())
     }
@@ -303,6 +319,11 @@ impl LightGlue {
         for (label, r) in [("left", left), ("right", right)] {
             if r.count() != self.k {
                 return Err(LightGlueError::KeypointMismatch(self.k, label, r.count()));
+            }
+            // The whole crate assumes one shared stream; enforce it rather than trusting
+            // it, because the failure is a silent race, not a crash.
+            if !Arc::ptr_eq(r.stream(), &self.stream) {
+                return Err(LightGlueError::StreamMismatch(label));
             }
         }
 
