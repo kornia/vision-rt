@@ -1,0 +1,32 @@
+[package]
+name = "vrt-lightglue"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+description = "LightGlue+ transformer feature matcher on TensorRT"
+readme = "README.md"
+
+[lib]
+name = "vrt_lightglue"
+
+[features]
+default = []
+# Auto-pull the pinned ONNX from Hugging Face (via vrt-hub).
+hub = ["dep:vrt-hub", "vrt-hub/hub"]
+# Build the engine in-process via nvonnxparser instead of the trtexec subprocess.
+builder = ["dep:vrt-hub", "vrt-hub/builder"]
+
+[dependencies]
+kornia-tensor = { workspace = true }
+cudarc = { workspace = true }
+vrt = { path = "../vrt" }
+vrt-raco-aliked = { path = "../vrt-raco-aliked" }
+vrt-hub = { path = "../vrt-hub", optional = true }
+thiserror = "2.0"
+
+[dev-dependencies]
+vrt-hub = { path = "../vrt-hub", features = ["builder"] }
+kornia-image = { workspace = true }
+kornia-io = { workspace = true }
+env_logger = "0.11"

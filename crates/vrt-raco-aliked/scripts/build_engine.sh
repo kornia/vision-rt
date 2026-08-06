@@ -38,7 +38,14 @@
 # stacked interleaved [L0,R0,L1,R1,...], hence the leading dim is always even.
 #
 # Override any of MIN_HW / OPT_HW / MAX_HW / MAX_PAIRS to widen or narrow the profile.
-# Wider profiles cost build time and memory; on a 7.4 GB Orin Nano keep MAX_HW modest.
+#
+# Keep the defaults tight on a 7.4 GB Orin Nano. A wide profile is not free: TensorRT
+# sizes its tactic workspaces from the MAX shape, so an over-generous max makes the
+# builder skip most tactics ("Tactic Device request: 1296MB Available: 642MB. Device
+# memory is insufficient") — which both stretches the build out enormously and leaves
+# you with a *slower* engine, since the fast tactics are the ones that got skipped.
+# MAX_PAIRS=1 (max batch 2, i.e. one image pair) is the right default here: the
+# extractor is driven one image at a time and the matcher takes exactly one pair.
 #
 # Usage:
 #   crates/vrt-raco-aliked/scripts/build_engine.sh <model.onnx> [out_dir]
@@ -53,8 +60,8 @@ WORKSPACE="${WORKSPACE:-2048}"
 
 MIN_HW="${MIN_HW:-256}"
 OPT_HW="${OPT_HW:-512}"
-MAX_HW="${MAX_HW:-768}"
-MAX_PAIRS="${MAX_PAIRS:-4}"
+MAX_HW="${MAX_HW:-640}"
+MAX_PAIRS="${MAX_PAIRS:-1}"
 
 case "$PREC" in
     fp16)        PREC_ARGS=(--fp16); SUFFIX="-fp16" ;;

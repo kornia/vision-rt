@@ -2860,11 +2860,41 @@ dependencies = [
 ]
 
 [[package]]
+name = "vrt-lightglue"
+version = "0.1.0"
+dependencies = [
+ "cudarc",
+ "env_logger",
+ "kornia-image",
+ "kornia-io",
+ "kornia-tensor",
+ "thiserror 2.0.18",
+ "vrt",
+ "vrt-hub",
+ "vrt-raco-aliked",
+]
+
+[[package]]
 name = "vrt-osnet"
 version = "0.1.0"
 dependencies = [
  "cudarc",
  "kornia-image",
+ "kornia-tensor",
+ "thiserror 2.0.18",
+ "vrt",
+ "vrt-hub",
+]
+
+[[package]]
+name = "vrt-raco-aliked"
+version = "0.1.0"
+dependencies = [
+ "cudarc",
+ "env_logger",
+ "kornia-image",
+ "kornia-imgproc",
+ "kornia-io",
  "kornia-tensor",
  "thiserror 2.0.18",
  "vrt",
