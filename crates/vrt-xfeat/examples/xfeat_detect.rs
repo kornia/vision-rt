@@ -33,12 +33,12 @@ fn main() -> Result<(), vrt::BoxError> {
 
     // .onnx → on-device engine cache (built once); .engine → used directly.
     let profile = vrt_hub::EngineProfile {
-        input: Some((
+        inputs: vec![(
             "image".into(),
             vec![1, 3, 240, 320],
             vec![1, 3, 640, 640],
             vec![1, 3, 1088, 1920],
-        )),
+        )],
         fp16: true,
         bf16: false,
         workspace_mb: 2048,

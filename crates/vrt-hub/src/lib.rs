@@ -22,8 +22,8 @@
 //!
 //! // Engine: cache hit returns instantly; miss builds on-device (~minutes, once).
 //! let profile = EngineProfile {
-//!     input:  Some(("image".into(),
-//!                   vec![1,3,240,320], vec![1,3,640,640], vec![1,3,1088,1920])),
+//!     inputs: vec![("image".into(),
+//!                   vec![1,3,240,320], vec![1,3,640,640], vec![1,3,1088,1920])],
 //!     fp16: true,
 //!     bf16: false,   // transformers want bf16 instead — see EngineProfile::bf16
 //!     workspace_mb: 2048,
@@ -453,8 +453,12 @@ pub type ShapeProfile = (String, Vec<i64>, Vec<i64>, Vec<i64>);
 
 /// Optimization profile + build options for an engine.
 pub struct EngineProfile {
-    /// Profile for dynamic-shape models; None = static shapes.
-    pub input: Option<ShapeProfile>,
+    /// One profile per dynamic-shape input; empty = static shapes.
+    ///
+    /// Multi-input models (e.g. a matcher taking keypoints *and* descriptors) need a
+    /// profile for each. The trtexec path supports any number; the in-process
+    /// `builder` path is limited to one and errors above that.
+    pub inputs: Vec<ShapeProfile>,
     pub fp16: bool,
     /// Enable BF16 kernels (Ampere+/SM80+, which includes the Orin's SM87).
     ///
@@ -471,7 +475,7 @@ pub struct EngineProfile {
 impl Default for EngineProfile {
     fn default() -> Self {
         Self {
-            input: None,
+            inputs: vec![],
             fp16: true,
             bf16: false,
             workspace_mb: 2048,
@@ -488,8 +492,8 @@ impl EngineProfile {
             "fp16={};bf16={};ws={};",
             self.fp16, self.bf16, self.workspace_mb
         );
-        if let Some((input, min, opt, max)) = &self.input {
-            s.push_str(&format!("in={input};min={min:?};opt={opt:?};max={max:?}"));
+        for (input, min, opt, max) in &self.inputs {
+            s.push_str(&format!("in={input};min={min:?};opt={opt:?};max={max:?};"));
         }
         let mut h = Sha256::new();
         h.update(s.as_bytes());
@@ -650,7 +654,16 @@ fn build_engine(onnx: &Path, profile: &EngineProfile) -> Result<Vec<u8>, HubErro
         .fp16(profile.fp16)
         .bf16(profile.bf16)
         .workspace_mb(profile.workspace_mb);
-    if let Some((input, min, opt, max)) = &profile.input {
+    // The C shim binds a single optimization profile, so multi-input models must go
+    // through the trtexec path (which is the default — `builder` is opt-in).
+    if profile.inputs.len() > 1 {
+        return Err(HubError::Build(format!(
+            "the in-process 'builder' path supports one shape profile, got {} — \
+             build this model through the default trtexec path instead",
+            profile.inputs.len()
+        )));
+    }
+    if let Some((input, min, opt, max)) = profile.inputs.first() {
         b = b.shape_profile(input.clone(), min, opt, max);
     }
     Ok(b.build_serialized(&logger)?)
@@ -677,10 +690,20 @@ fn build_engine(onnx: &Path, profile: &EngineProfile) -> Result<Vec<u8>, HubErro
     if profile.bf16 {
         cmd.arg("--bf16");
     }
-    if let Some((input, min, opt, max)) = &profile.input {
-        cmd.arg(format!("--minShapes={input}:{}", dims_x(min)))
-            .arg(format!("--optShapes={input}:{}", dims_x(opt)))
-            .arg(format!("--maxShapes={input}:{}", dims_x(max)));
+    // trtexec takes all inputs in one comma-separated flag per bound:
+    //   --minShapes=images:1x3x256x256,mask:1x1x256x256
+    if !profile.inputs.is_empty() {
+        let join = |pick: fn(&ShapeProfile) -> &Vec<i64>| {
+            profile
+                .inputs
+                .iter()
+                .map(|p| format!("{}:{}", p.0, dims_x(pick(p))))
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+        cmd.arg(format!("--minShapes={}", join(|p| &p.1)))
+            .arg(format!("--optShapes={}", join(|p| &p.2)))
+            .arg(format!("--maxShapes={}", join(|p| &p.3)));
     }
 
     let status = cmd.status()?;
@@ -759,12 +782,12 @@ mod tests {
             ..EngineProfile::default()
         };
         let shaped = EngineProfile {
-            input: Some((
+            inputs: vec![(
                 "x".into(),
                 vec![1, 3, 64, 64],
                 vec![1, 3, 64, 64],
                 vec![1, 3, 64, 64],
-            )),
+            )],
             ..EngineProfile::default()
         };
         assert_ne!(base.cache_tag(), diff_prec.cache_tag());
@@ -911,12 +934,12 @@ mod integration {
         assert!(onnx.exists(), "test needs the local xfeat ONNX");
 
         let profile = EngineProfile {
-            input: Some((
+            inputs: vec![(
                 "image".into(),
                 vec![1, 3, 240, 320],
                 vec![1, 3, 240, 320],
                 vec![1, 3, 240, 320],
-            )),
+            )],
             fp16: true,
             bf16: false,
             workspace_mb: 1024,

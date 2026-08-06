@@ -27,12 +27,12 @@ fn main() -> Result<(), vrt::BoxError> {
     let iters: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(300);
 
     let profile = vrt_hub::EngineProfile {
-        input: Some((
+        inputs: vec![(
             "image".into(),
             vec![1, 3, 240, 320],
             vec![1, 3, 640, 640],
             vec![1, 3, 1088, 1920],
-        )),
+        )],
         fp16: true,
         bf16: false,
         workspace_mb: 2048,

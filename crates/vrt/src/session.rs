@@ -61,6 +61,21 @@ impl OutputView {
         }
         Ok(self.ptr as *const f32)
     }
+    /// Device pointer as `*const i32`, checked against the output dtype.
+    ///
+    /// Index-valued outputs (match tables, label ids, argmax results) come back as
+    /// integers. TensorRT's `kINT64` is deliberately rejected at engine load
+    /// (see `engine.rs`), so exports must cast such outputs to int32 — this is the
+    /// accessor for them.
+    pub fn i32_ptr(&self) -> Result<*const i32> {
+        if self.dtype != DType::I32 {
+            return Err(TrtError::Shape(format!(
+                "output is {:?}, not I32",
+                self.dtype
+            )));
+        }
+        Ok(self.ptr as *const i32)
+    }
 }
 
 /// Per-tensor device buffer state for one inference session.

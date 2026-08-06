@@ -56,7 +56,7 @@ fn main() -> Result<(), vrt::BoxError> {
         }
     } else {
         let profile = vrt_hub::EngineProfile {
-            input: None,
+            inputs: vec![],
             fp16: true,
             bf16: false,
             workspace_mb: 2048,

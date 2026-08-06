@@ -39,7 +39,7 @@ fn main() -> Result<(), vrt::BoxError> {
     } else {
         // ONNX — build + cache the engine on first run (keyed by TRT+SM).
         let profile = vrt_hub::EngineProfile {
-            input: None,
+            inputs: vec![],
             fp16: true,
             bf16: false,
             workspace_mb: 2048,
