@@ -72,7 +72,8 @@ and a prebuilt engine where one matches this box — from
 [`kornia/raco-aliked`](https://huggingface.co/kornia/raco-aliked).
 
 The split needs only `onnx`, so it runs on the Jetson's stock `python3`. Verify one with
-`scripts/check_split_parity.py` (needs `onnxruntime`) before trusting it.
+`scripts/check_split_parity.py` (needs `onnxruntime`) before trusting it. The matcher half
+is consumed by [`vrt-lightglue`](../vrt-lightglue).
 
 ## Benchmarks
 
