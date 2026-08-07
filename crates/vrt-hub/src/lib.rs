@@ -97,6 +97,17 @@ pub struct EngineArtifact {
     /// [`EngineProfile::precision`] or the prebuilt is skipped in favour of an
     /// on-device build.
     pub precision: Precision,
+    /// The optimization profile this artifact was BUILT at, as
+    /// [`EngineProfile::shape_tag`] renders it — e.g.
+    /// `"images:1x3x256x256|2x3x512x512|2x3x640x640"`, or `""` for a static-shape
+    /// engine.
+    ///
+    /// Guarded because a TensorRT engine only accepts shapes inside the profile it was
+    /// built with. Without this an engine built for one resolution range is served to a
+    /// caller asking for another, deserializes happily, and then rejects perfectly
+    /// ordinary frames at `setInputShape` — with an empty TensorRT message. The failure
+    /// looks like a bug in the caller's code, not a mismatched download.
+    pub shape_profile: &'static str,
 }
 
 /// A distributable model: where it lives on the Hub and what it contains.
@@ -143,7 +154,14 @@ pub static REGISTRY: &[ModelSpec] = &[
             filename: "raco_aliked_extractor_k3072.onnx",
             sha256: "acafa7a3d54e9aa5fb1ec0c20f593e2b6879c5570fde65819a5119301eef680f",
         }],
-        engines: &[],
+        engines: &[EngineArtifact {
+            filename: "raco-aliked-extractor-k3072-trt10.3.0.30-sm87-fp16.engine",
+            sha256: "ca529ee8ab2e3dc919f8201331d5d4d44a300a61e8ffef4ec6f243a82e53bffc",
+            trt_version: "10.3.0.30",
+            sm: "87",
+            precision: Precision::Fp16,
+            shape_profile: "images:1x3x256x256|2x3x512x512|2x3x640x640",
+        }],
     },
     ModelSpec {
         name: "raco-aliked-extractor-k1024",
@@ -159,6 +177,7 @@ pub static REGISTRY: &[ModelSpec] = &[
             trt_version: "10.3.0.30",
             sm: "87",
             precision: Precision::Fp16,
+            shape_profile: "images:1x3x256x256|2x3x512x512|2x3x640x640",
         }],
     },
     ModelSpec {
@@ -181,7 +200,7 @@ pub static REGISTRY: &[ModelSpec] = &[
     // 7.9 ms at k512, 21.6 ms at k1024, 126.5 ms at k3072 on an Orin Nano.
     ModelSpec {
         name: "lightglue-matcher-k3072",
-        hf_repo: "kornia/lightglue-onnx",
+        hf_repo: "kornia/lightglue",
         revision: "main",
         files: &[ModelFile {
             filename: "lightglue_matcher_k3072.onnx",
@@ -193,11 +212,12 @@ pub static REGISTRY: &[ModelSpec] = &[
             trt_version: "10.3.0.30",
             sm: "87",
             precision: Precision::Fp16,
+            shape_profile: "descriptors:2x1x3072x128|2x1x3072x128|2x1x3072x128;normalized_keypoints:2x1x3072x2|2x1x3072x2|2x1x3072x2",
         }],
     },
     ModelSpec {
         name: "lightglue-matcher-k1024",
-        hf_repo: "kornia/lightglue-onnx",
+        hf_repo: "kornia/lightglue",
         revision: "main",
         files: &[ModelFile {
             filename: "lightglue_matcher_k1024.onnx",
@@ -209,11 +229,12 @@ pub static REGISTRY: &[ModelSpec] = &[
             trt_version: "10.3.0.30",
             sm: "87",
             precision: Precision::Fp16,
+            shape_profile: "descriptors:2x1x1024x128|2x1x1024x128|2x1x1024x128;normalized_keypoints:2x1x1024x2|2x1x1024x2|2x1x1024x2",
         }],
     },
     ModelSpec {
         name: "lightglue-matcher-k512",
-        hf_repo: "kornia/lightglue-onnx",
+        hf_repo: "kornia/lightglue",
         revision: "main",
         files: &[ModelFile {
             filename: "lightglue_matcher_k512.onnx",
@@ -225,6 +246,7 @@ pub static REGISTRY: &[ModelSpec] = &[
             trt_version: "10.3.0.30",
             sm: "87",
             precision: Precision::Fp16,
+            shape_profile: "descriptors:2x1x512x128|2x1x512x128|2x1x512x128;normalized_keypoints:2x1x512x2|2x1x512x2|2x1x512x2",
         }],
     },
     ModelSpec {
@@ -250,6 +272,7 @@ pub static REGISTRY: &[ModelSpec] = &[
             trt_version: "10.3.0.30",
             sm: "87",
             precision: Precision::Fp16,
+            shape_profile: "image:1x3x240x320|1x3x640x640|1x3x1088x1920",
         }],
     },
     ModelSpec {
@@ -269,6 +292,7 @@ pub static REGISTRY: &[ModelSpec] = &[
             trt_version: "10.3.0.30",
             sm: "87",
             precision: Precision::Fp16,
+            shape_profile: "",
         }],
     },
     ModelSpec {
@@ -289,6 +313,7 @@ pub static REGISTRY: &[ModelSpec] = &[
             trt_version: "10.3.0.30",
             sm: "87",
             precision: Precision::Fp16,
+            shape_profile: "",
         }],
     },
     ModelSpec {
@@ -309,6 +334,7 @@ pub static REGISTRY: &[ModelSpec] = &[
             trt_version: "10.3.0.30",
             sm: "87",
             precision: Precision::Fp16,
+            shape_profile: "",
         }],
     },
     ModelSpec {
@@ -329,6 +355,7 @@ pub static REGISTRY: &[ModelSpec] = &[
             trt_version: "10.3.0.30",
             sm: "87",
             precision: Precision::Fp16,
+            shape_profile: "",
         }],
     },
     ModelSpec {
@@ -349,6 +376,7 @@ pub static REGISTRY: &[ModelSpec] = &[
             trt_version: "10.3.0.30",
             sm: "87",
             precision: Precision::Fp32,
+            shape_profile: "",
         }],
     },
     ModelSpec {
@@ -397,6 +425,7 @@ pub static REGISTRY: &[ModelSpec] = &[
             trt_version: "10.3.0.30",
             sm: "87",
             precision: Precision::Bf16,
+            shape_profile: "",
         }],
     },
 ];
@@ -466,7 +495,13 @@ impl ModelHub {
         }
         profile.validate()?;
         let (local_trt, local_sm) = (vrt::TENSORRT_VERSION, compute_capability()?);
-        let art = match pick_artifact(spec.engines, local_trt, &local_sm, profile.precision()) {
+        let art = match pick_artifact(
+            spec.engines,
+            local_trt,
+            &local_sm,
+            profile.precision(),
+            &profile.shape_tag(),
+        ) {
             Some(a) => a,
             None => return Ok(None), // no matching prebuilt for this env → build from ONNX
         };
@@ -517,15 +552,24 @@ pub fn resolve_engine(name: &str, profile: &EngineProfile) -> Result<String, Hub
 /// Split out from `get_engine` so the matching rule is testable without a network
 /// round-trip or a GPU — hence `test` in the cfg: `get_engine` itself is hub-only.
 #[cfg(any(feature = "hub", test))]
+/// Select a prebuilt engine that is usable *as-is* for this request.
+///
+/// All four guards matter, and each one exists because violating it fails silently or
+/// confusingly rather than loudly: `trt_version` and `sm` because an engine will not
+/// deserialize elsewhere, `precision` because an fp16 artifact answering a bf16 request
+/// returns wrong numbers, and `shape_profile` because an engine only accepts shapes
+/// inside the profile it was built with. A miss is not an error — it just means the
+/// engine gets built on-device from the ONNX instead.
 fn pick_artifact<'a>(
     engines: &'a [EngineArtifact],
     trt: &str,
     sm: &str,
     want: Precision,
+    shapes: &str,
 ) -> Option<&'a EngineArtifact> {
-    engines
-        .iter()
-        .find(|e| e.trt_version == trt && e.sm == sm && e.precision == want)
+    engines.iter().find(|e| {
+        e.trt_version == trt && e.sm == sm && e.precision == want && e.shape_profile == shapes
+    })
 }
 
 /// Verify a file against an expected sha256 hex digest.
@@ -626,6 +670,33 @@ impl EngineProfile {
             }
         }
         format!("{:x}", h.finalize())[..8].to_string()
+    }
+
+    /// Canonical rendering of this profile's shape constraints, used to match a
+    /// prebuilt [`EngineArtifact`] against what the caller actually needs.
+    ///
+    /// `"name:MINxDIMS|OPTxDIMS|MAXxDIMS"` per input, `;`-joined, sorted by input name
+    /// so that declaration order cannot cause a spurious mismatch. Empty for a
+    /// static-shape profile.
+    ///
+    /// Deliberately readable rather than a hash: it goes into the registry by hand, and
+    /// a reviewer should be able to see which resolutions an artifact covers.
+    pub fn shape_tag(&self) -> String {
+        let dims = |d: &[i64]| {
+            d.iter()
+                .map(|v| v.to_string())
+                .collect::<Vec<_>>()
+                .join("x")
+        };
+        let mut parts: Vec<String> = self
+            .inputs
+            .iter()
+            .map(|(name, min, opt, max)| {
+                format!("{name}:{}|{}|{}", dims(min), dims(opt), dims(max))
+            })
+            .collect();
+        parts.sort();
+        parts.join(";")
     }
 
     /// Reject build options that are individually legal but wrong together.
@@ -977,6 +1048,54 @@ mod tests {
         assert_eq!(EngineProfile::default().cache_tag(), legacy);
     }
 
+    /// A prebuilt is only served when it covers the SHAPES the caller needs.
+    ///
+    /// A TensorRT engine accepts only shapes inside the optimization profile it was built
+    /// with. Matching on trt+sm+precision alone hands a caller an engine built for another
+    /// resolution range; it deserializes happily and then rejects perfectly ordinary
+    /// frames at setInputShape — with an empty TensorRT message, so it reads as a bug in
+    /// the caller's code rather than a mismatched download. Falling back to an on-device
+    /// build is always correct, so a mismatch must simply miss.
+    #[test]
+    fn prebuilt_must_cover_the_requested_shape_profile() {
+        const NARROW: &str = "images:1x3x640x640|1x3x640x640|1x3x640x640";
+        const WIDE: &str = "images:1x3x256x256|2x3x512x512|2x3x640x640";
+        const ARTS: &[EngineArtifact] = &[EngineArtifact {
+            filename: "narrow-trt10.3.0.30-sm87-fp16.engine",
+            sha256: "00",
+            trt_version: "10.3.0.30",
+            sm: "87",
+            precision: Precision::Fp16,
+            shape_profile: NARROW,
+        }];
+
+        // Same env and precision, different shapes → must NOT be served.
+        assert!(pick_artifact(ARTS, "10.3.0.30", "87", Precision::Fp16, WIDE).is_none());
+        // Exact match → served.
+        assert!(pick_artifact(ARTS, "10.3.0.30", "87", Precision::Fp16, NARROW).is_some());
+        // A static-shape request must not pick up a dynamic-profile engine either.
+        assert!(pick_artifact(ARTS, "10.3.0.30", "87", Precision::Fp16, "").is_none());
+    }
+
+    /// `shape_tag` must be stable and order-independent, or a registry pin written by hand
+    /// silently stops matching when someone reorders a profile's inputs.
+    #[test]
+    fn shape_tag_is_canonical_and_order_independent() {
+        let mk = |inputs: Vec<ShapeProfile>| EngineProfile {
+            inputs,
+            ..EngineProfile::default()
+        };
+        let a = ("a".to_string(), vec![1, 2], vec![3, 4], vec![5, 6]);
+        let b = ("b".to_string(), vec![7], vec![8], vec![9]);
+
+        assert_eq!(
+            mk(vec![a.clone(), b.clone()]).shape_tag(),
+            mk(vec![b, a.clone()]).shape_tag()
+        );
+        assert_eq!(mk(vec![a]).shape_tag(), "a:1x2|3x4|5x6");
+        assert_eq!(mk(vec![]).shape_tag(), "");
+    }
+
     /// A prebuilt is only served when its precision matches the request. Without this
     /// an fp16 artifact answers a bf16 request — for a ViT that is the all-NaN engine,
     /// delivered silently in preference to a correct on-device build.
@@ -989,6 +1108,7 @@ mod tests {
                 trt_version: "10.3.0.30",
                 sm: "87",
                 precision: Precision::Fp16,
+                shape_profile: "",
             },
             EngineArtifact {
                 filename: "m-bf16.engine",
@@ -996,20 +1116,21 @@ mod tests {
                 trt_version: "10.3.0.30",
                 sm: "87",
                 precision: Precision::Bf16,
+                shape_profile: "",
             },
         ];
-        let pick = |p| pick_artifact(ARTS, "10.3.0.30", "87", p).map(|a| a.filename);
+        let pick = |p| pick_artifact(ARTS, "10.3.0.30", "87", p, "").map(|a| a.filename);
         assert_eq!(pick(Precision::Fp16), Some("m-fp16.engine"));
         assert_eq!(pick(Precision::Bf16), Some("m-bf16.engine"));
         // No fp32 artifact listed → build on-device rather than serving either of these.
         assert_eq!(pick(Precision::Fp32), None);
         // trt/sm still gate independently.
         assert_eq!(
-            pick_artifact(ARTS, "10.4.0.0", "87", Precision::Fp16).map(|a| a.filename),
+            pick_artifact(ARTS, "10.4.0.0", "87", Precision::Fp16, "").map(|a| a.filename),
             None
         );
         assert_eq!(
-            pick_artifact(ARTS, "10.3.0.30", "86", Precision::Fp16).map(|a| a.filename),
+            pick_artifact(ARTS, "10.3.0.30", "86", Precision::Fp16, "").map(|a| a.filename),
             None
         );
     }
