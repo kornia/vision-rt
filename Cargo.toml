@@ -46,6 +46,10 @@ kornia-image   = { git = "https://github.com/kornia/kornia-rs", tag = "v0.1.15-r
 kornia-tensor  = { git = "https://github.com/kornia/kornia-rs", tag = "v0.1.15-rc.5", features = ["cuda"] }
 kornia-imgproc = { git = "https://github.com/kornia/kornia-rs", tag = "v0.1.15-rc.5", features = ["cuda"] }
 kornia-io      = { git = "https://github.com/kornia/kornia-rs", tag = "v0.1.15-rc.5" }
+# Linear algebra and two-view geometry, used by the benchmark examples so the evaluation
+# harness shares kornia's Mat3/Vec3 types and its Sampson error rather than hand-rolling.
+kornia-algebra = { git = "https://github.com/kornia/kornia-rs", tag = "v0.1.15-rc.5" }
+kornia-3d      = { git = "https://github.com/kornia/kornia-rs", tag = "v0.1.15-rc.5" }
 
 [workspace.package]
 version = "0.1.0"

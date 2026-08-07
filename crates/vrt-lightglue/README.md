@@ -11,7 +11,7 @@ let mut glue = LightGlue::from_engine_file(matcher,  stream.clone())?;
 
 raco.submit(&left,  &mut l)?;          // async
 raco.submit(&right, &mut r)?;          // async
-glue.submit_match(&l, &r, &mut m)?;    // async
+glue.submit(&l, &r, &mut m)?;    // async
 stream.synchronize()?;                 // the caller owns the one sync
 
 for (i0, i1) in m.pairs(0.0)? { /* left kp i0 <-> right kp i1 */ }
@@ -33,7 +33,7 @@ matched against a live frame, instead of only the two images in one forward pass
 - **Pass `normalized_keypoints`, never `keypoints`.** Same shape, different spaces; mixing
   them degrades matching silently.
 - **Pairs are interleaved** `[L0, R0, …]` and split *inside* the graph, so one pair is
-  leading dim 2, not two inputs. `submit_match` packs both results on-device for you.
+  leading dim 2, not two inputs. `submit` packs both results on-device for you.
 - **Build extractor and matcher on one shared stream.** A cross-stream result is rejected
   (`StreamMismatch`) rather than raced.
 - **`pairs()` is the match count**, not `capacity()` — that returns the engine's fixed `K`.
@@ -51,7 +51,7 @@ opposite directions, because RaCo's ranker is bypassed at K ≥ 3072.
 | 1024 | 21.6 ms | 110.4 ms | 132.0 ms |
 | 3072 | 126.5 ms | **57.0 ms** | 183.5 ms |
 
-**Best of both: mix them.** `submit_match` accepts results holding *more* than the
+**Best of both: mix them.** `submit` accepts results holding *more* than the
 matcher's `K` and uses the first `K`, which works because RaCo emits keypoints in
 descending score order and both tensors are row-major — the prefix is the top-`K` and is
 already contiguous. Extract with k3072 (ranker bypassed, cheap) and match with k1024:
@@ -126,34 +126,38 @@ if `H·left` lands within 3 px of `right`. Prepare with `scripts/get_oxford.sh` 
 
 | pair | RaCo-ALIKED + LightGlue+ | RaCo-ALIKED + mutual-NN | XFeat + mutual-NN |
 |---|---|---|---|
-| bark/2 | 476, **96.9%** | 253, 23.6% | 838, 53.4% |
+| bark/2 | 476, **97.1%** | 256, 24.4% | 831, 53.1% |
 | bark/3 | 158, **88.8%** | 0, 0.0% | 0, **0.0%** |
-| bark/4 | 154, **91.1%** | 1, 0.1% | 0, **0.0%** |
-| bark/5 | 142, **96.6%** | 18, 1.9% | 5, **0.6%** |
+| bark/4 | 163, **90.1%** | 1, 0.1% | 0, **0.0%** |
+| bark/5 | 142, **97.9%** | 16, 1.8% | 5, **0.6%** |
 | bark/6 | 0, 0.0% | 0, 0.0% | 0, 0.0% |
-| boat/2 | 692, **98.9%** | 1967, 92.6% | 1716, 71.9% |
+| boat/2 | 692, **98.9%** | 1967, 92.6% | 1715, 71.9% |
 | boat/4 | 424, **94.2%** | 0, 0.0% | 0, **0.0%** |
-| graf/3 | 477, 84.7% | 615, 51.2% | 774, 51.2% |
+| graf/3 | 477, 84.7% | 615, 51.2% | 774, 51.1% |
 | graf/6 | 257, **84.8%** | 7, 1.1% | 36, 4.8% |
-| **total inliers** | **5157** | 5072 | 6072 |
+| **total inliers** | **5166** | 5073 | 6064 |
 
 ### IMC 2021 phototourism — 3D scenes, ground-truth poses, stratified by difficulty
 
 Oxford is planar: one homography maps every pixel. Phototourism is not, so ground truth
-can only say a match must lie on its **epipolar line**, and a match is an inlier when the
-symmetric epipolar distance under `F = K2⁻ᵀ[t]ₓR K1⁻¹` is under 3 px. That is a *weaker*
-test — a match on the right line at the wrong depth passes — so these numbers are not
-comparable to the Oxford ones. 90 pairs from `reichstag`, `sacre_coeur` and
-`st_peters_square`, six per scene per co-visibility band (0.1 = barely overlapping):
+can only say a match must lie on its **epipolar line**, and a match is an inlier when its
+**Sampson error** against `F = K2⁻ᵀ[t]ₓR K1⁻¹` is under 1 px (`kornia_3d::pose`). That is a
+*weaker* test than Oxford's — a match on the right line at the wrong depth passes — so
+these numbers are not comparable to the Oxford ones. 90 pairs from `reichstag`,
+`sacre_coeur` and `st_peters_square`, six per scene per co-visibility band (0.1 = barely
+overlapping):
 
 | co-vis | pairs | RaCo-ALIKED + LightGlue+ | RaCo-ALIKED + mutual-NN | XFeat + mutual-NN |
 |---|---|---|---|---|
-| 0.1 | 18 | **85.2%** | 36.6% | 16.7% |
-| 0.2 | 18 | **90.7%** | 54.3% | 36.1% |
-| 0.3 | 18 | **90.4%** | 59.9% | 44.6% |
-| 0.4 | 18 | **90.6%** | 63.1% | 49.3% |
-| 0.5 | 18 | **91.9%** | 67.0% | 52.7% |
-| **all** | **90** | **90.2%** (20700 inl) | 58.2% (50304) | 43.5% (35292) |
+| 0.1 | 18 | **87.9%** | 38.0% | 17.1% |
+| 0.2 | 18 | **90.7%** | 54.0% | 35.6% |
+| 0.3 | 18 | **90.2%** | 59.5% | 43.8% |
+| 0.4 | 18 | **89.8%** | 62.4% | 48.7% |
+| 0.5 | 18 | **91.4%** | 66.1% | 51.5% |
+| **all** | **90** | **90.2%** (20709 inl) | 57.9% (50032) | 42.8% (34740) |
+
+Loosening the threshold does not change the ordering, only the spread — at 3 px the totals
+are 99.5% / 74.7% / 66.4%, at 5 px 99.8% / 79.2% / 74.0%.
 
 Prepare with `scripts/prep_imc.py` (metadata only — it converts the dataset's HDF5
 calibration and .npy pair lists to text and never touches an image), then run
@@ -165,22 +169,28 @@ calibration and .npy pair lists to text and never touches an image), then run
   suggests.** Decomposing the ground-truth homographies gives the actual in-plane
   rotations: `bark/3` is **+150.2°**, `bark/4` is **-119.8°**, `boat/4` is **-79.8°**.
   XFeat scores **0.0%** on every pair beyond ~79° and is nonzero on every pair below it;
-  RaCo-ALIKED + LightGlue holds **88.8 / 91.1 / 94.2%** on those three. What is *not*
+  RaCo-ALIKED + LightGlue holds **88.8 / 90.1 / 94.2%** on those three. What is *not*
   handled is extreme scale: `bark/6` combines 153° with a 4.2x zoom and returns 4 matches.
 - **LightGlue buys precision, not recall.** Columns 1 and 2 use *identical* RaCo keypoints
   and *identical* ALIKED 128-D descriptors; only the matcher differs, so column 2 tests
   the descriptors alone. On Oxford mutual-NN finds nearly as many true correspondences
-  (5072 vs 5157) and buries them in outliers.
+  (5073 vs 5166) and buries them in outliers.
 - **Total inliers alone is misleading.** XFeat has the most on Oxford (6072) and is the
   least usable, because precision is what a pose solver needs.
 - **Difficulty separates them.** Across the co-visibility bands LightGlue decays
-  gracefully (91.9% → 85.2%) while mutual-NN falls off a cliff (67.0% → 36.6%) and XFeat
-  falls further (52.7% → 16.7%). Easy pairs hide this, which is why the bands are
+  gracefully (91.4% → 87.9%) while mutual-NN falls off a cliff (66.1% → 38.0%) and XFeat
+  falls further (51.5% → 17.1%). Easy pairs hide this, which is why the bands are
   reported separately rather than as one mean.
+- **It lands where the literature does.** The IMC2021 leaderboard's own ALIKED-2k +
+  LightGlue entry reports a per-scene matching score at 3 px of 0.686–0.945; our 90.2%
+  sits inside that band. The comparison is indicative rather than exact — different scenes
+  (validation vs test) and different thresholding conventions — but it is the closest
+  published point of reference.
 
 > Mutual-NN's similarity gate matters enormously and is descriptor-specific: at the
-> XFeat-tuned 0.82 it returns **zero** matches on 11 of the 15 Oxford pairs; ungated it
-> reaches 5072 inliers at poor precision. There is no setting that recovers both.
+> XFeat-tuned 0.82 it returns **zero** matches on 10 of the 15 Oxford pairs and falls to
+> 919 inliers; ungated it reaches 5073 at poor precision. There is no setting that
+> recovers both, which is why the gate is a CLI argument and not a constant.
 
 ## Licences
 

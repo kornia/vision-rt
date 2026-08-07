@@ -27,7 +27,7 @@ stream.synchronize()?;                     // the caller owns the one sync
 let kpts = res.kpts_to_host()?;     // original-image pixels
 ```
 
-Match two results with `Matcher::new(stream)` → `submit_match(&a.descs, a.count(),
+Match two results with `Matcher::new(stream)` → `submit(&a.descs, a.count(),
 &b.descs, b.count(), cossim, &mut MatchResult)` → `stream.synchronize()` →
 `MatchResult::pairs()`. All CUDA kernels are NVRTC-JIT-compiled at runtime.
 

@@ -5,13 +5,17 @@
 //! pixel, so a match has a single correct destination. Phototourism is not planar. There
 //! is no homography, only a camera pair, and the strongest statement ground truth can
 //! make about a match is that it must lie on the **epipolar line**. So a match `(i, j)`
-//! counts as an inlier iff the symmetric epipolar distance
+//! counts as an inlier iff its **Sampson error** against `F = K2⁻ᵀ [t]ₓ R K1⁻¹`, built
+//! from the ground-truth poses, is under `inlier_px`.
 //!
-//! ```text
-//!   |x2ᵀ F x1| · ( 1/‖(F x1)_xy‖ + 1/‖(Fᵀ x2)_xy‖ )
-//! ```
+//! Sampson error comes from `kornia_3d::pose::sampson_distance`, the same error family the
+//! IMC challenge's own DEGENSAC configuration uses. That makes these numbers *comparable
+//! in kind* to the published leaderboard -- not identical to it, since the leaderboard's
+//! matching score is computed under its own thresholding conventions. Treat the comparison
+//! as indicative.
 //!
-//! is under `inlier_px`, with `F = K2⁻ᵀ [t]ₓ R K1⁻¹` built from the ground-truth poses.
+//! Note `sampson_distance` returns the error **squared**, despite the name; the square root
+//! is taken here so `inlier_px` is in pixels.
 //!
 //! **This is a weaker test than Oxford's** and the two sets of numbers are not
 //! comparable. Epipolar agreement is necessary but not sufficient: a match sitting on
@@ -46,15 +50,24 @@ const DEFAULT_MIN_COSSIM: f32 = 0.0;
 /// 640, and RaCo needs both sides to be multiples of 32.
 const MAX_SIDE: usize = 640;
 
-#[path = "common/geometry.rs"]
-mod geometry;
-use geometry::{inv3, matvec3, mul3, scale3, skew3, sym_epipolar, transpose3, M3};
+use kornia_3d::pose::{essential_from_fundamental, sampson_distance, Pose3d};
+use kornia_algebra::{Mat3F64, Vec2F64, Vec3F64};
+
+/// `Mat3F64` is column-major (glam); the files are row-major, so transpose on the way in.
+fn mat3_from_row_major(v: &[f64]) -> Mat3F64 {
+    let mut a = [0.0; 9];
+    a.copy_from_slice(v);
+    Mat3F64::from_cols_array(&a).transpose()
+}
 
 /// Camera calibration as written by `scripts/prep_imc.py`: K (9), R (9), T (3).
+///
+/// The extrinsics are a `kornia_3d::pose::Pose3d`, whose convention (`p_cam = R p_world +
+/// t`) is exactly the dataset's, so the relative pose is `Pose3d::between` rather than
+/// hand-rolled matrix algebra.
 struct Calib {
-    k: M3,
-    r: M3,
-    t: [f64; 3],
+    k: Mat3F64,
+    pose: Pose3d,
 }
 
 impl Calib {
@@ -66,49 +79,72 @@ impl Calib {
         if v.len() != 21 {
             return Err(format!("{}: expected 21 floats, got {}", path.display(), v.len()).into());
         }
-        let (mut k, mut r) = ([0.0; 9], [0.0; 9]);
-        k.copy_from_slice(&v[0..9]);
-        r.copy_from_slice(&v[9..18]);
         Ok(Self {
-            k,
-            r,
-            t: [v[18], v[19], v[20]],
+            k: mat3_from_row_major(&v[0..9]),
+            pose: Pose3d::new(
+                mat3_from_row_major(&v[9..18]),
+                Vec3F64::new(v[18], v[19], v[20]),
+            ),
         })
     }
 
     /// Resizing the image rescales the intrinsics with it. Skipping this is silent: the
     /// epipolar geometry stays self-consistent and simply describes the wrong camera.
-    fn scaled_k(&self, sx: f64, sy: f64) -> M3 {
-        mul3(&scale3(sx, sy), &self.k)
+    fn scaled_k(&self, sx: f64, sy: f64) -> Mat3F64 {
+        Mat3F64::from_diagonal(Vec3F64::new(sx, sy, 1.0)) * self.k
     }
 }
 
 /// Ground-truth fundamental matrix mapping `a`'s pixels to epipolar lines in `b`.
-fn fundamental(a: &Calib, ka: &M3, b: &Calib, kb: &M3) -> Option<M3> {
-    // world -> cam is x_c = R x_w + T, so the relative pose from a to b is
-    let r_ab = mul3(&b.r, &transpose3(&a.r));
-    let ra_ta = matvec3(&r_ab, &a.t);
-    let t = [b.t[0] - ra_ta[0], b.t[1] - ra_ta[1], b.t[2] - ra_ta[2]];
-    let e = mul3(&skew3(&t), &r_ab);
-    let f = mul3(&mul3(&transpose3(&inv3(kb)?), &e), &inv3(ka)?);
-    // Normalise so the threshold comparison is not at the mercy of E's arbitrary scale.
-    let n = f.iter().fold(0.0f64, |m, v| m.max(v.abs()));
-    if n < 1e-12 {
+///
+/// Sampson error is invariant to F's scale (numerator and denominator both scale with it),
+/// so no normalisation is needed here.
+fn fundamental(a: &Calib, ka: &Mat3F64, b: &Calib, kb: &Mat3F64) -> Option<Mat3F64> {
+    let (r, t) = Pose3d::between(&a.pose, &b.pose).to_rt();
+    // A near-zero baseline is a pure rotation: F degenerates and every match would pass
+    // the epipolar test vacuously, so report it rather than scoring the pair.
+    if t.length() < 1e-9 {
         return None;
     }
-    Some(f.map(|v| v / n))
+    // E = [t]x R.
+    let skew = Mat3F64::from_cols(
+        Vec3F64::new(0.0, t.z, -t.y),
+        Vec3F64::new(-t.z, 0.0, t.x),
+        Vec3F64::new(t.y, -t.x, 0.0),
+    );
+    let e = skew * r;
+    // Inverse of kornia's `essential_from_fundamental` (E = K2^T F K1).
+    let f = kb.inverse().transpose() * e * ka.inverse();
+    debug_assert!(
+        essential_from_fundamental(&f, ka, kb)
+            .to_cols_array()
+            .iter()
+            .zip(e.to_cols_array())
+            .all(|(a, b)| (a - b).abs() < 1e-6),
+        "F must round-trip through kornia's E<->F conversion"
+    );
+    Some(f)
 }
 
 fn score(
     pairs: &[(usize, usize)],
     lk: &[(f32, f32)],
     rk: &[(f32, f32)],
-    f: &M3,
+    f: &Mat3F64,
     thresh: f64,
 ) -> (usize, usize) {
     let inl = pairs
         .iter()
-        .filter(|(i, j)| sym_epipolar(f, lk[*i], rk[*j]) <= thresh)
+        .filter(|(i, j)| {
+            let (p1, p2) = (lk[*i], rk[*j]);
+            // sampson_distance returns the SQUARED error despite the name.
+            let d2 = sampson_distance(
+                f,
+                &Vec2F64::new(p1.0 as f64, p1.1 as f64),
+                &Vec2F64::new(p2.0 as f64, p2.1 as f64),
+            );
+            d2.sqrt() <= thresh
+        })
         .count();
     (pairs.len(), inl)
 }
@@ -193,7 +229,7 @@ fn main() -> Result<(), vrt::BoxError> {
 
     println!(
         "IMC2021 phototourism val — RaCo k{k}, LightGlue k{}, mutual-NN {DESC_DIM}-D \
-         (cossim>={min_cossim}), symmetric epipolar <= {thresh}px, long side {MAX_SIDE}",
+         (cossim>={min_cossim}), Sampson <= {thresh}px, long side {MAX_SIDE}",
         glue.num_keypoints()
     );
 
@@ -220,8 +256,8 @@ fn main() -> Result<(), vrt::BoxError> {
         let (dl, dr) = (im1.to_cuda(&stream)?, im2.to_cuda(&stream)?);
         raco.submit(&dl, &mut l)?;
         raco.submit(&dr, &mut r)?;
-        glue.submit_match(&l, &r, &mut lg_out)?;
-        mnn.submit_match(
+        glue.submit(&l, &r, &mut lg_out)?;
+        mnn.submit(
             l.descs_slice(),
             k,
             r.descs_slice(),
@@ -240,7 +276,7 @@ fn main() -> Result<(), vrt::BoxError> {
             x.submit(&dl, xl)?;
             x.submit(&dr, xr)?;
             stream.synchronize()?;
-            m.submit_match(&xl.descs, xl.count(), &xr.descs, xr.count(), min_cossim, xo)?;
+            m.submit(&xl.descs, xl.count(), &xr.descs, xr.count(), min_cossim, xo)?;
             stream.synchronize()?;
             let (fl, fr) = (xl.kpts_to_host()?, xr.kpts_to_host()?);
             let xlk: Vec<(f32, f32)> = fl.chunks_exact(2).map(|p| (p[0], p[1])).collect();
@@ -290,7 +326,7 @@ fn main() -> Result<(), vrt::BoxError> {
         tot.2.pct()
     );
     if skipped > 0 {
-        println!("\n{skipped} pairs skipped (degenerate ground-truth geometry)");
+        println!("\n{skipped} pairs skipped (near-zero baseline; F is degenerate)");
     }
     Ok(())
 }

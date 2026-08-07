@@ -18,19 +18,18 @@
 //! everything after the header is a plain byte buffer handed to a `kornia` image.
 //!
 //! Usage:
-//!   cargo run --release -p vrt-lightglue --example prep_oxford -- <src_dir> <out_dir> [max_side]
+//!   cargo run --release -p vrt-lightglue --example prep_oxford -- \
+//!       <src_dir> <out_dir> [max_side] [nearest|bilinear|bicubic|lanczos]
 
 use std::path::{Path, PathBuf};
 
 use kornia_image::{Image, ImageSize};
 use kornia_imgproc::interpolation::InterpolationMode;
-use kornia_imgproc::resize::resize_fast_rgb;
+use kornia_imgproc::resize::resize;
 use kornia_io::functional::read_image_any_rgb8;
 use kornia_io::png::write_image_png_rgb8;
 
-#[path = "common/geometry.rs"]
-mod geometry;
-use geometry::{inv3, mul3, scale3, warp, M3};
+use kornia_algebra::{Mat3F64, Vec3F64};
 
 /// Below this, treat the rescaled ground truth as broken rather than the matcher.
 const MIN_CORRELATION: f64 = 0.3;
@@ -116,18 +115,40 @@ fn target_size(w: usize, h: usize, max_side: usize) -> Dims {
 type Dims = (usize, usize);
 
 /// Convert one frame, returning original and resized dimensions.
-fn convert(src: &Path, dst: &Path, max_side: usize) -> Result<(Dims, Dims), vrt::BoxError> {
+fn convert(
+    src: &Path,
+    dst: &Path,
+    max_side: usize,
+    interpolation: InterpolationMode,
+) -> Result<(Dims, Dims), vrt::BoxError> {
     let img = read_netpbm_rgb8(src)?;
     let (w, h) = (img.cols(), img.rows());
     let (nw, nh) = target_size(w, h, max_side);
-    let mut out = Image::<u8, 3>::from_size_val(
+
+    // `resize` is the f32 path: it accepts any interpolation kernel and does not round to
+    // u8 inside the filter. This runs once, offline, so the conversion is worth the
+    // quality -- the runtime path in `eval_imc` uses the u8 fast resize instead.
+    let src_f32 = Image::<f32, 3>::new(
+        img.size(),
+        img.as_slice().iter().map(|&v| v as f32).collect(),
+    )?;
+    let mut dst_f32 = Image::<f32, 3>::from_size_val(
         ImageSize {
             width: nw,
             height: nh,
         },
-        0,
+        0.0,
     )?;
-    resize_fast_rgb(&img, &mut out, InterpolationMode::Bilinear)?;
+    resize(&src_f32, &mut dst_f32, interpolation)?;
+
+    let out = Image::<u8, 3>::new(
+        dst_f32.size(),
+        dst_f32
+            .as_slice()
+            .iter()
+            .map(|&v| v.round().clamp(0.0, 255.0) as u8)
+            .collect(),
+    )?;
     write_image_png_rgb8(dst, &out)?;
     Ok(((w, h), (nw, nh)))
 }
@@ -139,12 +160,19 @@ fn luma(img: &Image<u8, 3>, x: usize, y: usize) -> f64 {
 }
 
 /// Warp `b`'s grid back through `h` into `a` and correlate. Returns (overlap %, corr).
-fn photometric_check(a: &Image<u8, 3>, b: &Image<u8, 3>, h: &M3) -> Option<(f64, f64)> {
-    let hi = inv3(h)?;
+fn photometric_check(a: &Image<u8, 3>, b: &Image<u8, 3>, h: &Mat3F64) -> Option<(f64, f64)> {
+    if h.determinant().abs() < 1e-12 {
+        return None;
+    }
+    let hi = h.inverse();
     let (mut xs, mut ys) = (Vec::new(), Vec::new());
     for y in 0..b.rows() {
         for x in 0..b.cols() {
-            let (sx, sy) = warp(&hi, x as f32, y as f32);
+            let p = hi * Vec3F64::new(x as f64, y as f64, 1.0);
+            if p.z.abs() < 1e-12 {
+                continue;
+            }
+            let (sx, sy) = (p.x / p.z, p.y / p.z);
             if sx >= 0.0 && sy >= 0.0 && (sx as usize) < a.cols() && (sy as usize) < a.rows() {
                 xs.push(luma(a, sx as usize, sy as usize));
                 ys.push(luma(b, x, y));
@@ -174,11 +202,20 @@ fn photometric_check(a: &Image<u8, 3>, b: &Image<u8, 3>, h: &M3) -> Option<(f64,
 fn main() -> Result<(), vrt::BoxError> {
     let a: Vec<String> = std::env::args().collect();
     if a.len() < 3 {
-        eprintln!("Usage: prep_oxford <src_dir> <out_dir> [max_side]");
+        eprintln!(
+            "Usage: prep_oxford <src_dir> <out_dir> [max_side] [nearest|bilinear|bicubic|lanczos]"
+        );
         std::process::exit(1);
     }
     let (src_root, out_root) = (PathBuf::from(&a[1]), PathBuf::from(&a[2]));
     let max_side: usize = a.get(3).and_then(|s| s.parse().ok()).unwrap_or(640);
+    let interpolation = match a.get(4).map(String::as_str).unwrap_or("bilinear") {
+        "nearest" => InterpolationMode::Nearest,
+        "bilinear" => InterpolationMode::Bilinear,
+        "bicubic" => InterpolationMode::Bicubic,
+        "lanczos" => InterpolationMode::Lanczos,
+        other => return Err(format!("unknown interpolation {other}").into()),
+    };
     std::fs::create_dir_all(&out_root)?;
 
     let mut seqs: Vec<String> = std::fs::read_dir(&src_root)?
@@ -201,7 +238,15 @@ fn main() -> Result<(), vrt::BoxError> {
                 .map(|e| sd.join(format!("img{i}.{e}")))
                 .find(|p| p.exists());
             if let Some(src) = src {
-                sizes.insert(i, convert(&src, &od.join(format!("img{i}.png")), max_side)?);
+                sizes.insert(
+                    i,
+                    convert(
+                        &src,
+                        &od.join(format!("img{i}.png")),
+                        max_side,
+                        interpolation,
+                    )?,
+                );
             }
         }
         let Some(&(orig1, new1)) = sizes.get(&1) else {
@@ -226,24 +271,38 @@ fn main() -> Result<(), vrt::BoxError> {
             if v.len() < 9 {
                 return Err(format!("{}: expected 9 floats", hp.display()).into());
             }
-            let mut h: M3 = [0.0; 9];
-            h.copy_from_slice(&v[..9]);
+            // Mat3F64 is column-major (glam); the ground-truth files are row-major.
+            let mut a9 = [0.0; 9];
+            a9.copy_from_slice(&v[..9]);
+            let h = Mat3F64::from_cols_array(&a9).transpose();
 
-            let s1 = scale3(
+            let s1 = Mat3F64::from_diagonal(Vec3F64::new(
                 new1.0 as f64 / orig1.0 as f64,
                 new1.1 as f64 / orig1.1 as f64,
-            );
-            let s2 = scale3(
+                1.0,
+            ));
+            let s2 = Mat3F64::from_diagonal(Vec3F64::new(
                 new_i.0 as f64 / orig_i.0 as f64,
                 new_i.1 as f64 / orig_i.1 as f64,
-            );
-            let hs = mul3(&mul3(&s2, &h), &inv3(&s1).ok_or("degenerate image scale")?);
-            let hs = hs.map(|x| x / hs[8]);
+                1.0,
+            ));
+            if s1.determinant().abs() < 1e-12 {
+                return Err("degenerate image scale".into());
+            }
+            let hs = s2 * h * s1.inverse();
+            // Fix the projective scale so the written matrix is comparable across pairs.
+            let w = hs.z_axis.z;
+            if w.abs() < 1e-12 {
+                return Err(format!("{}: degenerate rescaled homography", hp.display()).into());
+            }
+            let hs = Mat3F64::from_cols_array(&hs.to_cols_array().map(|x| x / w));
 
             let name = format!("H1to{i}.txt");
             std::fs::write(
                 od.join(&name),
-                hs.iter()
+                hs.transpose()
+                    .to_cols_array()
+                    .iter()
                     .map(|x| format!("{x:.10}"))
                     .collect::<Vec<_>>()
                     .join(" ")

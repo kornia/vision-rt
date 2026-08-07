@@ -4,7 +4,7 @@
 //! [`Matcher`] owns the single `xfeat_match_argmax` kernel and matches two sets of
 //! L2-normalised descriptors already on device (no re-upload). Cosine similarity =
 //! dot product (unit-norm descriptors). VPI-style, caller-owned output: allocate a
-//! [`MatchResult`] once, `submit_match` writes into it (**async, no sync**), sync
+//! [`MatchResult`] once, `submit` writes into it (**async, no sync**), sync
 //! the shared stream, then read [`MatchResult::pairs`].
 
 use cudarc::driver::sys::CUdeviceptr;
@@ -99,7 +99,7 @@ extern "C" __global__ void xfeat_match_argmax(
 /// Caller-owned mutual-NN match output (VPI-style), allocated once and reused.
 ///
 /// Capacity `cap` must be ≥ both descriptor counts of any pair matched into it
-/// (allocate with the extractor's `top_k`). [`Matcher::submit_match`] writes the
+/// (allocate with the extractor's `top_k`). [`Matcher::submit`] writes the
 /// argmax arrays here (async); after the stream sync, [`pairs`](Self::pairs)
 /// builds the `(i, j)` list on the host.
 pub struct MatchResult {
@@ -132,7 +132,7 @@ impl MatchResult {
         })
     }
 
-    /// Build mutual-NN pairs `(i, j)` from the last [`Matcher::submit_match`],
+    /// Build mutual-NN pairs `(i, j)` from the last [`Matcher::submit`],
     /// **after** the stream sync. `i` indexes set 0, `j` set 1; both are mutual
     /// nearest neighbours with cosine ≥ the submitted `min_cossim`.
     pub fn pairs(&self) -> Vec<(usize, usize)> {
@@ -160,7 +160,7 @@ impl MatchResult {
 /// then match any two device descriptor sets.
 pub struct Matcher {
     fn_match_argmax: CudaKernel,
-    /// Descriptor width this matcher was compiled for; `submit_match` rejects
+    /// Descriptor width this matcher was compiled for; `submit` rejects
     /// buffers that do not divide by it.
     dim: usize,
     stream: Arc<CudaStream>,
@@ -219,7 +219,7 @@ impl Matcher {
     /// **async, no sync**. `descs*` are `[n* × dim]` L2-normalised device buffers
     /// (e.g. `XFeatResult::descs` with `count`); `out.cap` must be ≥ `n0` and
     /// `n1`. Sync the stream, then read [`MatchResult::pairs`].
-    pub fn submit_match(
+    pub fn submit(
         &self,
         descs0: &CudaSlice<f32>,
         n0: usize,
@@ -408,7 +408,7 @@ mod tests {
             let mut out = matcher.alloc_result(n0.max(n1)).unwrap();
 
             let run = |out: &mut MatchResult| {
-                matcher.submit_match(&d0, n0, &d1, n1, -1.0, out).unwrap();
+                matcher.submit(&d0, n0, &d1, n1, -1.0, out).unwrap();
                 stream.synchronize().unwrap();
                 out.pairs()
             };
@@ -453,9 +453,7 @@ mod tests {
             let d1 = stream.clone_htod(&h1).unwrap();
             let mut out = matcher.alloc_result(n0.max(n1)).unwrap();
 
-            matcher
-                .submit_match(&d0, n0, &d1, n1, -1.0, &mut out)
-                .unwrap();
+            matcher.submit(&d0, n0, &d1, n1, -1.0, &mut out).unwrap();
             stream.synchronize().unwrap();
             let gpu: std::collections::HashSet<_> = out.pairs().into_iter().collect();
             let cpu: std::collections::HashSet<_> =
@@ -469,7 +467,7 @@ mod tests {
         let mut out = matcher.alloc_result(64).unwrap();
         assert!(
             matcher
-                .submit_match(&short, 64, &short, 64, -1.0, &mut out)
+                .submit(&short, 64, &short, 64, -1.0, &mut out)
                 .is_err(),
             "a buffer too short for its claimed count must be rejected"
         );

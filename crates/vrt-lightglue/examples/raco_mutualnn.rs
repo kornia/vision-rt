@@ -43,7 +43,7 @@ fn main() -> Result<(), vrt::BoxError> {
     let mut once = |l: &mut _, r: &mut _, m: &mut _| -> Result<(), vrt::BoxError> {
         raco.submit(&left, l)?;
         raco.submit(&right, r)?;
-        matcher.submit_match(l.descs_slice(), k, r.descs_slice(), k, min_cossim, m)?;
+        matcher.submit(l.descs_slice(), k, r.descs_slice(), k, min_cossim, m)?;
         stream.synchronize()?;
         Ok(())
     };

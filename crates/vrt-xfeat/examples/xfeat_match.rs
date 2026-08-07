@@ -88,7 +88,7 @@ fn main() -> Result<(), vrt::BoxError> {
     // Match on the same stream (decoupled Matcher): submit → one sync → read pairs.
     let matcher = Matcher::new(stream.clone())?;
     let mut m = matcher.alloc_result(map_res.capacity().max(query_res.capacity()))?;
-    matcher.submit_match(
+    matcher.submit(
         &map_res.descs,
         map_res.count(),
         &query_res.descs,

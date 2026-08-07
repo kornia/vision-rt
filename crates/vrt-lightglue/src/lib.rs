@@ -7,7 +7,7 @@
 //! this takes descriptors that were extracted *whenever*, so a live frame can be matched
 //! against descriptors stored in a map or relocalization database.
 //!
-//! Same async contract as the rest of vrt: `submit_match` enqueues pack → TRT with
+//! Same async contract as the rest of vrt: `submit` enqueues pack → TRT with
 //! **no sync**; the caller syncs the shared stream once, then reads. The engine writes
 //! its correspondences straight into the caller's [`LightGlueResult`] — there is no
 //! copy-out step.
@@ -37,7 +37,7 @@
 //!
 //! The leading dimension is `2P` — images stacked `[L0, R0, L1, R1, ...]` — and the
 //! pair split happens *inside* the graph. One pair is therefore leading dim 2, not two
-//! separate inputs. [`LightGlue::submit_match`] packs a left/right
+//! separate inputs. [`LightGlue::submit`] packs a left/right
 //! [`RaCoAlikedResult`] into that layout on-device, with no host round-trip.
 //!
 //! Feed it `normalized_keypoints`, never `keypoints` — see [`vrt_raco_aliked`] on the
@@ -104,7 +104,7 @@ extern "C" __global__ void lg_pack(const float* __restrict__ src, int n,
 "#;
 
 /// Caller-owned match output (VPI-style): GPU-resident per-keypoint correspondences,
-/// filled async by [`LightGlue::submit_match`].
+/// filled async by [`LightGlue::submit`].
 pub struct LightGlueResult {
     matches: CudaSlice<i32>, // [k] index into image 1, -1 = unmatched
     scores: CudaSlice<f32>,  // [k] confidence in [0,1]
@@ -191,7 +191,7 @@ impl LightGlue {
     /// extraction and matching together.
     ///
     /// `K` is read from the engine's `descriptors` input. Results fed to
-    /// [`submit_match`](Self::submit_match) must hold *at least* this many keypoints —
+    /// [`submit`](Self::submit) must hold *at least* this many keypoints —
     /// a larger result is matched on its top-`K` prefix, which is the cheapest way to
     /// run this pipeline.
     pub fn new(engine: Arc<Engine>, stream: Arc<CudaStream>) -> Result<Self, BoxError> {
@@ -341,7 +341,7 @@ impl LightGlue {
     ///
     /// Both results must still come from the same extractor, and the matcher's `K` must
     /// be one of the published exports.
-    pub fn submit_match(
+    pub fn submit(
         &mut self,
         left: &RaCoAlikedResult,
         right: &RaCoAlikedResult,

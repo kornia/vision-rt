@@ -24,6 +24,7 @@
 
 use std::path::Path;
 
+use kornia_algebra::{Mat3F64, Vec3F64};
 use kornia_io::functional::read_image_any_rgb8;
 use vrt_lightglue::LightGlue;
 use vrt_raco_aliked::{RaCoAliked, DESC_DIM};
@@ -34,21 +35,14 @@ use vrt_xfeat::{Matcher, XFeat, XFeatParams};
 /// family silently returns zero matches rather than erroring.
 const DEFAULT_MIN_COSSIM: f32 = 0.82;
 
-/// Row-major 3x3 ground-truth homography mapping left pixels to right pixels.
-type Homography = [f64; 9];
-
-fn warp(h: &Homography, x: f32, y: f32) -> (f32, f32) {
-    let (x, y) = (x as f64, y as f64);
-    let w = h[6] * x + h[7] * y + h[8];
+fn warp(h: &Mat3F64, x: f32, y: f32) -> (f32, f32) {
+    let p = *h * Vec3F64::new(x as f64, y as f64, 1.0);
     // A degenerate w means the point maps to infinity; push it far away so it can never
     // be counted as an inlier rather than producing a NaN that silently compares false.
-    if w.abs() < 1e-12 {
+    if p.z.abs() < 1e-12 {
         return (f32::MAX, f32::MAX);
     }
-    (
-        ((h[0] * x + h[1] * y + h[2]) / w) as f32,
-        ((h[3] * x + h[4] * y + h[5]) / w) as f32,
-    )
+    ((p.x / p.z) as f32, (p.y / p.z) as f32)
 }
 
 /// (matches, inliers, inlier %) for a match set scored against the ground truth.
@@ -56,7 +50,7 @@ fn score(
     pairs: &[(usize, usize)],
     lk: &[(f32, f32)],
     rk: &[(f32, f32)],
-    h: &Homography,
+    h: &Mat3F64,
     thresh: f32,
 ) -> (usize, usize, f32) {
     let inl = pairs
@@ -132,16 +126,21 @@ fn main() -> Result<(), vrt::BoxError> {
             .split_whitespace()
             .filter_map(|t| t.parse().ok())
             .collect();
-        let mut h: Homography = [0.0; 9];
-        h.copy_from_slice(&hv[..9]);
+        if hv.len() < 9 {
+            return Err(format!("{seq}/{hf}: expected 9 floats, got {}", hv.len()).into());
+        }
+        let mut a9 = [0.0; 9];
+        a9.copy_from_slice(&hv[..9]);
+        // Mat3F64 is column-major (glam); the manifest files are row-major.
+        let h = Mat3F64::from_cols_array(&a9).transpose();
 
         let left = read_image_any_rgb8(dir.join(left_n))?.to_cuda(&stream)?;
         let right = read_image_any_rgb8(dir.join(right_n))?.to_cuda(&stream)?;
 
         raco.submit(&left, &mut l)?;
         raco.submit(&right, &mut r)?;
-        glue.submit_match(&l, &r, &mut lg_out)?;
-        mnn.submit_match(
+        glue.submit(&l, &r, &mut lg_out)?;
+        mnn.submit(
             l.descs_slice(),
             k,
             r.descs_slice(),
@@ -163,7 +162,7 @@ fn main() -> Result<(), vrt::BoxError> {
                 x.submit(&left, xl)?;
                 x.submit(&right, xr)?;
                 stream.synchronize()?;
-                m.submit_match(&xl.descs, xl.count(), &xr.descs, xr.count(), min_cossim, xo)?;
+                m.submit(&xl.descs, xl.count(), &xr.descs, xr.count(), min_cossim, xo)?;
                 stream.synchronize()?;
                 let flat_l = xl.kpts_to_host()?;
                 let flat_r = xr.kpts_to_host()?;

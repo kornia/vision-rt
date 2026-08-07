@@ -215,7 +215,7 @@ fn bench_raco(
     for _ in 0..WARMUP {
         raco.submit(left, &mut l)?;
         raco.submit(right, &mut r)?;
-        glue.submit_match(&l, &r, &mut m)?;
+        glue.submit(&l, &r, &mut m)?;
         stream.synchronize()?;
     }
 
@@ -230,14 +230,14 @@ fn bench_raco(
         ext.push(t.elapsed().as_secs_f64() * 1e3);
 
         let t = Instant::now();
-        glue.submit_match(&l, &r, &mut m)?;
+        glue.submit(&l, &r, &mut m)?;
         stream.synchronize()?;
         mat.push(t.elapsed().as_secs_f64() * 1e3);
 
         let t = Instant::now();
         raco.submit(left, &mut l)?;
         raco.submit(right, &mut r)?;
-        glue.submit_match(&l, &r, &mut m)?;
+        glue.submit(&l, &r, &mut m)?;
         stream.synchronize()?;
         tot.push(t.elapsed().as_secs_f64() * 1e3);
     }
@@ -292,7 +292,7 @@ fn bench_xfeat(
         xf.submit(left, &mut l)?;
         xf.submit(right, &mut r)?;
         stream.synchronize()?;
-        matcher.submit_match(&l.descs, l.count(), &r.descs, r.count(), MIN_COSSIM, &mut m)?;
+        matcher.submit(&l.descs, l.count(), &r.descs, r.count(), MIN_COSSIM, &mut m)?;
         stream.synchronize()?;
     }
 
@@ -305,7 +305,7 @@ fn bench_xfeat(
         ext.push(t.elapsed().as_secs_f64() * 1e3);
 
         let t = Instant::now();
-        matcher.submit_match(&l.descs, l.count(), &r.descs, r.count(), MIN_COSSIM, &mut m)?;
+        matcher.submit(&l.descs, l.count(), &r.descs, r.count(), MIN_COSSIM, &mut m)?;
         stream.synchronize()?;
         mat.push(t.elapsed().as_secs_f64() * 1e3);
 
@@ -313,7 +313,7 @@ fn bench_xfeat(
         xf.submit(left, &mut l)?;
         xf.submit(right, &mut r)?;
         stream.synchronize()?;
-        matcher.submit_match(&l.descs, l.count(), &r.descs, r.count(), MIN_COSSIM, &mut m)?;
+        matcher.submit(&l.descs, l.count(), &r.descs, r.count(), MIN_COSSIM, &mut m)?;
         stream.synchronize()?;
         tot.push(t.elapsed().as_secs_f64() * 1e3);
     }

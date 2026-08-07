@@ -81,7 +81,7 @@ Matching lives in a **separate** `matching::Matcher` (module `crates/vrt-xfeat/s
 decoupled from postproc but sharing the stream. Cosine similarity (descriptors
 are L2-normalized, so dot = cosine), mutual nearest-neighbor via two calls of one
 tiled argmax kernel (`xfeat_match_argmax`, one thread per query, candidates tiled
-through shared memory), min-similarity cutoff. VPI-style: `submit_match(descs0,
+through shared memory), min-similarity cutoff. VPI-style: `submit(descs0,
 n0, descs1, n1, cossim, &mut MatchResult)` (async) → sync → `MatchResult::pairs()`,
 or sync one-shot `match_mutual_nn_gpu`.
 
