@@ -38,18 +38,24 @@ images (B,3,H,W) f32   H,W multiples of 32, RGB in [0,1]
 learned ranker — a second CNN over the image — is omitted entirely. Extraction is therefore
 *non-monotonic* in K, while the matcher is O(K²) and moves the opposite way.
 
-| K | ranker | extract/img | matcher/pair | E2E pair |
+| K | ranker | extract/img | matcher/pair |
+|---|---|---|---|
+| 512 | dense | 49.1 ms | 7.9 ms |
+| 1024 | boundary | 55.2 ms | 21.6 ms |
+| **3072** | **bypass** | **28.5 ms** | 126.5 ms |
+
+So use different K for each. The matcher accepts a result holding more keypoints than its
+own `K` and matches the top-`K` prefix — **extract at k3072, match at k1024**:
+
+| config | extract ×2 | match | E2E | 90° inliers |
 |---|---|---|---|---|
-| 512 | dense | 49.1 ms | 7.9 ms | **106.0 ms** |
-| 1024 | boundary | 55.2 ms | 21.6 ms | 132.0 ms |
-| **3072** (default) | **bypass** | **28.5 ms** | 126.5 ms | 183.5 ms |
+| **k3072 ex + k1024 match** | 60.2 ms | 23.1 ms | **83.4 ms** | 878, **98.3%** |
+| k1024 ex + k1024 match | 112.0 ms | 22.9 ms | 136.0 ms | 872, 97.8% |
+| k3072 ex + k3072 match | 59.7 ms | 139.2 ms | 198.2 ms | 2297, 92.8% |
 
-**k3072 when extraction dominates** (mapping, keyframe indexing) — half the cost of k1024
-and ~2.5× more correct correspondences. **k512 when you match every frame** — fastest
-end-to-end and the best inlier rate. k1024 is the worst extractor of the three.
-
-Extractor and matcher must come from the same `kN` asset; `LightGlue::new` rejects a
-mismatch.
+1.63× faster than k1024 throughout at equal-or-better accuracy; the ~52 ms saved is exactly
+the ranker. Match at k3072 only if you want all ~2000 correspondences; use k512 only if
+k3072 extraction will not fit.
 
 ## Getting the engine
 
@@ -73,7 +79,7 @@ and a prebuilt engine where one matches this box — from
 
 The split needs only `onnx`, so it runs on the Jetson's stock `python3`. Verify one with
 `scripts/check_split_parity.py` (needs `onnxruntime`) before trusting it. The matcher half
-is consumed by the `vrt-lightglue` crate, which lands separately.
+is consumed by [`vrt-lightglue`](../vrt-lightglue).
 
 ## Benchmarks
 

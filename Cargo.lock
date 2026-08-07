@@ -2860,6 +2860,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "vrt-lightglue"
+version = "0.1.0"
+dependencies = [
+ "cudarc",
+ "env_logger",
+ "kornia-image",
+ "kornia-io",
+ "kornia-tensor",
+ "thiserror 2.0.18",
+ "vrt",
+ "vrt-hub",
+ "vrt-raco-aliked",
+ "vrt-xfeat",
+]
+
+[[package]]
 name = "vrt-osnet"
 version = "0.1.0"
 dependencies = [

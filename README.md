@@ -87,6 +87,28 @@ camera it held **~14.8 fps — sensor-capped** at 15 fps (RTSP receive ~36 ms/fr
 **~2× GPU headroom** for a faster sensor, a second camera, or another model. Spend less
 GPU by running depth at a lower cadence and letting the tracker **coast** between updates.
 
+### Feature extraction + matching (640²)
+
+Two pipelines for the same job — keypoints, descriptors and correspondences between a pair
+of frames (`vrt-lightglue`, `examples/bench_vs_xfeat`, 30 iters). Inliers are against a
+known ground-truth affine, within 2 px.
+
+| Pipeline | extract ×2 | match | End-to-end | Inliers @0° / 45° / 90° |
+|---|---:|---:|---:|---|
+| `vrt-xfeat` + mutual-NN | 6.8 ms | 0.9 ms | **7.7 ms** | 98.0% / 28.7% / **0.0%** |
+| `vrt-raco-aliked` + `vrt-lightglue`, k512 | 98.2 ms | 7.9 ms | **106.0 ms** | 100.0% / 99.1% / 98.0% |
+| …k3072 (extractor default) | **57.0 ms** | 126.5 ms | 183.5 ms | 99.8% / 94.3% / 92.8% |
+
+**XFeat stays the right default** — ~14× faster and, on translation, as accurate. RaCo buys
+rotation robustness: XFeat degrades past ~15° and fails outright at 90°, and giving it the
+same keypoint budget does not rescue it.
+
+`K` picks a structurally different graph — at K≥3072 RaCo's ranker is bypassed, halving
+extraction, while the O(K²) matcher grows. Extraction and matching therefore want opposite
+K, and you can have both: extract at k3072 and match at k1024 (the matcher takes the top-K
+prefix), giving **83.4 ms** end-to-end at k1024's accuracy — 1.63× faster than using k1024
+throughout. Details in [`vrt-raco-aliked`](crates/vrt-raco-aliked).
+
 ## Quickstart
 
 **Requirements** — NVIDIA Jetson Orin (aarch64, SM87; Nano / NX / AGX), JetPack 6.x
@@ -130,6 +152,7 @@ The 5th arg picks the sink: `serve` / `:PORT` (live stream), `out.png` (one fram
 | `vrt-depth-anything` | Depth Anything V2 **metric depth** + depth-at-mask/box fusion |
 | `vrt-xfeat` | XFeat keypoints + descriptors + GPU mutual-NN matching |
 | `vrt-raco-aliked` | RaCo keypoint detection + ALIKED 128-D descriptors (rotation-robust) |
+| `vrt-lightglue` | LightGlue+ transformer matching over two `vrt-raco-aliked` results |
 | `vrt-track` | Pure-CPU **3D multi-object tracker** (ByteTrack assoc + depth-gated 3D Kalman) |
 | `vrt-viz` | CPU render (masks / boxes / BEV) + **H.264 / WebSocket live view** (WebCodecs) |
 
