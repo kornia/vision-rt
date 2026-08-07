@@ -97,6 +97,17 @@ pub struct EngineArtifact {
     /// [`EngineProfile::precision`] or the prebuilt is skipped in favour of an
     /// on-device build.
     pub precision: Precision,
+    /// The optimization profile this artifact was BUILT at, as
+    /// [`EngineProfile::shape_tag`] renders it — e.g.
+    /// `"images:1x3x256x256|2x3x512x512|2x3x640x640"`, or `""` for a static-shape
+    /// engine.
+    ///
+    /// Guarded because a TensorRT engine only accepts shapes inside the profile it was
+    /// built with. Without this an engine built for one resolution range is served to a
+    /// caller asking for another, deserializes happily, and then rejects perfectly
+    /// ordinary frames at `setInputShape` — with an empty TensorRT message. The failure
+    /// looks like a bug in the caller's code, not a mismatched download.
+    pub shape_profile: &'static str,
 }
 
 /// A distributable model: where it lives on the Hub and what it contains.
@@ -118,6 +129,126 @@ pub struct ModelSpec {
 /// To add a model: export ONNX (scripts/), upload to the HF repo, add an
 /// entry here with `sha256sum` pins.
 pub static REGISTRY: &[ModelSpec] = &[
+    // ── RaCo-ALIKED extractor ─────────────────────────────────────────────────
+    //
+    // The extractor half of fabio-sim/LightGlue-ONNX's fused RaCo-ALIKED-LightGlue+
+    // export, cut out by crates/vrt-raco-aliked/scripts/split_raco_pipeline.py.
+    // Three separately licensed upstreams are combined in these weights — RaCo
+    // (Apache-2.0), ALIKED (BSD-3-Clause, which requires attribution in binary form)
+    // and the export tooling (Apache-2.0); the HF repo carries the notice.
+    //
+    // `K` is baked into each export and is NOT just a keypoint budget: at K >= 3072
+    // RaCo's learned ranker is omitted, which halves extraction cost while returning
+    // 3x the keypoints. Hence one entry per K rather than a single default.
+    //
+    // Engines are pinned to the shape profile RaCoAliked::engine_profile() declares
+    // (min 1x3x256x256 / opt 2x3x512x512 / max 2x3x640x640). pick_artifact matches on
+    // trt_version + sm + precision ONLY and does not check the profile, so an engine
+    // built at any other profile would be served here and then reject frames it cannot
+    // handle. Do not add one without matching the declared profile.
+    ModelSpec {
+        name: "raco-aliked-extractor-k3072",
+        hf_repo: "kornia/raco-aliked",
+        revision: "main",
+        files: &[ModelFile {
+            filename: "raco_aliked_extractor_k3072.onnx",
+            sha256: "acafa7a3d54e9aa5fb1ec0c20f593e2b6879c5570fde65819a5119301eef680f",
+        }],
+        engines: &[EngineArtifact {
+            filename: "raco-aliked-extractor-k3072-trt10.3.0.30-sm87-fp16.engine",
+            sha256: "ca529ee8ab2e3dc919f8201331d5d4d44a300a61e8ffef4ec6f243a82e53bffc",
+            trt_version: "10.3.0.30",
+            sm: "87",
+            precision: Precision::Fp16,
+            shape_profile: "images:1x3x256x256|2x3x512x512|2x3x640x640",
+        }],
+    },
+    ModelSpec {
+        name: "raco-aliked-extractor-k1024",
+        hf_repo: "kornia/raco-aliked",
+        revision: "main",
+        files: &[ModelFile {
+            filename: "raco_aliked_extractor_k1024.onnx",
+            sha256: "33d788905259eba848f77a099b30089c425f72f7afb9c07f67cc79e8ad2949a6",
+        }],
+        engines: &[EngineArtifact {
+            filename: "raco-aliked-extractor-k1024-trt10.3.0.30-sm87-fp16.engine",
+            sha256: "b7f8b972118bcf46215ddc613d637c29cfa49bf5451cb3a531d67444a6aa3073",
+            trt_version: "10.3.0.30",
+            sm: "87",
+            precision: Precision::Fp16,
+            shape_profile: "images:1x3x256x256|2x3x512x512|2x3x640x640",
+        }],
+    },
+    ModelSpec {
+        name: "raco-aliked-extractor-k512",
+        hf_repo: "kornia/raco-aliked",
+        revision: "main",
+        files: &[ModelFile {
+            filename: "raco_aliked_extractor_k512.onnx",
+            sha256: "83209276023a54ff4e820cb69900aed4ecc3cc39b072411ff20fe0062e4c2026",
+        }],
+        engines: &[],
+    },
+    // ── LightGlue+ matcher ────────────────────────────────────────────────────
+    //
+    // The matcher half of the same split. Its engines are pinned to
+    // LightGlue::engine_profile(k)'s declared min = opt = max of 2x1xKx2 and
+    // 2x1xKx128, for the same reason as above.
+    //
+    // Matching cost is O(K^2), so unlike the extractor it gets rapidly worse with K:
+    // 7.9 ms at k512, 21.6 ms at k1024, 126.5 ms at k3072 on an Orin Nano.
+    ModelSpec {
+        name: "lightglue-matcher-k3072",
+        hf_repo: "kornia/lightglue",
+        revision: "main",
+        files: &[ModelFile {
+            filename: "lightglue_matcher_k3072.onnx",
+            sha256: "8479ea7ed24b18e8f5f0ccbb4d09d0942c51185ebb1bf429204e6a26f87d46b0",
+        }],
+        engines: &[EngineArtifact {
+            filename: "lightglue-matcher-k3072-trt10.3.0.30-sm87-fp16.engine",
+            sha256: "52dcff20850492a90b82b35952c6b4c7b61458d3a79d9b96e5c28c6f05f18e8f",
+            trt_version: "10.3.0.30",
+            sm: "87",
+            precision: Precision::Fp16,
+            shape_profile: "descriptors:2x1x3072x128|2x1x3072x128|2x1x3072x128;normalized_keypoints:2x1x3072x2|2x1x3072x2|2x1x3072x2",
+        }],
+    },
+    ModelSpec {
+        name: "lightglue-matcher-k1024",
+        hf_repo: "kornia/lightglue",
+        revision: "main",
+        files: &[ModelFile {
+            filename: "lightglue_matcher_k1024.onnx",
+            sha256: "0b95d616137367a50b5b1c656672a6375ce6facf6a68040744c4dec2fabab499",
+        }],
+        engines: &[EngineArtifact {
+            filename: "lightglue-matcher-k1024-trt10.3.0.30-sm87-fp16.engine",
+            sha256: "090987df46a1f969b386affa10f7f286fb30f9d5dbb9d47d7603c66a554e28de",
+            trt_version: "10.3.0.30",
+            sm: "87",
+            precision: Precision::Fp16,
+            shape_profile: "descriptors:2x1x1024x128|2x1x1024x128|2x1x1024x128;normalized_keypoints:2x1x1024x2|2x1x1024x2|2x1x1024x2",
+        }],
+    },
+    ModelSpec {
+        name: "lightglue-matcher-k512",
+        hf_repo: "kornia/lightglue",
+        revision: "main",
+        files: &[ModelFile {
+            filename: "lightglue_matcher_k512.onnx",
+            sha256: "4e5348ecffd09e428ae3368a44e5b6c8800a45ae2d2b3a72691a6504dc2138fe",
+        }],
+        engines: &[EngineArtifact {
+            filename: "lightglue-matcher-k512-trt10.3.0.30-sm87-fp16.engine",
+            sha256: "9eea3c1455bdbcc4e5d618a5b4ecc1a1af9bd8c94b6d7ef090d6860d360c0a9c",
+            trt_version: "10.3.0.30",
+            sm: "87",
+            precision: Precision::Fp16,
+            shape_profile: "descriptors:2x1x512x128|2x1x512x128|2x1x512x128;normalized_keypoints:2x1x512x2|2x1x512x2|2x1x512x2",
+        }],
+    },
     ModelSpec {
         // Source: XFeat (Potje et al., CVPR 2024) — https://github.com/verlab/accelerated_features
         // The .onnx is a backbone-only export of the upstream `xfeat.pt`, produced by
@@ -141,6 +272,7 @@ pub static REGISTRY: &[ModelSpec] = &[
             trt_version: "10.3.0.30",
             sm: "87",
             precision: Precision::Fp16,
+            shape_profile: "image:1x3x240x320|1x3x640x640|1x3x1088x1920",
         }],
     },
     ModelSpec {
@@ -160,6 +292,7 @@ pub static REGISTRY: &[ModelSpec] = &[
             trt_version: "10.3.0.30",
             sm: "87",
             precision: Precision::Fp16,
+            shape_profile: "",
         }],
     },
     ModelSpec {
@@ -180,6 +313,7 @@ pub static REGISTRY: &[ModelSpec] = &[
             trt_version: "10.3.0.30",
             sm: "87",
             precision: Precision::Fp16,
+            shape_profile: "",
         }],
     },
     ModelSpec {
@@ -200,6 +334,7 @@ pub static REGISTRY: &[ModelSpec] = &[
             trt_version: "10.3.0.30",
             sm: "87",
             precision: Precision::Fp16,
+            shape_profile: "",
         }],
     },
     ModelSpec {
@@ -220,6 +355,7 @@ pub static REGISTRY: &[ModelSpec] = &[
             trt_version: "10.3.0.30",
             sm: "87",
             precision: Precision::Fp16,
+            shape_profile: "",
         }],
     },
     ModelSpec {
@@ -240,6 +376,7 @@ pub static REGISTRY: &[ModelSpec] = &[
             trt_version: "10.3.0.30",
             sm: "87",
             precision: Precision::Fp32,
+            shape_profile: "",
         }],
     },
     ModelSpec {
@@ -288,6 +425,7 @@ pub static REGISTRY: &[ModelSpec] = &[
             trt_version: "10.3.0.30",
             sm: "87",
             precision: Precision::Bf16,
+            shape_profile: "",
         }],
     },
 ];
@@ -357,7 +495,13 @@ impl ModelHub {
         }
         profile.validate()?;
         let (local_trt, local_sm) = (vrt::TENSORRT_VERSION, compute_capability()?);
-        let art = match pick_artifact(spec.engines, local_trt, &local_sm, profile.precision()) {
+        let art = match pick_artifact(
+            spec.engines,
+            local_trt,
+            &local_sm,
+            profile.precision(),
+            &profile.shape_tag(),
+        ) {
             Some(a) => a,
             None => return Ok(None), // no matching prebuilt for this env → build from ONNX
         };
@@ -408,15 +552,24 @@ pub fn resolve_engine(name: &str, profile: &EngineProfile) -> Result<String, Hub
 /// Split out from `get_engine` so the matching rule is testable without a network
 /// round-trip or a GPU — hence `test` in the cfg: `get_engine` itself is hub-only.
 #[cfg(any(feature = "hub", test))]
+/// Select a prebuilt engine that is usable *as-is* for this request.
+///
+/// All four guards matter, and each one exists because violating it fails silently or
+/// confusingly rather than loudly: `trt_version` and `sm` because an engine will not
+/// deserialize elsewhere, `precision` because an fp16 artifact answering a bf16 request
+/// returns wrong numbers, and `shape_profile` because an engine only accepts shapes
+/// inside the profile it was built with. A miss is not an error — it just means the
+/// engine gets built on-device from the ONNX instead.
 fn pick_artifact<'a>(
     engines: &'a [EngineArtifact],
     trt: &str,
     sm: &str,
     want: Precision,
+    shapes: &str,
 ) -> Option<&'a EngineArtifact> {
-    engines
-        .iter()
-        .find(|e| e.trt_version == trt && e.sm == sm && e.precision == want)
+    engines.iter().find(|e| {
+        e.trt_version == trt && e.sm == sm && e.precision == want && e.shape_profile == shapes
+    })
 }
 
 /// Verify a file against an expected sha256 hex digest.
@@ -519,6 +672,33 @@ impl EngineProfile {
         format!("{:x}", h.finalize())[..8].to_string()
     }
 
+    /// Canonical rendering of this profile's shape constraints, used to match a
+    /// prebuilt [`EngineArtifact`] against what the caller actually needs.
+    ///
+    /// `"name:MINxDIMS|OPTxDIMS|MAXxDIMS"` per input, `;`-joined, sorted by input name
+    /// so that declaration order cannot cause a spurious mismatch. Empty for a
+    /// static-shape profile.
+    ///
+    /// Deliberately readable rather than a hash: it goes into the registry by hand, and
+    /// a reviewer should be able to see which resolutions an artifact covers.
+    pub fn shape_tag(&self) -> String {
+        let dims = |d: &[i64]| {
+            d.iter()
+                .map(|v| v.to_string())
+                .collect::<Vec<_>>()
+                .join("x")
+        };
+        let mut parts: Vec<String> = self
+            .inputs
+            .iter()
+            .map(|(name, min, opt, max)| {
+                format!("{name}:{}|{}|{}", dims(min), dims(opt), dims(max))
+            })
+            .collect();
+        parts.sort();
+        parts.join(";")
+    }
+
     /// Reject build options that are individually legal but wrong together.
     ///
     /// `fp16` defaults to **true**, so `EngineProfile { bf16: true, ..default() }` —
@@ -540,7 +720,7 @@ impl EngineProfile {
     /// The precision this profile asks for — what a prebuilt [`EngineArtifact`] must
     /// have been built at to be usable here.
     ///
-    /// Call [`validate`](Self::validate) first: with both flags set (which validate
+    /// Call `validate` first: with both flags set (which validate
     /// rejects) the answer would be arbitrary.
     pub fn precision(&self) -> Precision {
         match (self.fp16, self.bf16) {
@@ -868,6 +1048,54 @@ mod tests {
         assert_eq!(EngineProfile::default().cache_tag(), legacy);
     }
 
+    /// A prebuilt is only served when it covers the SHAPES the caller needs.
+    ///
+    /// A TensorRT engine accepts only shapes inside the optimization profile it was built
+    /// with. Matching on trt+sm+precision alone hands a caller an engine built for another
+    /// resolution range; it deserializes happily and then rejects perfectly ordinary
+    /// frames at setInputShape — with an empty TensorRT message, so it reads as a bug in
+    /// the caller's code rather than a mismatched download. Falling back to an on-device
+    /// build is always correct, so a mismatch must simply miss.
+    #[test]
+    fn prebuilt_must_cover_the_requested_shape_profile() {
+        const NARROW: &str = "images:1x3x640x640|1x3x640x640|1x3x640x640";
+        const WIDE: &str = "images:1x3x256x256|2x3x512x512|2x3x640x640";
+        const ARTS: &[EngineArtifact] = &[EngineArtifact {
+            filename: "narrow-trt10.3.0.30-sm87-fp16.engine",
+            sha256: "00",
+            trt_version: "10.3.0.30",
+            sm: "87",
+            precision: Precision::Fp16,
+            shape_profile: NARROW,
+        }];
+
+        // Same env and precision, different shapes → must NOT be served.
+        assert!(pick_artifact(ARTS, "10.3.0.30", "87", Precision::Fp16, WIDE).is_none());
+        // Exact match → served.
+        assert!(pick_artifact(ARTS, "10.3.0.30", "87", Precision::Fp16, NARROW).is_some());
+        // A static-shape request must not pick up a dynamic-profile engine either.
+        assert!(pick_artifact(ARTS, "10.3.0.30", "87", Precision::Fp16, "").is_none());
+    }
+
+    /// `shape_tag` must be stable and order-independent, or a registry pin written by hand
+    /// silently stops matching when someone reorders a profile's inputs.
+    #[test]
+    fn shape_tag_is_canonical_and_order_independent() {
+        let mk = |inputs: Vec<ShapeProfile>| EngineProfile {
+            inputs,
+            ..EngineProfile::default()
+        };
+        let a = ("a".to_string(), vec![1, 2], vec![3, 4], vec![5, 6]);
+        let b = ("b".to_string(), vec![7], vec![8], vec![9]);
+
+        assert_eq!(
+            mk(vec![a.clone(), b.clone()]).shape_tag(),
+            mk(vec![b, a.clone()]).shape_tag()
+        );
+        assert_eq!(mk(vec![a]).shape_tag(), "a:1x2|3x4|5x6");
+        assert_eq!(mk(vec![]).shape_tag(), "");
+    }
+
     /// A prebuilt is only served when its precision matches the request. Without this
     /// an fp16 artifact answers a bf16 request — for a ViT that is the all-NaN engine,
     /// delivered silently in preference to a correct on-device build.
@@ -880,6 +1108,7 @@ mod tests {
                 trt_version: "10.3.0.30",
                 sm: "87",
                 precision: Precision::Fp16,
+                shape_profile: "",
             },
             EngineArtifact {
                 filename: "m-bf16.engine",
@@ -887,20 +1116,21 @@ mod tests {
                 trt_version: "10.3.0.30",
                 sm: "87",
                 precision: Precision::Bf16,
+                shape_profile: "",
             },
         ];
-        let pick = |p| pick_artifact(ARTS, "10.3.0.30", "87", p).map(|a| a.filename);
+        let pick = |p| pick_artifact(ARTS, "10.3.0.30", "87", p, "").map(|a| a.filename);
         assert_eq!(pick(Precision::Fp16), Some("m-fp16.engine"));
         assert_eq!(pick(Precision::Bf16), Some("m-bf16.engine"));
         // No fp32 artifact listed → build on-device rather than serving either of these.
         assert_eq!(pick(Precision::Fp32), None);
         // trt/sm still gate independently.
         assert_eq!(
-            pick_artifact(ARTS, "10.4.0.0", "87", Precision::Fp16).map(|a| a.filename),
+            pick_artifact(ARTS, "10.4.0.0", "87", Precision::Fp16, "").map(|a| a.filename),
             None
         );
         assert_eq!(
-            pick_artifact(ARTS, "10.3.0.30", "86", Precision::Fp16).map(|a| a.filename),
+            pick_artifact(ARTS, "10.3.0.30", "86", Precision::Fp16, "").map(|a| a.filename),
             None
         );
     }

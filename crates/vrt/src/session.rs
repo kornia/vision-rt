@@ -187,7 +187,8 @@ impl Session {
     /// per-run bindings, forgetting to bind sends the output to the session's own buffer
     /// — the wrong destination, but memory-safe and obvious. Failed runs are covered
     /// because a recoverable error (a frame outside the engine's shape profile, say) is
-    /// exactly what a caller catches, drops the result, and retries from.
+    /// exactly what a caller catches, drops the result, and retries from. There is
+    /// deliberately no `unbind`: a binding never outlives the run it was made for.
     ///
     /// Two outputs may not share one buffer; the second bind is rejected.
     ///
@@ -225,20 +226,9 @@ impl Session {
                  '{other}'; each bound output needs its own buffer"
             )));
         }
-        self.bound.insert(name.to_string(), BoundOutput { ptr, bytes });
+        self.bound
+            .insert(name.to_string(), BoundOutput { ptr, bytes });
         Ok(())
-    }
-
-    /// Drop a binding before the run that would consume it, returning the output to the
-    /// session-owned buffer. Bindings clear themselves after each run, so this is only
-    /// needed to cancel one you have already made.
-    pub fn unbind_output(&mut self, name: &str) {
-        self.bound.remove(name);
-    }
-
-    /// Drop every output binding.
-    pub fn unbind_all_outputs(&mut self) {
-        self.bound.clear();
     }
 
     /// Run inference with inputs **already in CUDA device memory**, leaving the
