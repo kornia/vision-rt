@@ -150,7 +150,10 @@ type Affine = [f32; 6];
 
 fn load_affine(path: &str) -> Option<Affine> {
     let txt = std::fs::read_to_string(path).ok()?;
-    let v: Vec<f32> = txt.split_whitespace().filter_map(|t| t.parse().ok()).collect();
+    let v: Vec<f32> = txt
+        .split_whitespace()
+        .filter_map(|t| t.parse().ok())
+        .collect();
     (v.len() >= 6).then(|| [v[0], v[1], v[2], v[3], v[4], v[5]])
 }
 
@@ -273,8 +276,11 @@ fn bench_xfeat(
     gt: &Option<Affine>,
     top_k: usize,
 ) -> Result<Row, vrt::BoxError> {
-    let mut xf =
-        XFeat::from_engine_file(engine, stream.clone(), XFeatParams::new(top_k, XFEAT_THRESHOLD))?;
+    let mut xf = XFeat::from_engine_file(
+        engine,
+        stream.clone(),
+        XFeatParams::new(top_k, XFEAT_THRESHOLD),
+    )?;
     let matcher = Matcher::new(stream.clone())?;
     let (mut l, mut r) = (xf.alloc_result()?, xf.alloc_result()?);
     let mut m = matcher.alloc_result(top_k)?;

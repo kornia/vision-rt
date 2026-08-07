@@ -61,7 +61,11 @@ fn main() -> Result<(), vrt::BoxError> {
     let pairs = matches.pairs(MIN_SCORE)?;
     let lk = left_out.keypoints_host()?;
     let rk = right_out.keypoints_host()?;
-    println!("{} matches of {} keypoints", pairs.len(), raco.num_keypoints());
+    println!(
+        "{} matches of {} keypoints",
+        pairs.len(),
+        raco.num_keypoints()
+    );
 
     // Median displacement between matched keypoints. For a pure-translation pair this
     // recovers the shift, so it doubles as a cheap correctness check: a matcher that is

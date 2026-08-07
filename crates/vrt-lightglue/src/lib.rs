@@ -206,10 +206,10 @@ impl LightGlue {
         match kpts.dims.as_slice() {
             [_, 1, nk, 2] if *nk as usize == k => {}
             dims => {
-                return Err(
-                    format!("lightglue: 'normalized_keypoints' must be (2P,1,{k},2), got {dims:?}")
-                        .into(),
+                return Err(format!(
+                    "lightglue: 'normalized_keypoints' must be (2P,1,{k},2), got {dims:?}"
                 )
+                .into())
             }
         }
 
