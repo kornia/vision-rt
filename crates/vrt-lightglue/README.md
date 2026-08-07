@@ -113,45 +113,70 @@ min alongside median so that shows up.
 **Not comparable to the upstream blog post**, which reports a *speedup ratio* (2.67×) vs an
 fp16 `torch.compile` baseline on an RTX 4080 Laptop, for the RaCo detector alone.
 
-## Accuracy on real data — Oxford/VGG affine
+## Accuracy on real data
 
-The synthetic pair below is a sanity check, not evidence. On the **Oxford/VGG affine
-benchmark** (15 pairs, real ground-truth homographies; `bark`/`boat` are rotation+zoom,
-`graf` is viewpoint), a match counts as an inlier only if `H·left` lands within 3 px of
-`right` (`examples/eval_oxford`):
+The synthetic pair below is a sanity check, not evidence. Two real benchmarks with
+published ground truth are shipped as examples.
+
+### Oxford/VGG affine — planar, ground-truth homographies
+
+15 pairs; `bark`/`boat` are rotation+zoom, `graf` is viewpoint. A match is an inlier only
+if `H·left` lands within 3 px of `right`. Prepare with `scripts/get_oxford.sh` +
+`examples/prep_oxford`, then run `examples/eval_oxford`:
 
 | pair | RaCo-ALIKED + LightGlue+ | RaCo-ALIKED + mutual-NN | XFeat + mutual-NN |
 |---|---|---|---|
-| bark/2 | 486, **96.6%** | 288, 27.8% | 841, 53.3% |
-| bark/3 | 174, **89.7%** | 0, 0.0% | 0, **0.0%** |
-| bark/4 | 149, **91.4%** | 1, 0.1% | 0, **0.0%** |
-| bark/5 | 143, **98.6%** | 15, 1.6% | 3, **0.4%** |
-| bark/6 | 4, 0.0% | 0, 0.0% | 0, 0.0% |
-| boat/2 | 713, **99.2%** | 1987, 92.9% | 1800, 73.8% |
-| boat/4 | 437, **93.4%** | 0, 0.0% | 0, **0.0%** |
-| graf/3 | 485, **84.8%** | 601, 49.8% | 772, 51.6% |
-| graf/6 | 256, **84.2%** | 6, 0.9% | 25, 3.6% |
-| **total inliers** | **5224** | 5120 | 6176 |
+| bark/2 | 476, **96.9%** | 253, 23.6% | 838, 53.4% |
+| bark/3 | 158, **88.8%** | 0, 0.0% | 0, **0.0%** |
+| bark/4 | 154, **91.1%** | 1, 0.1% | 0, **0.0%** |
+| bark/5 | 142, **96.6%** | 18, 1.9% | 5, **0.6%** |
+| bark/6 | 0, 0.0% | 0, 0.0% | 0, 0.0% |
+| boat/2 | 692, **98.9%** | 1967, 92.6% | 1716, 71.9% |
+| boat/4 | 424, **94.2%** | 0, 0.0% | 0, **0.0%** |
+| graf/3 | 477, 84.7% | 615, 51.2% | 774, 51.2% |
+| graf/6 | 257, **84.8%** | 7, 1.1% | 36, 4.8% |
+| **total inliers** | **5157** | 5072 | 6072 |
 
-Three things this shows that the synthetic pair could not:
+### IMC 2021 phototourism — 3D scenes, ground-truth poses, stratified by difficulty
 
-- **The rotation claim holds on real images.** On `bark` — the rotation sequence — XFeat
-  scores 0.0 / 0.0 / 0.4% while RaCo-ALIKED + LightGlue holds 89.7 / 91.4 / 98.6%.
-- **LightGlue buys precision, not recall.** Columns 1 and 2 use *identical* RaCo
-  keypoints and *identical* ALIKED 128-D descriptors; only the matcher differs. Column 2
-  is therefore a test of the descriptors alone — mutual-NN has no learned component. Mutual-NN finds about as many true
-  correspondences (5120 vs 5224) and buries them in outliers. At 0.9% inliers a robust
-  estimator has nothing to lock onto.
-- **Total inliers alone is misleading.** XFeat has the most (6176) and is the least
-  usable, because precision is what a pose solver needs.
+Oxford is planar: one homography maps every pixel. Phototourism is not, so ground truth
+can only say a match must lie on its **epipolar line**, and a match is an inlier when the
+symmetric epipolar distance under `F = K2⁻ᵀ[t]ₓR K1⁻¹` is under 3 px. That is a *weaker*
+test — a match on the right line at the wrong depth passes — so these numbers are not
+comparable to the Oxford ones. 90 pairs from `reichstag`, `sacre_coeur` and
+`st_peters_square`, six per scene per co-visibility band (0.1 = barely overlapping):
 
-RaCo-ALIKED + LightGlue holds 69–99% on 14 of 15 pairs. It fails only on `bark/6` — extreme
-rotation and zoom at 6% overlap — where it returns 4 matches and admits it rather than
-emitting confident nonsense.
+| co-vis | pairs | RaCo-ALIKED + LightGlue+ | RaCo-ALIKED + mutual-NN | XFeat + mutual-NN |
+|---|---|---|---|---|
+| 0.1 | 18 | **85.2%** | 36.6% | 16.7% |
+| 0.2 | 18 | **90.7%** | 54.3% | 36.1% |
+| 0.3 | 18 | **90.4%** | 59.9% | 44.6% |
+| 0.4 | 18 | **90.6%** | 63.1% | 49.3% |
+| 0.5 | 18 | **91.9%** | 67.0% | 52.7% |
+| **all** | **90** | **90.2%** (20700 inl) | 58.2% (50304) | 43.5% (35292) |
+
+Prepare with `scripts/prep_imc.py` (metadata only — it converts the dataset's HDF5
+calibration and .npy pair lists to text and never touches an image), then run
+`examples/eval_imc`, which loads and resizes through `kornia_io`/`kornia_imgproc`.
+
+### What the two benchmarks agree on
+
+- **The rotation claim holds on real images.** On Oxford's `bark` — the rotation sequence
+  — XFeat scores 0.0 / 0.0 / 0.6% where RaCo-ALIKED + LightGlue holds 88.8 / 91.1 / 96.6%.
+- **LightGlue buys precision, not recall.** Columns 1 and 2 use *identical* RaCo keypoints
+  and *identical* ALIKED 128-D descriptors; only the matcher differs, so column 2 tests
+  the descriptors alone. On Oxford mutual-NN finds nearly as many true correspondences
+  (5072 vs 5157) and buries them in outliers.
+- **Total inliers alone is misleading.** XFeat has the most on Oxford (6072) and is the
+  least usable, because precision is what a pose solver needs.
+- **Difficulty separates them.** Across the co-visibility bands LightGlue decays
+  gracefully (91.9% → 85.2%) while mutual-NN falls off a cliff (67.0% → 36.6%) and XFeat
+  falls further (52.7% → 16.7%). Easy pairs hide this, which is why the bands are
+  reported separately rather than as one mean.
 
 > Mutual-NN's similarity gate matters enormously and is descriptor-specific: at the
-> XFeat-tuned 0.82 it returns **zero** matches on 11 of these 15 pairs; ungated it
-> reaches 5120 inliers at poor precision. There is no setting that recovers both.
+> XFeat-tuned 0.82 it returns **zero** matches on 11 of the 15 Oxford pairs; ungated it
+> reaches 5072 inliers at poor precision. There is no setting that recovers both.
 
 ## Licences
 

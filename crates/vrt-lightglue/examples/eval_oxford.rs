@@ -18,7 +18,9 @@
 //!   cargo run --release -p vrt-lightglue --example eval_oxford -- \
 //!       <dataset_dir> <raco.engine> <lightglue.engine> [inlier_px]
 //!
-//! `dataset_dir` holds `manifest.txt` with `seq left right homography` per line.
+//! `dataset_dir` holds `manifest.txt` with `seq left right homography` per line; produce
+//! it with `scripts/get_oxford.sh` followed by `examples/prep_oxford`, which also
+//! photometrically verifies the rescaled ground truth before you trust any number here.
 
 use std::path::Path;
 
