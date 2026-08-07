@@ -340,18 +340,31 @@ impl RaCoAliked {
             .as_ref()
             .to_str()
             .ok_or("raco-aliked: onnx path is not valid UTF-8")?;
-        let engine_path = vrt_hub::EngineCache::default().resolve(
-            "raco-aliked-extractor",
-            model_path,
-            &Self::engine_profile(),
-        )?;
+        // The cache key must carry K: two exports differ in graph structure, not just
+        // in a shape, so they must never share a cached engine.
+        let stem = onnx_path
+            .as_ref()
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("raco-aliked-extractor");
+        let engine_path =
+            vrt_hub::EngineCache::default().resolve(stem, model_path, &Self::engine_profile())?;
         Self::from_engine_file(engine_path, stream)
     }
 
-    /// Pull from Hugging Face and construct. Requires feature `hub`.
+    /// Pull the `kN` export from Hugging Face (`kornia/raco-aliked`) and construct.
+    /// Requires feature `hub`.
+    ///
+    /// `k` selects the export, and it is not just a keypoint budget — at `k >= 3072`
+    /// RaCo's learned ranker is omitted, roughly halving extraction cost while
+    /// returning 3x the keypoints. See the crate README for the trade. Published
+    /// variants: 512, 1024, 3072.
     #[cfg(feature = "hub")]
-    pub fn from_hub(stream: Arc<CudaStream>) -> Result<Self, BoxError> {
-        let engine = vrt_hub::resolve_engine("raco-aliked-extractor", &Self::engine_profile())?;
+    pub fn from_hub(stream: Arc<CudaStream>, k: usize) -> Result<Self, BoxError> {
+        let engine = vrt_hub::resolve_engine(
+            &format!("raco-aliked-extractor-k{k}"),
+            &Self::engine_profile(),
+        )?;
         Self::from_engine_file(engine, stream)
     }
 

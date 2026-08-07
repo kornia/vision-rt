@@ -118,6 +118,115 @@ pub struct ModelSpec {
 /// To add a model: export ONNX (scripts/), upload to the HF repo, add an
 /// entry here with `sha256sum` pins.
 pub static REGISTRY: &[ModelSpec] = &[
+    // ── RaCo-ALIKED extractor ─────────────────────────────────────────────────
+    //
+    // The extractor half of fabio-sim/LightGlue-ONNX's fused RaCo-ALIKED-LightGlue+
+    // export, cut out by crates/vrt-raco-aliked/scripts/split_raco_pipeline.py.
+    // Three separately licensed upstreams are combined in these weights — RaCo
+    // (Apache-2.0), ALIKED (BSD-3-Clause, which requires attribution in binary form)
+    // and the export tooling (Apache-2.0); the HF repo carries the notice.
+    //
+    // `K` is baked into each export and is NOT just a keypoint budget: at K >= 3072
+    // RaCo's learned ranker is omitted, which halves extraction cost while returning
+    // 3x the keypoints. Hence one entry per K rather than a single default.
+    //
+    // Engines are pinned to the shape profile RaCoAliked::engine_profile() declares
+    // (min 1x3x256x256 / opt 2x3x512x512 / max 2x3x640x640). pick_artifact matches on
+    // trt_version + sm + precision ONLY and does not check the profile, so an engine
+    // built at any other profile would be served here and then reject frames it cannot
+    // handle. Do not add one without matching the declared profile.
+    ModelSpec {
+        name: "raco-aliked-extractor-k3072",
+        hf_repo: "kornia/raco-aliked",
+        revision: "main",
+        files: &[ModelFile {
+            filename: "raco_aliked_extractor_k3072.onnx",
+            sha256: "acafa7a3d54e9aa5fb1ec0c20f593e2b6879c5570fde65819a5119301eef680f",
+        }],
+        engines: &[],
+    },
+    ModelSpec {
+        name: "raco-aliked-extractor-k1024",
+        hf_repo: "kornia/raco-aliked",
+        revision: "main",
+        files: &[ModelFile {
+            filename: "raco_aliked_extractor_k1024.onnx",
+            sha256: "33d788905259eba848f77a099b30089c425f72f7afb9c07f67cc79e8ad2949a6",
+        }],
+        engines: &[EngineArtifact {
+            filename: "raco-aliked-extractor-k1024-trt10.3.0.30-sm87-fp16.engine",
+            sha256: "b7f8b972118bcf46215ddc613d637c29cfa49bf5451cb3a531d67444a6aa3073",
+            trt_version: "10.3.0.30",
+            sm: "87",
+            precision: Precision::Fp16,
+        }],
+    },
+    ModelSpec {
+        name: "raco-aliked-extractor-k512",
+        hf_repo: "kornia/raco-aliked",
+        revision: "main",
+        files: &[ModelFile {
+            filename: "raco_aliked_extractor_k512.onnx",
+            sha256: "83209276023a54ff4e820cb69900aed4ecc3cc39b072411ff20fe0062e4c2026",
+        }],
+        engines: &[],
+    },
+    // ── LightGlue+ matcher ────────────────────────────────────────────────────
+    //
+    // The matcher half of the same split. Its engines are pinned to
+    // LightGlue::engine_profile(k)'s declared min = opt = max of 2x1xKx2 and
+    // 2x1xKx128, for the same reason as above.
+    //
+    // Matching cost is O(K^2), so unlike the extractor it gets rapidly worse with K:
+    // 7.9 ms at k512, 21.6 ms at k1024, 126.5 ms at k3072 on an Orin Nano.
+    ModelSpec {
+        name: "lightglue-matcher-k3072",
+        hf_repo: "kornia/lightglue-onnx",
+        revision: "main",
+        files: &[ModelFile {
+            filename: "lightglue_matcher_k3072.onnx",
+            sha256: "8479ea7ed24b18e8f5f0ccbb4d09d0942c51185ebb1bf429204e6a26f87d46b0",
+        }],
+        engines: &[EngineArtifact {
+            filename: "lightglue-matcher-k3072-trt10.3.0.30-sm87-fp16.engine",
+            sha256: "52dcff20850492a90b82b35952c6b4c7b61458d3a79d9b96e5c28c6f05f18e8f",
+            trt_version: "10.3.0.30",
+            sm: "87",
+            precision: Precision::Fp16,
+        }],
+    },
+    ModelSpec {
+        name: "lightglue-matcher-k1024",
+        hf_repo: "kornia/lightglue-onnx",
+        revision: "main",
+        files: &[ModelFile {
+            filename: "lightglue_matcher_k1024.onnx",
+            sha256: "0b95d616137367a50b5b1c656672a6375ce6facf6a68040744c4dec2fabab499",
+        }],
+        engines: &[EngineArtifact {
+            filename: "lightglue-matcher-k1024-trt10.3.0.30-sm87-fp16.engine",
+            sha256: "090987df46a1f969b386affa10f7f286fb30f9d5dbb9d47d7603c66a554e28de",
+            trt_version: "10.3.0.30",
+            sm: "87",
+            precision: Precision::Fp16,
+        }],
+    },
+    ModelSpec {
+        name: "lightglue-matcher-k512",
+        hf_repo: "kornia/lightglue-onnx",
+        revision: "main",
+        files: &[ModelFile {
+            filename: "lightglue_matcher_k512.onnx",
+            sha256: "4e5348ecffd09e428ae3368a44e5b6c8800a45ae2d2b3a72691a6504dc2138fe",
+        }],
+        engines: &[EngineArtifact {
+            filename: "lightglue-matcher-k512-trt10.3.0.30-sm87-fp16.engine",
+            sha256: "9eea3c1455bdbcc4e5d618a5b4ecc1a1af9bd8c94b6d7ef090d6860d360c0a9c",
+            trt_version: "10.3.0.30",
+            sm: "87",
+            precision: Precision::Fp16,
+        }],
+    },
     ModelSpec {
         // Source: XFeat (Potje et al., CVPR 2024) — https://github.com/verlab/accelerated_features
         // The .onnx is a backbone-only export of the upstream `xfeat.pt`, produced by
