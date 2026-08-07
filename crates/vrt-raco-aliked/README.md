@@ -111,7 +111,7 @@ benchmark** (15 pairs, real ground-truth homographies; `bark`/`boat` are rotatio
 `graf` is viewpoint), a match counts as an inlier only if `H·left` lands within 3 px of
 `right` (`examples/eval_oxford`):
 
-| pair | RaCo + LightGlue+ | RaCo + mutual-NN | XFeat + mutual-NN |
+| pair | RaCo-ALIKED + LightGlue+ | RaCo-ALIKED + mutual-NN | XFeat + mutual-NN |
 |---|---|---|---|
 | bark/2 | 486, **96.6%** | 288, 27.8% | 841, 53.3% |
 | bark/3 | 174, **89.7%** | 0, 0.0% | 0, **0.0%** |
@@ -127,15 +127,16 @@ benchmark** (15 pairs, real ground-truth homographies; `bark`/`boat` are rotatio
 Three things this shows that the synthetic pair could not:
 
 - **The rotation claim holds on real images.** On `bark` — the rotation sequence — XFeat
-  scores 0.0 / 0.0 / 0.4% while RaCo + LightGlue holds 89.7 / 91.4 / 98.6%.
-- **LightGlue buys precision, not recall.** Columns 1 and 2 use *identical* keypoints and
-  descriptors; only the matcher differs. Mutual-NN finds about as many true
+  scores 0.0 / 0.0 / 0.4% while RaCo-ALIKED + LightGlue holds 89.7 / 91.4 / 98.6%.
+- **LightGlue buys precision, not recall.** Columns 1 and 2 use *identical* RaCo
+  keypoints and *identical* ALIKED 128-D descriptors; only the matcher differs. Column 2
+  is therefore a test of the descriptors alone — mutual-NN has no learned component. Mutual-NN finds about as many true
   correspondences (5120 vs 5224) and buries them in outliers. At 0.9% inliers a robust
   estimator has nothing to lock onto.
 - **Total inliers alone is misleading.** XFeat has the most (6176) and is the least
   usable, because precision is what a pose solver needs.
 
-RaCo + LightGlue holds 69–99% on 14 of 15 pairs. It fails only on `bark/6` — extreme
+RaCo-ALIKED + LightGlue holds 69–99% on 14 of 15 pairs. It fails only on `bark/6` — extreme
 rotation and zoom at 6% overlap — where it returns 4 matches and admits it rather than
 emitting confident nonsense.
 

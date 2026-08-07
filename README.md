@@ -102,10 +102,12 @@ known ground-truth affine, within 2 px.
 **XFeat stays the right default** — ~14× faster and, on translation, as accurate. RaCo buys
 rotation robustness, and that holds on **real** data: on the Oxford/VGG affine benchmark's
 rotation sequence (`bark`, ground-truth homographies, 3 px threshold) XFeat + mutual-NN
-scores **0.0 / 0.0 / 0.4%** inliers where RaCo + LightGlue+ holds **89.7 / 91.4 / 98.6%**.
+scores **0.0 / 0.0 / 0.4%** inliers where RaCo-ALIKED + LightGlue+ holds
+**89.7 / 91.4 / 98.6%**.
 Giving XFeat the same keypoint budget does not rescue it.
 
-The matcher matters as much as the detector: on *identical* RaCo descriptors, mutual-NN
+The matcher matters as much as the features: on *identical* RaCo keypoints and ALIKED
+descriptors, mutual-NN
 finds about as many true correspondences as LightGlue (5120 vs 5224) but buries them in
 outliers — LightGlue is buying precision, not recall.
 
