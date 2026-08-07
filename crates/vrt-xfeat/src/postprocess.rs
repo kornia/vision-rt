@@ -43,6 +43,18 @@ pub enum XFeatError {
     Preproc(#[from] kornia_imgproc::preprocess::PreprocessError),
     #[error("input image {0}x{1} too small — each side must be ≥ 32px")]
     InputTooSmall(usize, usize),
+    #[error("descriptor width {0} is not supported — the match kernel is compiled for 64 or 128")]
+    UnsupportedDim(usize),
+    #[error(
+        "{which} holds {got} floats but {expected} are needed for {dim}-D descriptors; \
+         matching them with a {dim}-D kernel would stride the buffer wrongly"
+    )]
+    DescriptorDim {
+        which: &'static str,
+        expected: usize,
+        got: usize,
+        dim: usize,
+    },
 }
 
 // ── Kernel source ─────────────────────────────────────────────────────────────
