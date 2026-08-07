@@ -113,6 +113,45 @@ min alongside median so that shows up.
 **Not comparable to the upstream blog post**, which reports a *speedup ratio* (2.67×) vs an
 fp16 `torch.compile` baseline on an RTX 4080 Laptop, for the RaCo detector alone.
 
+## Accuracy on real data — Oxford/VGG affine
+
+The synthetic pair below is a sanity check, not evidence. On the **Oxford/VGG affine
+benchmark** (15 pairs, real ground-truth homographies; `bark`/`boat` are rotation+zoom,
+`graf` is viewpoint), a match counts as an inlier only if `H·left` lands within 3 px of
+`right` (`examples/eval_oxford`):
+
+| pair | RaCo + LightGlue+ | RaCo + mutual-NN | XFeat + mutual-NN |
+|---|---|---|---|
+| bark/2 | 486, **96.6%** | 288, 27.8% | 841, 53.3% |
+| bark/3 | 174, **89.7%** | 0, 0.0% | 0, **0.0%** |
+| bark/4 | 149, **91.4%** | 1, 0.1% | 0, **0.0%** |
+| bark/5 | 143, **98.6%** | 15, 1.6% | 3, **0.4%** |
+| bark/6 | 4, 0.0% | 0, 0.0% | 0, 0.0% |
+| boat/2 | 713, **99.2%** | 1987, 92.9% | 1800, 73.8% |
+| boat/4 | 437, **93.4%** | 0, 0.0% | 0, **0.0%** |
+| graf/3 | 485, **84.8%** | 601, 49.8% | 772, 51.6% |
+| graf/6 | 256, **84.2%** | 6, 0.9% | 25, 3.6% |
+| **total inliers** | **5224** | 5120 | 6176 |
+
+Three things this shows that the synthetic pair could not:
+
+- **The rotation claim holds on real images.** On `bark` — the rotation sequence — XFeat
+  scores 0.0 / 0.0 / 0.4% while RaCo + LightGlue holds 89.7 / 91.4 / 98.6%.
+- **LightGlue buys precision, not recall.** Columns 1 and 2 use *identical* keypoints and
+  descriptors; only the matcher differs. Mutual-NN finds about as many true
+  correspondences (5120 vs 5224) and buries them in outliers. At 0.9% inliers a robust
+  estimator has nothing to lock onto.
+- **Total inliers alone is misleading.** XFeat has the most (6176) and is the least
+  usable, because precision is what a pose solver needs.
+
+RaCo + LightGlue holds 69–99% on 14 of 15 pairs. It fails only on `bark/6` — extreme
+rotation and zoom at 6% overlap — where it returns 4 matches and admits it rather than
+emitting confident nonsense.
+
+> Mutual-NN's similarity gate matters enormously and is descriptor-specific: at the
+> XFeat-tuned 0.82 it returns **zero** matches on 11 of these 15 pairs; ungated it
+> reaches 5120 inliers at poor precision. There is no setting that recovers both.
+
 ## Licences
 
 Ships no weights. LightGlue is Apache-2.0

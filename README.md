@@ -100,8 +100,14 @@ known ground-truth affine, within 2 px.
 | …k3072 (extractor default) | **57.0 ms** | 126.5 ms | 183.5 ms | 99.8% / 94.3% / 92.8% |
 
 **XFeat stays the right default** — ~14× faster and, on translation, as accurate. RaCo buys
-rotation robustness: XFeat degrades past ~15° and fails outright at 90°, and giving it the
-same keypoint budget does not rescue it.
+rotation robustness, and that holds on **real** data: on the Oxford/VGG affine benchmark's
+rotation sequence (`bark`, ground-truth homographies, 3 px threshold) XFeat + mutual-NN
+scores **0.0 / 0.0 / 0.4%** inliers where RaCo + LightGlue+ holds **89.7 / 91.4 / 98.6%**.
+Giving XFeat the same keypoint budget does not rescue it.
+
+The matcher matters as much as the detector: on *identical* RaCo descriptors, mutual-NN
+finds about as many true correspondences as LightGlue (5120 vs 5224) but buries them in
+outliers — LightGlue is buying precision, not recall.
 
 `K` picks a structurally different graph — at K≥3072 RaCo's ranker is bypassed, halving
 extraction, while the O(K²) matcher grows. Extraction and matching therefore want opposite
