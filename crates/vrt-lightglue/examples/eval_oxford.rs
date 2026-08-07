@@ -28,7 +28,11 @@ use kornia_algebra::{Mat3F64, Vec3F64};
 use kornia_io::functional::read_image_any_rgb8;
 use vrt_lightglue::LightGlue;
 use vrt_raco_aliked::{RaCoAliked, DESC_DIM};
-use vrt_xfeat::{Matcher, XFeat, XFeatParams};
+use vrt_xfeat::Matcher;
+
+#[path = "common/mod.rs"]
+mod common;
+use common::{mat3_from_row_major, read_floats, XFeatBaseline};
 
 /// Mutual-NN similarity gate. Tuned for XFeat's 64-D descriptors; ALIKED's 128-D live on
 /// a different scale, so this is a CLI argument — a gate set for the wrong descriptor
@@ -88,23 +92,15 @@ fn main() -> Result<(), vrt::BoxError> {
     let mnn = Matcher::with_dim(stream.clone(), DESC_DIM)?;
     // XFeat + its native 64-D mutual-NN, as the baseline the crate READMEs compare to.
     // Optional so the eval still runs without an XFeat engine on hand.
-    let xfeat_engine = a.get(6).cloned();
-    let mut xf = match &xfeat_engine {
-        Some(p) => Some((
-            XFeat::from_engine_file(p, stream.clone(), XFeatParams::new(4096, 0.05))?,
-            Matcher::new(stream.clone())?,
-        )),
-        None => None,
-    };
+    let mut xf = a
+        .get(6)
+        .map(|p| XFeatBaseline::load(p, &stream))
+        .transpose()?;
 
     let k = raco.num_keypoints();
     let (mut l, mut r) = (raco.alloc_result()?, raco.alloc_result()?);
     let mut lg_out = glue.alloc_result()?;
     let mut mnn_out = mnn.alloc_result(k)?;
-    let mut xf_res = match &xf {
-        Some((x, m)) => Some((x.alloc_result()?, x.alloc_result()?, m.alloc_result(4096)?)),
-        None => None,
-    };
 
     println!(
         "Oxford/VGG affine — RaCo k{k}, LightGlue k{}, mutual-NN {DESC_DIM}-D (cossim>={min_cossim}), inlier <= {thresh}px",
@@ -122,17 +118,11 @@ fn main() -> Result<(), vrt::BoxError> {
         let (seq, left_n, right_n, hf) = (f[0], f[1], f[2], f[3]);
         let dir = root.join(seq);
 
-        let hv: Vec<f64> = std::fs::read_to_string(dir.join(hf))?
-            .split_whitespace()
-            .filter_map(|t| t.parse().ok())
-            .collect();
+        let hv = read_floats(&dir.join(hf))?;
         if hv.len() < 9 {
             return Err(format!("{seq}/{hf}: expected 9 floats, got {}", hv.len()).into());
         }
-        let mut a9 = [0.0; 9];
-        a9.copy_from_slice(&hv[..9]);
-        // Mat3F64 is column-major (glam); the manifest files are row-major.
-        let h = Mat3F64::from_cols_array(&a9).transpose();
+        let h = mat3_from_row_major(&hv[..9]);
 
         let left = read_image_any_rgb8(dir.join(left_n))?.to_cuda(&stream)?;
         let right = read_image_any_rgb8(dir.join(right_n))?.to_cuda(&stream)?;
@@ -140,6 +130,11 @@ fn main() -> Result<(), vrt::BoxError> {
         raco.submit(&left, &mut l)?;
         raco.submit(&right, &mut r)?;
         glue.submit(&l, &r, &mut lg_out)?;
+        // XFeat depends only on the uploaded images, so enqueue it before the readback:
+        // one synchronise for every model instead of two.
+        if let Some(x) = &mut xf {
+            x.submit(&left, &right)?;
+        }
         mnn.submit(
             l.descs_slice(),
             k,
@@ -157,20 +152,12 @@ fn main() -> Result<(), vrt::BoxError> {
         mnn_tot += mi;
 
         // XFeat on the same pair, its own keypoints and its own 64-D matcher.
-        let (xm, xi, xp) = match (&mut xf, &mut xf_res) {
-            (Some((x, m)), Some((xl, xr, xo))) => {
-                x.submit(&left, xl)?;
-                x.submit(&right, xr)?;
-                stream.synchronize()?;
-                m.submit(&xl.descs, xl.count(), &xr.descs, xr.count(), min_cossim, xo)?;
-                stream.synchronize()?;
-                let flat_l = xl.kpts_to_host()?;
-                let flat_r = xr.kpts_to_host()?;
-                let xlk: Vec<(f32, f32)> = flat_l.chunks_exact(2).map(|p| (p[0], p[1])).collect();
-                let xrk: Vec<(f32, f32)> = flat_r.chunks_exact(2).map(|p| (p[0], p[1])).collect();
-                score(&xo.pairs(), &xlk, &xrk, &h, thresh)
+        let (xm, xi, xp) = match &mut xf {
+            Some(x) => {
+                let (pairs, xlk, xrk) = x.finish(&stream, min_cossim)?;
+                score(&pairs, &xlk, &xrk, &h, thresh)
             }
-            _ => (0, 0, 0.0),
+            None => (0, 0, 0.0),
         };
         xf_tot += xi;
 

@@ -73,7 +73,10 @@ use vrt::{BoxError, Engine, ModelSession};
 pub const DESC_DIM: usize = 128;
 
 /// RaCo's `input_dim_divisor`: model H and W must be multiples of this.
-const DIM_DIVISOR: usize = 32;
+///
+/// Public so callers sizing images for this model reference the constant instead of
+/// hardcoding 32 and silently drifting if the export ever changes.
+pub const DIM_DIVISOR: usize = 32;
 
 /// Minimum model dimension the reused buffers are seeded with in [`RaCoAliked::new`];
 /// the first frame reallocates them to its real floor-32 size.

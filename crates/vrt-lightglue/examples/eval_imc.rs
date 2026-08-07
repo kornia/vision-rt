@@ -34,13 +34,12 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use kornia_image::{Image, ImageSize};
+use kornia_image::Image;
 use kornia_imgproc::interpolation::InterpolationMode;
-use kornia_imgproc::resize::resize;
 use kornia_io::functional::read_image_any_rgb8;
 use vrt_lightglue::LightGlue;
 use vrt_raco_aliked::{RaCoAliked, DESC_DIM};
-use vrt_xfeat::{Matcher, XFeat, XFeatParams};
+use vrt_xfeat::Matcher;
 
 /// Mutual-NN similarity gate. Tuned for XFeat's 64-D descriptors; ALIKED's 128-D live on
 /// a different scale, so this is a CLI argument — a gate set for the wrong descriptor
@@ -54,12 +53,9 @@ const MAX_SIDE: usize = 640;
 use kornia_3d::pose::{essential_from_fundamental, sampson_distance, Pose3d};
 use kornia_algebra::{Mat3F64, Vec2F64, Vec3F64};
 
-/// `Mat3F64` is column-major (glam); the files are row-major, so transpose on the way in.
-fn mat3_from_row_major(v: &[f64]) -> Mat3F64 {
-    let mut a = [0.0; 9];
-    a.copy_from_slice(v);
-    Mat3F64::from_cols_array(&a).transpose()
-}
+#[path = "common/mod.rs"]
+mod common;
+use common::{mat3_from_row_major, parse_interpolation, read_floats, resize_to_fit, XFeatBaseline};
 
 /// Camera calibration as written by `scripts/prep_imc.py`: K (9), R (9), T (3).
 ///
@@ -73,10 +69,7 @@ struct Calib {
 
 impl Calib {
     fn load(path: &Path) -> Result<Self, vrt::BoxError> {
-        let v: Vec<f64> = std::fs::read_to_string(path)?
-            .split_whitespace()
-            .filter_map(|t| t.parse().ok())
-            .collect();
+        let v = read_floats(path)?;
         if v.len() != 21 {
             return Err(format!("{}: expected 21 floats, got {}", path.display(), v.len()).into());
         }
@@ -150,45 +143,13 @@ fn score(
     (pairs.len(), inl)
 }
 
-/// Read through `kornia_io` and downscale through `kornia_imgproc`, returning the image
-/// alongside the exact scale factors so the intrinsics can follow it.
-///
-/// Uses `resize` (the f32 path) with a caller-selectable kernel, matching
-/// `examples/prep_oxford` so both benchmarks resample identically. It costs a
-/// u8 -> f32 -> u8 round trip per image, which is irrelevant next to the inference it
-/// feeds, and the filter no longer rounds to u8 internally.
+/// Read through `kornia_io`, then downscale so the engine's shape profile is satisfied.
 fn load_scaled(
     path: &Path,
     interpolation: InterpolationMode,
 ) -> Result<(Image<u8, 3>, f64, f64), vrt::BoxError> {
     let src = read_image_any_rgb8(path)?;
-    let (w, h) = (src.cols(), src.rows());
-    let f = (MAX_SIDE as f64 / w.max(h) as f64).min(1.0);
-    let nw = (((w as f64 * f) as usize) / 32 * 32).max(32);
-    let nh = (((h as f64 * f) as usize) / 32 * 32).max(32);
-
-    let src_f32 = Image::<f32, 3>::new(
-        src.size(),
-        src.as_slice().iter().map(|&v| v as f32).collect(),
-    )?;
-    let mut dst_f32 = Image::<f32, 3>::from_size_val(
-        ImageSize {
-            width: nw,
-            height: nh,
-        },
-        0.0,
-    )?;
-    resize(&src_f32, &mut dst_f32, interpolation)?;
-
-    let dst = Image::<u8, 3>::new(
-        dst_f32.size(),
-        dst_f32
-            .as_slice()
-            .iter()
-            .map(|&v| v.round().clamp(0.0, 255.0) as u8)
-            .collect(),
-    )?;
-    Ok((dst, nw as f64 / w as f64, nh as f64 / h as f64))
+    resize_to_fit(src.as_ref(), MAX_SIDE, interpolation)
 }
 
 #[derive(Default, Clone, Copy)]
@@ -228,34 +189,21 @@ fn main() -> Result<(), vrt::BoxError> {
         .get(5)
         .and_then(|s| s.parse().ok())
         .unwrap_or(DEFAULT_MIN_COSSIM);
-    let interpolation = match a.get(7).map(String::as_str).unwrap_or("bilinear") {
-        "nearest" => InterpolationMode::Nearest,
-        "bilinear" => InterpolationMode::Bilinear,
-        "bicubic" => InterpolationMode::Bicubic,
-        "lanczos" => InterpolationMode::Lanczos,
-        other => return Err(format!("unknown interpolation {other}").into()),
-    };
+    let interpolation = parse_interpolation(a.get(7).map(String::as_str).unwrap_or("bilinear"))?;
 
     let stream = vrt::Stream::new_standalone()?.cuda_stream().clone();
     let mut raco = RaCoAliked::from_engine_file(&a[2], stream.clone())?;
     let mut glue = LightGlue::from_engine_file(&a[3], stream.clone())?;
     let mnn = Matcher::with_dim(stream.clone(), DESC_DIM)?;
-    let mut xf = match a.get(6) {
-        Some(p) => Some((
-            XFeat::from_engine_file(p, stream.clone(), XFeatParams::new(4096, 0.05))?,
-            Matcher::new(stream.clone())?,
-        )),
-        None => None,
-    };
+    let mut xf = a
+        .get(6)
+        .map(|p| XFeatBaseline::load(p, &stream))
+        .transpose()?;
 
     let k = raco.num_keypoints();
     let (mut l, mut r) = (raco.alloc_result()?, raco.alloc_result()?);
     let mut lg_out = glue.alloc_result()?;
     let mut mnn_out = mnn.alloc_result(k)?;
-    let mut xf_res = match &xf {
-        Some((x, m)) => Some((x.alloc_result()?, x.alloc_result()?, m.alloc_result(4096)?)),
-        None => None,
-    };
 
     println!(
         "IMC2021 phototourism val — RaCo k{k}, LightGlue k{}, mutual-NN {DESC_DIM}-D \
@@ -296,6 +244,11 @@ fn main() -> Result<(), vrt::BoxError> {
             min_cossim,
             &mut mnn_out,
         )?;
+        // XFeat depends only on the uploaded images, so enqueue it here rather than after
+        // the readback: one synchronise for every model instead of two.
+        if let Some(x) = &mut xf {
+            x.submit(&dl, &dr)?;
+        }
         stream.synchronize()?;
 
         let (lk, rk) = (l.keypoints_host()?, r.keypoints_host()?);
@@ -303,16 +256,9 @@ fn main() -> Result<(), vrt::BoxError> {
         e.0.add(score(&lg_out.pairs(0.0)?, &lk, &rk, &fmat, thresh));
         e.1.add(score(&mnn_out.pairs(), &lk, &rk, &fmat, thresh));
 
-        if let (Some((x, m)), Some((xl, xr, xo))) = (&mut xf, &mut xf_res) {
-            x.submit(&dl, xl)?;
-            x.submit(&dr, xr)?;
-            stream.synchronize()?;
-            m.submit(&xl.descs, xl.count(), &xr.descs, xr.count(), min_cossim, xo)?;
-            stream.synchronize()?;
-            let (fl, fr) = (xl.kpts_to_host()?, xr.kpts_to_host()?);
-            let xlk: Vec<(f32, f32)> = fl.chunks_exact(2).map(|p| (p[0], p[1])).collect();
-            let xrk: Vec<(f32, f32)> = fr.chunks_exact(2).map(|p| (p[0], p[1])).collect();
-            e.2.add(score(&xo.pairs(), &xlk, &xrk, &fmat, thresh));
+        if let Some(x) = &mut xf {
+            let (pairs, xlk, xrk) = x.finish(&stream, min_cossim)?;
+            e.2.add(score(&pairs, &xlk, &xrk, &fmat, thresh));
         }
     }
 

@@ -25,11 +25,14 @@ use std::path::{Path, PathBuf};
 
 use kornia_image::{Image, ImageSize};
 use kornia_imgproc::interpolation::InterpolationMode;
-use kornia_imgproc::resize::resize;
 use kornia_io::functional::read_image_any_rgb8;
 use kornia_io::png::write_image_png_rgb8;
 
 use kornia_algebra::{Mat3F64, Vec3F64};
+
+#[path = "common/mod.rs"]
+mod common;
+use common::{mat3_from_row_major, parse_interpolation, read_floats, resize_to_fit};
 
 /// Below this, treat the rescaled ground truth as broken rather than the matcher.
 const MIN_CORRELATION: f64 = 0.3;
@@ -103,14 +106,6 @@ fn read_netpbm_rgb8(path: &Path) -> Result<Image<u8, 3>, vrt::BoxError> {
     )?)
 }
 
-fn target_size(w: usize, h: usize, max_side: usize) -> Dims {
-    let f = (max_side as f64 / w.max(h) as f64).min(1.0);
-    (
-        (((w as f64 * f) as usize) / 32 * 32).max(32),
-        (((h as f64 * f) as usize) / 32 * 32).max(32),
-    )
-}
-
 /// Image dimensions as (width, height).
 type Dims = (usize, usize);
 
@@ -122,35 +117,10 @@ fn convert(
     interpolation: InterpolationMode,
 ) -> Result<(Dims, Dims), vrt::BoxError> {
     let img = read_netpbm_rgb8(src)?;
-    let (w, h) = (img.cols(), img.rows());
-    let (nw, nh) = target_size(w, h, max_side);
-
-    // `resize` is the f32 path: it accepts any interpolation kernel and does not round to
-    // u8 inside the filter. This runs once, offline, so the conversion is worth the
-    // quality -- the runtime path in `eval_imc` uses the u8 fast resize instead.
-    let src_f32 = Image::<f32, 3>::new(
-        img.size(),
-        img.as_slice().iter().map(|&v| v as f32).collect(),
-    )?;
-    let mut dst_f32 = Image::<f32, 3>::from_size_val(
-        ImageSize {
-            width: nw,
-            height: nh,
-        },
-        0.0,
-    )?;
-    resize(&src_f32, &mut dst_f32, interpolation)?;
-
-    let out = Image::<u8, 3>::new(
-        dst_f32.size(),
-        dst_f32
-            .as_slice()
-            .iter()
-            .map(|&v| v.round().clamp(0.0, 255.0) as u8)
-            .collect(),
-    )?;
+    let (out, _, _) = resize_to_fit(&img, max_side, interpolation)?;
+    let dims = (out.cols(), out.rows());
     write_image_png_rgb8(dst, &out)?;
-    Ok(((w, h), (nw, nh)))
+    Ok(((img.cols(), img.rows()), dims))
 }
 
 fn luma(img: &Image<u8, 3>, x: usize, y: usize) -> f64 {
@@ -209,13 +179,7 @@ fn main() -> Result<(), vrt::BoxError> {
     }
     let (src_root, out_root) = (PathBuf::from(&a[1]), PathBuf::from(&a[2]));
     let max_side: usize = a.get(3).and_then(|s| s.parse().ok()).unwrap_or(640);
-    let interpolation = match a.get(4).map(String::as_str).unwrap_or("bilinear") {
-        "nearest" => InterpolationMode::Nearest,
-        "bilinear" => InterpolationMode::Bilinear,
-        "bicubic" => InterpolationMode::Bicubic,
-        "lanczos" => InterpolationMode::Lanczos,
-        other => return Err(format!("unknown interpolation {other}").into()),
-    };
+    let interpolation = parse_interpolation(a.get(4).map(String::as_str).unwrap_or("bilinear"))?;
     std::fs::create_dir_all(&out_root)?;
 
     let mut seqs: Vec<String> = std::fs::read_dir(&src_root)?
@@ -264,17 +228,11 @@ fn main() -> Result<(), vrt::BoxError> {
             if !hp.exists() {
                 continue;
             }
-            let v: Vec<f64> = std::fs::read_to_string(&hp)?
-                .split_whitespace()
-                .filter_map(|t| t.parse().ok())
-                .collect();
+            let v = read_floats(&hp)?;
             if v.len() < 9 {
                 return Err(format!("{}: expected 9 floats", hp.display()).into());
             }
-            // Mat3F64 is column-major (glam); the ground-truth files are row-major.
-            let mut a9 = [0.0; 9];
-            a9.copy_from_slice(&v[..9]);
-            let h = Mat3F64::from_cols_array(&a9).transpose();
+            let h = mat3_from_row_major(&v[..9]);
 
             let s1 = Mat3F64::from_diagonal(Vec3F64::new(
                 new1.0 as f64 / orig1.0 as f64,
