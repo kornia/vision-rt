@@ -161,8 +161,12 @@ calibration and .npy pair lists to text and never touches an image), then run
 
 ### What the two benchmarks agree on
 
-- **The rotation claim holds on real images.** On Oxford's `bark` — the rotation sequence
-  — XFeat scores 0.0 / 0.0 / 0.6% where RaCo-ALIKED + LightGlue holds 88.8 / 91.1 / 96.6%.
+- **The rotation claim holds on real images, at larger angles than "rotation sequence"
+  suggests.** Decomposing the ground-truth homographies gives the actual in-plane
+  rotations: `bark/3` is **+150.2°**, `bark/4` is **-119.8°**, `boat/4` is **-79.8°**.
+  XFeat scores **0.0%** on every pair beyond ~79° and is nonzero on every pair below it;
+  RaCo-ALIKED + LightGlue holds **88.8 / 91.1 / 94.2%** on those three. What is *not*
+  handled is extreme scale: `bark/6` combines 153° with a 4.2x zoom and returns 4 matches.
 - **LightGlue buys precision, not recall.** Columns 1 and 2 use *identical* RaCo keypoints
   and *identical* ALIKED 128-D descriptors; only the matcher differs, so column 2 tests
   the descriptors alone. On Oxford mutual-NN finds nearly as many true correspondences
