@@ -93,16 +93,6 @@ impl ModelSession {
         unsafe { self.session.bind_output(name, ptr, bytes) }
     }
 
-    /// Return output `name` to the session-owned buffer.
-    pub fn unbind_output(&mut self, name: &str) {
-        self.session.unbind_output(name);
-    }
-
-    /// Drop every output binding.
-    pub fn unbind_all_outputs(&mut self) {
-        self.session.unbind_all_outputs();
-    }
-
     /// Run inference binding each named device input → device outputs.
     ///
     /// Leaves outputs in GPU memory; the caller (the pipeline) syncs the stream

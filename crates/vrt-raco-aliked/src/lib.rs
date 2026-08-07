@@ -340,15 +340,13 @@ impl RaCoAliked {
             .as_ref()
             .to_str()
             .ok_or("raco-aliked: onnx path is not valid UTF-8")?;
-        // The cache key must carry K: two exports differ in graph structure, not just
-        // in a shape, so they must never share a cached engine.
-        let stem = onnx_path
-            .as_ref()
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("raco-aliked-extractor");
-        let engine_path =
-            vrt_hub::EngineCache::default().resolve(stem, model_path, &Self::engine_profile())?;
+        // No need to vary the cache key per K: EngineCache keys on the ONNX content
+        // hash as well as the name, so two kN exports can never share an engine.
+        let engine_path = vrt_hub::EngineCache::default().resolve(
+            "raco-aliked-extractor",
+            model_path,
+            &Self::engine_profile(),
+        )?;
         Self::from_engine_file(engine_path, stream)
     }
 

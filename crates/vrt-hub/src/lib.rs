@@ -720,7 +720,7 @@ impl EngineProfile {
     /// The precision this profile asks for — what a prebuilt [`EngineArtifact`] must
     /// have been built at to be usable here.
     ///
-    /// Call [`validate`](Self::validate) first: with both flags set (which validate
+    /// Call `validate` first: with both flags set (which validate
     /// rejects) the answer would be arbitrary.
     pub fn precision(&self) -> Precision {
         match (self.fp16, self.bf16) {
