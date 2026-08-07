@@ -149,15 +149,15 @@ overlapping):
 
 | co-vis | pairs | RaCo-ALIKED + LightGlue+ | RaCo-ALIKED + mutual-NN | XFeat + mutual-NN |
 |---|---|---|---|---|
-| 0.1 | 18 | **87.9%** | 38.0% | 17.1% |
-| 0.2 | 18 | **90.7%** | 54.0% | 35.6% |
+| 0.1 | 18 | **88.1%** | 37.8% | 17.1% |
+| 0.2 | 18 | **90.7%** | 53.9% | 35.6% |
 | 0.3 | 18 | **90.2%** | 59.5% | 43.8% |
-| 0.4 | 18 | **89.8%** | 62.4% | 48.7% |
-| 0.5 | 18 | **91.4%** | 66.1% | 51.5% |
-| **all** | **90** | **90.2%** (20709 inl) | 57.9% (50032) | 42.8% (34740) |
+| 0.4 | 18 | **89.9%** | 62.5% | 48.7% |
+| 0.5 | 18 | **91.5%** | 66.1% | 51.5% |
+| **all** | **90** | **90.3%** (20723 inl) | 57.9% (49991) | 42.8% (34729) |
 
 Loosening the threshold does not change the ordering, only the spread — at 3 px the totals
-are 99.5% / 74.7% / 66.4%, at 5 px 99.8% / 79.2% / 74.0%.
+are 99.5% / 74.6% / 66.3%, at 5 px 99.8% / 79.2% / 74.0%.
 
 Prepare with `scripts/prep_imc.py` (metadata only — it converts the dataset's HDF5
 calibration and .npy pair lists to text and never touches an image), then run
@@ -178,11 +178,11 @@ calibration and .npy pair lists to text and never touches an image), then run
 - **Total inliers alone is misleading.** XFeat has the most on Oxford (6072) and is the
   least usable, because precision is what a pose solver needs.
 - **Difficulty separates them.** Across the co-visibility bands LightGlue decays
-  gracefully (91.4% → 87.9%) while mutual-NN falls off a cliff (66.1% → 38.0%) and XFeat
+  gracefully (91.5% → 88.1%) while mutual-NN falls off a cliff (66.1% → 37.8%) and XFeat
   falls further (51.5% → 17.1%). Easy pairs hide this, which is why the bands are
   reported separately rather than as one mean.
 - **It lands where the literature does.** The IMC2021 leaderboard's own ALIKED-2k +
-  LightGlue entry reports a per-scene matching score at 3 px of 0.686–0.945; our 90.2%
+  LightGlue entry reports a per-scene matching score at 3 px of 0.686–0.945; our 90.3%
   sits inside that band. The comparison is indicative rather than exact — different scenes
   (validation vs test) and different thresholding conventions — but it is the closest
   published point of reference.

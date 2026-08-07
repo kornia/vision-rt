@@ -113,8 +113,8 @@ descriptors, mutual-NN finds about as many true correspondences as LightGlue (50
 
 Difficulty is what separates them. On **IMC 2021 phototourism** (90 pairs, real 3D scenes,
 ground-truth poses, scored by Sampson error) precision across co-visibility bands from 0.5
-down to 0.1 goes **91.4% → 87.9%** for LightGlue+, **66.1% → 38.0%** for mutual-NN on the
-same descriptors, and **51.5% → 17.1%** for XFeat. The 90.2% overall sits inside the
+down to 0.1 goes **91.5% → 88.1%** for LightGlue+, **66.1% → 37.8%** for mutual-NN on the
+same descriptors, and **51.5% → 17.1%** for XFeat. The 90.3% overall sits inside the
 0.686–0.945 matching score the IMC2021 leaderboard reports for its own ALIKED+LightGlue
 entry. Both benchmarks ship as examples in `vrt-lightglue`.
 

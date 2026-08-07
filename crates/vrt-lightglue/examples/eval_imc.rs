@@ -28,14 +28,15 @@
 //!
 //! Prepare metadata once with `scripts/prep_imc.py`, then:
 //!   cargo run --release -p vrt-lightglue --example eval_imc -- \
-//!       <phototourism_dir> <raco.engine> <lightglue.engine> [inlier_px] [min_cossim] [xfeat.engine]
+//!       <phototourism_dir> <raco.engine> <lightglue.engine> \
+//!       [inlier_px] [min_cossim] [xfeat.engine] [nearest|bilinear|bicubic|lanczos]
 
 use std::collections::BTreeMap;
 use std::path::Path;
 
 use kornia_image::{Image, ImageSize};
 use kornia_imgproc::interpolation::InterpolationMode;
-use kornia_imgproc::resize::resize_fast_rgb;
+use kornia_imgproc::resize::resize;
 use kornia_io::functional::read_image_any_rgb8;
 use vrt_lightglue::LightGlue;
 use vrt_raco_aliked::{RaCoAliked, DESC_DIM};
@@ -151,20 +152,42 @@ fn score(
 
 /// Read through `kornia_io` and downscale through `kornia_imgproc`, returning the image
 /// alongside the exact scale factors so the intrinsics can follow it.
-fn load_scaled(path: &Path) -> Result<(Image<u8, 3>, f64, f64), vrt::BoxError> {
+///
+/// Uses `resize` (the f32 path) with a caller-selectable kernel, matching
+/// `examples/prep_oxford` so both benchmarks resample identically. It costs a
+/// u8 -> f32 -> u8 round trip per image, which is irrelevant next to the inference it
+/// feeds, and the filter no longer rounds to u8 internally.
+fn load_scaled(
+    path: &Path,
+    interpolation: InterpolationMode,
+) -> Result<(Image<u8, 3>, f64, f64), vrt::BoxError> {
     let src = read_image_any_rgb8(path)?;
     let (w, h) = (src.cols(), src.rows());
     let f = (MAX_SIDE as f64 / w.max(h) as f64).min(1.0);
     let nw = (((w as f64 * f) as usize) / 32 * 32).max(32);
     let nh = (((h as f64 * f) as usize) / 32 * 32).max(32);
-    let mut dst = Image::<u8, 3>::from_size_val(
+
+    let src_f32 = Image::<f32, 3>::new(
+        src.size(),
+        src.as_slice().iter().map(|&v| v as f32).collect(),
+    )?;
+    let mut dst_f32 = Image::<f32, 3>::from_size_val(
         ImageSize {
             width: nw,
             height: nh,
         },
-        0,
+        0.0,
     )?;
-    resize_fast_rgb(src.as_ref(), &mut dst, InterpolationMode::Bilinear)?;
+    resize(&src_f32, &mut dst_f32, interpolation)?;
+
+    let dst = Image::<u8, 3>::new(
+        dst_f32.size(),
+        dst_f32
+            .as_slice()
+            .iter()
+            .map(|&v| v.round().clamp(0.0, 255.0) as u8)
+            .collect(),
+    )?;
     Ok((dst, nw as f64 / w as f64, nh as f64 / h as f64))
 }
 
@@ -195,7 +218,7 @@ fn main() -> Result<(), vrt::BoxError> {
     if a.len() < 4 {
         eprintln!(
             "Usage: eval_imc <phototourism_dir> <raco.engine> <lightglue.engine> \
-             [inlier_px] [min_cossim] [xfeat.engine]"
+             [inlier_px] [min_cossim] [xfeat.engine] [nearest|bilinear|bicubic|lanczos]"
         );
         std::process::exit(1);
     }
@@ -205,6 +228,13 @@ fn main() -> Result<(), vrt::BoxError> {
         .get(5)
         .and_then(|s| s.parse().ok())
         .unwrap_or(DEFAULT_MIN_COSSIM);
+    let interpolation = match a.get(7).map(String::as_str).unwrap_or("bilinear") {
+        "nearest" => InterpolationMode::Nearest,
+        "bilinear" => InterpolationMode::Bilinear,
+        "bicubic" => InterpolationMode::Bicubic,
+        "lanczos" => InterpolationMode::Lanczos,
+        other => return Err(format!("unknown interpolation {other}").into()),
+    };
 
     let stream = vrt::Stream::new_standalone()?.cuda_stream().clone();
     let mut raco = RaCoAliked::from_engine_file(&a[2], stream.clone())?;
@@ -242,8 +272,9 @@ fn main() -> Result<(), vrt::BoxError> {
         let (scene, band, i1, i2) = (f[0], f[1].to_string(), f[2], f[3]);
         let base = root.join(scene).join("set_100");
 
-        let (im1, sx1, sy1) = load_scaled(&base.join("images").join(format!("{i1}.jpg")))?;
-        let (im2, sx2, sy2) = load_scaled(&base.join("images").join(format!("{i2}.jpg")))?;
+        let img_dir = base.join("images");
+        let (im1, sx1, sy1) = load_scaled(&img_dir.join(format!("{i1}.jpg")), interpolation)?;
+        let (im2, sx2, sy2) = load_scaled(&img_dir.join(format!("{i2}.jpg")), interpolation)?;
         let c1 = Calib::load(&base.join("calib_txt").join(format!("{i1}.txt")))?;
         let c2 = Calib::load(&base.join("calib_txt").join(format!("{i2}.txt")))?;
         let (k1, k2) = (c1.scaled_k(sx1, sy1), c2.scaled_k(sx2, sy2));
