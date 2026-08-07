@@ -101,10 +101,13 @@ known ground-truth affine, within 2 px.
 
 **XFeat stays the right default** — ~14× faster and, on translation, as accurate. RaCo buys
 rotation robustness: XFeat degrades past ~15° and fails outright at 90°, and giving it the
-same keypoint budget does not rescue it. `K` picks a structurally different graph — at
-K≥3072 RaCo's ranker is bypassed, halving extraction while the O(K²) matcher grows — so
-**k3072 when extraction dominates, k512 when you match every frame**. Details in
-[`vrt-raco-aliked`](crates/vrt-raco-aliked).
+same keypoint budget does not rescue it.
+
+`K` picks a structurally different graph — at K≥3072 RaCo's ranker is bypassed, halving
+extraction, while the O(K²) matcher grows. Extraction and matching therefore want opposite
+K, and you can have both: extract at k3072 and match at k1024 (the matcher takes the top-K
+prefix), giving **83.4 ms** end-to-end at k1024's accuracy — 1.63× faster than using k1024
+throughout. Details in [`vrt-raco-aliked`](crates/vrt-raco-aliked).
 
 ## Quickstart
 

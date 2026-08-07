@@ -51,9 +51,24 @@ opposite directions, because RaCo's ranker is bypassed at K ≥ 3072.
 | 1024 | 21.6 ms | 110.4 ms | 132.0 ms |
 | 3072 | 126.5 ms | **57.0 ms** | 183.5 ms |
 
-**k512 if you match every frame. k3072 if extraction dominates** — but then match sparingly,
-or against something cheaper than this crate, rather than paying 126 ms a pair. Both halves
-must come from the same `kN` asset; `LightGlue::new` rejects a mismatch.
+**Best of both: mix them.** `submit_match` accepts results holding *more* than the
+matcher's `K` and uses the first `K`, which works because RaCo emits keypoints in
+descending score order and both tensors are row-major — the prefix is the top-`K` and is
+already contiguous. Extract with k3072 (ranker bypassed, cheap) and match with k1024:
+
+| config | extract ×2 | match | E2E | 90° inliers |
+|---|---|---|---|---|
+| k3072 ex + k3072 match | 59.7 ms | 139.2 ms | 198.2 ms | 2297, 92.8% |
+| **k3072 ex + k1024 match** | 60.2 ms | 23.1 ms | **83.4 ms** | 878, **98.3%** |
+| k1024 ex + k1024 match | 112.0 ms | 22.9 ms | 136.0 ms | 872, 97.8% |
+
+**1.63× faster than native k1024 at equal-or-better accuracy** — the ~52 ms it saves is
+exactly RaCo's ranker, and the top-1024 by raw detector confidence turns out to match the
+ranker's pick in quality here. All three rows measured in one run, so the comparison is on
+equal footing; absolute values carry that run's load.
+
+Use plain k512 only if you cannot extract at k3072 for memory reasons. Both halves must
+still come from the same export family.
 
 ## Getting the engine
 

@@ -68,8 +68,8 @@ pub enum LightGlueError {
     Driver(#[from] cudarc::driver::DriverError),
     #[error("kornia CUDA: {0}")]
     Cuda(#[from] kornia_tensor::CudaError),
-    #[error("engine expects K={0} keypoints but the {1} result holds K={2}")]
-    KeypointMismatch(usize, &'static str, usize),
+    #[error("engine expects K={0} keypoints but the {1} result holds only K={2}")]
+    TooFewKeypoints(usize, &'static str, usize),
     /// A result was produced on a different CUDA stream than this matcher runs on.
     ///
     /// Packing it here would read buffers whose extraction is still queued on the other
@@ -307,10 +307,31 @@ impl LightGlue {
     }
 
     /// Submit one image pair's async GPU work — pack the two extractor results into the
-    /// interleaved layout, run the matcher, copy into the caller-owned `out` — all
-    /// enqueued on the shared stream with **no sync**.
+    /// interleaved layout and run the matcher — enqueued on the shared stream with
+    /// **no sync**.
     ///
     /// Indices in `out` are into `left`'s keypoints; values are indices into `right`'s.
+    ///
+    /// # Mixing K
+    ///
+    /// The results may hold **more** than this matcher's `K`, in which case the first
+    /// `K` of each are used. That is not a convenience — it is the cheapest
+    /// configuration available, because extraction and matching scale in opposite
+    /// directions:
+    ///
+    /// ```text
+    /// k3072 extract x2 (57 ms) + k3072 match (127 ms) = 184 ms
+    /// k512  extract x2 (98 ms) + k512  match (  8 ms) = 106 ms
+    /// k3072 extract x2 (57 ms) + k1024 match ( 22 ms) =  79 ms   <- mixed
+    /// ```
+    ///
+    /// It works because RaCo emits keypoints in descending score order and both
+    /// `[K,2]` keypoints and `[K,128]` descriptors are row-major, so the first `K`
+    /// rows are exactly the top-`K` and are already contiguous — the pack copies a
+    /// prefix, with no gather.
+    ///
+    /// Both results must still come from the same extractor, and the matcher's `K` must
+    /// be one of the published exports.
     pub fn submit_match(
         &mut self,
         left: &RaCoAlikedResult,
@@ -318,8 +339,8 @@ impl LightGlue {
         out: &mut LightGlueResult,
     ) -> Result<(), LightGlueError> {
         for (label, r) in [("left", left), ("right", right)] {
-            if r.count() != self.k {
-                return Err(LightGlueError::KeypointMismatch(self.k, label, r.count()));
+            if r.count() < self.k {
+                return Err(LightGlueError::TooFewKeypoints(self.k, label, r.count()));
             }
             // The whole crate assumes one shared stream; enforce it rather than trusting
             // it, because the failure is a silent race, not a crash.
