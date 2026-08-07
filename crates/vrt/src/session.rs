@@ -181,11 +181,14 @@ impl Session {
     /// dodge the aliasing. Binding removes both the copy and the aliasing: the buffer
     /// TensorRT fills *is* the caller's.
     ///
-    /// **A binding lasts exactly one run** and is cleared afterwards, so bind before
-    /// every `run_*`. That is deliberate: a persistent binding would let a caller drop
-    /// the result buffer and have the next run write into freed device memory. With
-    /// per-run bindings, forgetting to bind sends the output to the session's own
-    /// buffer — the wrong destination, but memory-safe and obvious.
+    /// **A binding lasts exactly one run** — including a run that *fails* — so bind
+    /// before every `run_*`. That is deliberate: a persistent binding would let a caller
+    /// drop the result buffer and have the next run write into freed device memory. With
+    /// per-run bindings, forgetting to bind sends the output to the session's own buffer
+    /// — the wrong destination, but memory-safe and obvious. Failed runs are covered
+    /// because a recoverable error (a frame outside the engine's shape profile, say) is
+    /// exactly what a caller catches, drops the result, and retries from. There is
+    /// deliberately no `unbind`: a binding never outlives the run it was made for.
     ///
     /// Two outputs may not share one buffer; the second bind is rejected.
     ///
@@ -223,20 +226,9 @@ impl Session {
                  '{other}'; each bound output needs its own buffer"
             )));
         }
-        self.bound.insert(name.to_string(), BoundOutput { ptr, bytes });
+        self.bound
+            .insert(name.to_string(), BoundOutput { ptr, bytes });
         Ok(())
-    }
-
-    /// Drop a binding before the run that would consume it, returning the output to the
-    /// session-owned buffer. Bindings clear themselves after each run, so this is only
-    /// needed to cancel one you have already made.
-    pub fn unbind_output(&mut self, name: &str) {
-        self.bound.remove(name);
-    }
-
-    /// Drop every output binding.
-    pub fn unbind_all_outputs(&mut self) {
-        self.bound.clear();
     }
 
     /// Run inference with inputs **already in CUDA device memory**, leaving the
@@ -257,6 +249,26 @@ impl Session {
     /// memory — do not outlive the Session or hold them across a subsequent
     /// `run_*` call.
     pub unsafe fn run_device_inputs_on_device(
+        &mut self,
+        device_inputs: &[(&str, *mut std::ffi::c_void, &[i64])],
+    ) -> Result<HashMap<String, OutputView>> {
+        // A binding lasts exactly one run — including a run that FAILS. The clear has to
+        // wrap every exit path, not just the successful one: `setInputShape`,
+        // `setTensorAddress`, and the bound-buffer size check can all bail out, and a
+        // caller who handles that error by dropping the result would otherwise leave a
+        // live binding pointing at freed device memory. Recoverable errors are exactly
+        // the ones a caller retries from, so this path is not hypothetical.
+        let result = unsafe { self.run_bound_inputs(device_inputs) };
+        self.bound.clear();
+        result
+    }
+
+    /// The fallible body of [`run_device_inputs_on_device`](Self::run_device_inputs_on_device).
+    ///
+    /// # Safety
+    /// Same contract as the caller: every input pointer must stay valid until the
+    /// caller's next stream synchronize.
+    unsafe fn run_bound_inputs(
         &mut self,
         device_inputs: &[(&str, *mut std::ffi::c_void, &[i64])],
     ) -> Result<HashMap<String, OutputView>> {
@@ -318,17 +330,11 @@ impl Session {
             };
             result.insert(name.clone(), view);
         }
-        // Bindings last exactly one run. Persisting them would make the dangerous case
-        // the default: a caller that binds a result's buffers, drops the result, then
-        // runs again would have TensorRT write into freed device memory, with nothing
-        // in the type system to catch it. Clearing here means a forgotten re-bind lands
-        // the output in the session's own buffer instead — the wrong destination, but
-        // memory-safe and immediately visible as stale data rather than heap corruption.
-        //
-        // Safe to clear now: the addresses are already set in the execution context and
-        // the views above already captured the caller's pointers, so the in-flight run
-        // still writes where it was told.
-        self.bound.clear();
+        // NOTE: bindings are cleared by `run_device_inputs_on_device`, which wraps this
+        // whole call so a failed run drops them too. Clearing here would only cover the
+        // success path. Safe to clear after this returns: the addresses are already set
+        // in the execution context and the views built above already captured the
+        // caller's pointers, so the in-flight run still writes where it was told.
         Ok(result)
     }
 

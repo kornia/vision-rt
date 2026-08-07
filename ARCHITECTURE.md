@@ -25,6 +25,7 @@ vrt-hub      weights (HF Hub, sha256-pinned) + on-device EngineCache (onnx→eng
    │    vrt-rfdetr-kpts    human pose (box + 17 COCO keypoints)
    │    vrt-depth-anything metric depth + depth-at-mask/box fusion kernels
    │    vrt-xfeat          keypoints + descriptors + GPU mutual-NN matching
+   │    vrt-raco-aliked    RaCo detection + ALIKED 128-D descriptors (rotation-robust)
    │    vrt-dinov3         global image descriptor (CLS) + GPU cosine retrieval bank
    │
    └─ model-free leaves (no TensorRT, no GPU model of their own):
