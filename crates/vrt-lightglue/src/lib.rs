@@ -43,6 +43,13 @@
 //! Feed it `normalized_keypoints`, never `keypoints` — see [`vrt_raco_aliked`] on the
 //! two coordinate spaces. Mixing them up degrades matching silently.
 //!
+//! # Mixing K is the fast path
+//!
+//! A result may hold *more* keypoints than this matcher's `K`; the top-`K` prefix is
+//! used. Since extraction gets cheaper with K (the ranker is bypassed at K≥3072) while
+//! matching is O(K²), extracting at k3072 and matching at k1024 costs **83 ms** a pair
+//! against 136 ms for k1024 throughout — at equal accuracy.
+//!
 //! # Model credit
 //!
 //! LightGlue (Apache-2.0, `cvg/LightGlue`) — Lindenberger, Sarlin, Pollefeys,
@@ -183,8 +190,10 @@ impl LightGlue {
     /// Build a matcher sharing `stream` with the extractor, so one sync per frame covers
     /// extraction and matching together.
     ///
-    /// `K` is read from the engine's `descriptors` input and must equal the `K` of the
-    /// extractor whose results are fed in.
+    /// `K` is read from the engine's `descriptors` input. Results fed to
+    /// [`submit_match`](Self::submit_match) must hold *at least* this many keypoints —
+    /// a larger result is matched on its top-`K` prefix, which is the cheapest way to
+    /// run this pipeline.
     pub fn new(engine: Arc<Engine>, stream: Arc<CudaStream>) -> Result<Self, BoxError> {
         // Both inputs are rank-4 (2P,1,K,D); K comes from the descriptors and the
         // keypoints must agree with it.
@@ -239,8 +248,8 @@ impl LightGlue {
     }
 
     /// The engine build profile — both inputs are dynamic in the leading (pair) dim,
-    /// fp16. `K` must match the extractor's, so it is a parameter rather than a
-    /// constant: the k512…k3584 assets each bake in their own.
+    /// fp16. `K` is a parameter rather than a constant because each of the k512…k3584
+    /// assets bakes in its own; it need not equal the extractor's, only be no larger.
     ///
     /// This is the workspace's only multi-input shape profile, so it only builds
     /// through vrt-hub's default trtexec path — the in-process `builder` feature binds
