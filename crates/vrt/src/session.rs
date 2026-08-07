@@ -225,7 +225,8 @@ impl Session {
                  '{other}'; each bound output needs its own buffer"
             )));
         }
-        self.bound.insert(name.to_string(), BoundOutput { ptr, bytes });
+        self.bound
+            .insert(name.to_string(), BoundOutput { ptr, bytes });
         Ok(())
     }
 

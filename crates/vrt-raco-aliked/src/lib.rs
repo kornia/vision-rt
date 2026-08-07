@@ -196,7 +196,10 @@ impl RaCoAlikedResult {
     pub fn keypoints_host(&self) -> Result<Vec<(f32, f32)>, RaCoAlikedError> {
         let raw = self.stream.clone_dtoh(&self.kpts)?;
         let (rw, rh) = self.scale;
-        Ok(raw.chunks_exact(2).map(|p| (p[0] * rw, p[1] * rh)).collect())
+        Ok(raw
+            .chunks_exact(2)
+            .map(|p| (p[0] * rw, p[1] * rh))
+            .collect())
     }
 
     /// Download the raw normalised keypoints `[K*2]`. Call after the stream sync.
@@ -268,7 +271,10 @@ impl RaCoAliked {
             }
         }
 
-        let inp = engine.inputs().next().ok_or("raco-aliked: engine has no input")?;
+        let inp = engine
+            .inputs()
+            .next()
+            .ok_or("raco-aliked: engine has no input")?;
         if inp.dims.len() != 4 {
             return Err(format!("raco-aliked: input must be rank-4, got {:?}", inp.dims).into());
         }
@@ -377,7 +383,10 @@ impl RaCoAliked {
         }
 
         let (sw, sh) = (img.width(), img.height());
-        let (mw, mh) = ((sw / DIM_DIVISOR) * DIM_DIVISOR, (sh / DIM_DIVISOR) * DIM_DIVISOR);
+        let (mw, mh) = (
+            (sw / DIM_DIVISOR) * DIM_DIVISOR,
+            (sh / DIM_DIVISOR) * DIM_DIVISOR,
+        );
         if mw == 0 || mh == 0 {
             return Err(RaCoAlikedError::InputTooSmall(sw, sh));
         }
@@ -459,18 +468,37 @@ mod tests {
         assert!(shown.contains("shape profile"), "no cause hinted: {shown}");
 
         let debugged = format!("{e:?}");
-        assert!(debugged.contains("672"), "Debug drops model dims: {debugged}");
-        assert!(debugged.contains("700"), "Debug drops source dims: {debugged}");
+        assert!(
+            debugged.contains("672"),
+            "Debug drops model dims: {debugged}"
+        );
+        assert!(
+            debugged.contains("700"),
+            "Debug drops source dims: {debugged}"
+        );
     }
 
     /// The floor-of-32 rescale is what maps keypoints back to source pixels, so an
     /// error here silently shifts every coordinate. Pinned against hand-worked values.
     #[test]
     fn floor32_model_dims_and_rescale_ratios() {
-        for (sw, sh, mw, mh) in [(640, 640, 640, 640), (633, 321, 608, 320), (700, 455, 672, 448)] {
-            assert_eq!(((sw / DIM_DIVISOR) * DIM_DIVISOR, (sh / DIM_DIVISOR) * DIM_DIVISOR), (mw, mh));
+        for (sw, sh, mw, mh) in [
+            (640, 640, 640, 640),
+            (633, 321, 608, 320),
+            (700, 455, 672, 448),
+        ] {
+            assert_eq!(
+                (
+                    (sw / DIM_DIVISOR) * DIM_DIVISOR,
+                    (sh / DIM_DIVISOR) * DIM_DIVISOR
+                ),
+                (mw, mh)
+            );
             let (rw, rh) = (sw as f32 / mw as f32, sh as f32 / mh as f32);
-            assert!(rw >= 1.0 && rh >= 1.0, "flooring must never upscale: {rw} {rh}");
+            assert!(
+                rw >= 1.0 && rh >= 1.0,
+                "flooring must never upscale: {rw} {rh}"
+            );
             // A keypoint at the model's far edge must land at the source's far edge.
             assert!((mw as f32 * rw - sw as f32).abs() < 1e-3);
             assert!((mh as f32 * rh - sh as f32).abs() < 1e-3);
