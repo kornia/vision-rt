@@ -186,31 +186,32 @@ impl LightGlue {
     /// `K` is read from the engine's `descriptors` input and must equal the `K` of the
     /// extractor whose results are fed in.
     pub fn new(engine: Arc<Engine>, stream: Arc<CudaStream>) -> Result<Self, BoxError> {
-        let descs = engine
-            .inputs()
-            .find(|s| s.name == "descriptors")
-            .ok_or("lightglue: engine has no 'descriptors' input")?;
-        let k = match descs.dims.as_slice() {
-            [_, 1, nk, d] if *nk > 0 && *d == DESC_DIM as i64 => *nk as usize,
-            dims => {
+        // Both inputs are rank-4 (2P,1,K,D); K comes from the descriptors and the
+        // keypoints must agree with it.
+        let dims = |name: &str| -> Result<Vec<i64>, BoxError> {
+            engine
+                .inputs()
+                .find(|s| s.name == name)
+                .map(|s| s.dims.clone())
+                .ok_or_else(|| format!("lightglue: engine has no '{name}' input").into())
+        };
+
+        let d = dims("descriptors")?;
+        let k = match d.as_slice() {
+            [_, 1, nk, dd] if *nk > 0 && *dd == DESC_DIM as i64 => *nk as usize,
+            _ => {
                 return Err(format!(
-                    "lightglue: 'descriptors' must be (2P,1,K,{DESC_DIM}), got {dims:?}"
+                    "lightglue: 'descriptors' must be (2P,1,K,{DESC_DIM}), got {d:?}"
                 )
                 .into())
             }
         };
-        let kpts = engine
-            .inputs()
-            .find(|s| s.name == "normalized_keypoints")
-            .ok_or("lightglue: engine has no 'normalized_keypoints' input")?;
-        match kpts.dims.as_slice() {
-            [_, 1, nk, 2] if *nk as usize == k => {}
-            dims => {
-                return Err(format!(
-                    "lightglue: 'normalized_keypoints' must be (2P,1,{k},2), got {dims:?}"
-                )
-                .into())
-            }
+        let kp = dims("normalized_keypoints")?;
+        if !matches!(kp.as_slice(), [_, 1, nk, 2] if *nk as usize == k) {
+            return Err(format!(
+                "lightglue: 'normalized_keypoints' must be (2P,1,{k},2), got {kp:?}"
+            )
+            .into());
         }
 
         let kpts_in = zeros_cuda::<f32, 4>([2, 1, k, 2], &stream)?;
