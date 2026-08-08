@@ -71,31 +71,41 @@ pub fn parse_interpolation(s: &str) -> Result<InterpolationMode, vrt::BoxError> 
 /// kornia-imgproc `resize/mod.rs`), so the forward map is `dst = s*src + (s - 1)/2`. The
 /// translation term is small — a fifth of a pixel at these scales — but it is not zero,
 /// and a bare `diag(s, s, 1)` silently biases every rescaled intrinsic and homography.
-pub fn resize_matrix(scale: f64) -> Mat3F64 {
-    let off = (scale - 1.0) / 2.0;
+///
+/// Takes both axes because the destination size is an integer: `round(w*s)/w` and
+/// `round(h*s)/h` are not equal in general even when a single `s` was requested. On
+/// Oxford `bark` (765x512 -> 640x428) they differ by 8e-4, which is 0.28 px at the
+/// bottom of the image against a 2.5 px threshold — on the one sequence the rotation
+/// claim rests on.
+pub fn resize_matrix(sx: f64, sy: f64) -> Mat3F64 {
     Mat3F64::from_cols(
-        Vec3F64::new(scale, 0.0, 0.0),
-        Vec3F64::new(0.0, scale, 0.0),
-        Vec3F64::new(off, off, 1.0),
+        Vec3F64::new(sx, 0.0, 0.0),
+        Vec3F64::new(0.0, sy, 0.0),
+        Vec3F64::new((sx - 1.0) / 2.0, (sy - 1.0) / 2.0, 1.0),
     )
 }
 
 /// An image resized for the engines, with the geometry needed to follow it.
 pub struct Scaled {
     pub image: Image<u8, 3>,
-    /// Uniform scale applied to both axes.
-    pub scale: f64,
+    /// The scale actually applied, per axis — `resized_dim / original_dim`, **not** the
+    /// scale that was requested. Rounding the destination to whole pixels means the two
+    /// differ, and the difference lands directly in every rescaled intrinsic.
+    pub scale_x: f64,
+    pub scale_y: f64,
 }
 
 /// Downscale to fit `max_side` with a **uniform** scale, then crop to a multiple of
 /// [`DIM_DIVISOR`].
 ///
 /// Flooring each axis to a multiple of 32 independently — the obvious implementation —
-/// makes `sx != sy`: on Oxford `bark` that is a 2.9% horizontal squash, and it turns an
-/// isotropic pixel threshold into an ellipse whose axes differ per sequence. Scaling
-/// uniformly and cropping the remainder keeps one scalar scale, and cropping from the
-/// right/bottom leaves the coordinate origin untouched, so ground-truth homographies and
-/// intrinsics need only that scalar.
+/// makes `sx != sy` by up to 2.9% on Oxford `bark`, turning an isotropic pixel threshold
+/// into an ellipse whose axes differ per sequence. Requesting one scale for both axes and
+/// cropping the remainder keeps them within a rounding step of each other, and cropping
+/// from the right/bottom leaves the coordinate origin untouched.
+///
+/// The residual anisotropy is not swept under the rug: rounding the destination to whole
+/// pixels leaves `rw/w != rh/h`, so both are returned and every consumer uses both.
 pub fn resize_to_fit(
     src: &Image<u8, 3>,
     max_side: usize,
@@ -149,7 +159,9 @@ pub fn resize_to_fit(
             },
             cropped,
         )?,
-        scale,
+        // The applied scale, from the resize step — cropping does not change it.
+        scale_x: rw as f64 / w as f64,
+        scale_y: rh as f64 / h as f64,
     })
 }
 
@@ -215,10 +227,9 @@ impl XFeatBaseline {
         stream: &Arc<CudaStream>,
         min_cossim: f32,
     ) -> Result<(Vec<(usize, usize)>, Vec<(f32, f32)>, Vec<(f32, f32)>), vrt::BoxError> {
-        let dim = self.matcher.dim();
         self.matcher.submit(
-            Descriptors::new(&self.left.descs, self.left.count(), dim),
-            Descriptors::new(&self.right.descs, self.right.count(), dim),
+            Descriptors::new(&self.left.descs, self.left.count(), self.left.desc_dim()),
+            Descriptors::new(&self.right.descs, self.right.count(), self.right.desc_dim()),
             min_cossim,
             &mut self.matches,
         )?;
@@ -260,14 +271,30 @@ mod tests {
     }
 
     /// The half-pixel term is exactly what a bare `diag(s, s, 1)` gets wrong.
+    /// The applied scale differs from the requested one because the destination is an
+    /// integer number of pixels. bark is the case that bites: 512 * (640/765) = 428.34.
+    #[test]
+    fn applied_scale_is_not_the_requested_scale() {
+        let (w, h, max_side) = (765.0f64, 512.0f64, 640.0f64);
+        let requested = max_side / w;
+        let (sx, sy) = ((w * requested).round() / w, (h * requested).round() / h);
+        assert!((sx - requested).abs() < 1e-12, "x happens to be exact here");
+        assert!(
+            (sy - requested).abs() > 1e-6,
+            "y must differ from the requested scale, else this test proves nothing"
+        );
+        // ~0.28 px at the bottom of the cropped image, against a ~2.5 px threshold.
+        assert!(((sy - requested) * 416.0).abs() > 0.2);
+    }
+
     #[test]
     fn resize_matrix_carries_the_half_pixel_offset() {
-        let m = resize_matrix(0.5);
+        let m = resize_matrix(0.5, 0.5);
         let p = m * Vec3F64::new(0.0, 0.0, 1.0);
         assert!((p.x - (-0.25)).abs() < 1e-12, "got {}", p.x);
         assert!((p.y - (-0.25)).abs() < 1e-12);
         // Identity scale must be exactly the identity, offset included.
-        let i = resize_matrix(1.0);
+        let i = resize_matrix(1.0, 1.0);
         assert_eq!(i.z_axis.x, 0.0);
         assert_eq!(i.z_axis.y, 0.0);
     }

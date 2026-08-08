@@ -88,8 +88,8 @@ impl Calib {
 
     /// Resizing the image rescales the intrinsics with it. Skipping this is silent: the
     /// epipolar geometry stays self-consistent and simply describes the wrong camera.
-    fn scaled_k(&self, scale: f64) -> Mat3F64 {
-        resize_matrix(scale) * self.k
+    fn scaled_k(&self, scale: (f64, f64)) -> Mat3F64 {
+        resize_matrix(scale.0, scale.1) * self.k
     }
 }
 
@@ -147,10 +147,10 @@ fn score(
 fn load_scaled(
     path: &Path,
     interpolation: InterpolationMode,
-) -> Result<(Image<u8, 3>, f64), vrt::BoxError> {
+) -> Result<(Image<u8, 3>, (f64, f64)), vrt::BoxError> {
     let src = read_image_any_rgb8(path)?;
     let scaled = resize_to_fit(src.as_ref(), MAX_SIDE, interpolation)?;
-    Ok((scaled.image, scaled.scale))
+    Ok((scaled.image, (scaled.scale_x, scaled.scale_y)))
 }
 
 #[derive(Default, Clone, Copy)]
@@ -248,8 +248,8 @@ fn main() -> Result<(), vrt::BoxError> {
         raco.submit(&dr, &mut r)?;
         glue.submit(&l, &r, &mut lg_out)?;
         mnn.submit(
-            Descriptors::new(l.descs_slice(), k, DESC_DIM),
-            Descriptors::new(r.descs_slice(), k, DESC_DIM),
+            Descriptors::new(l.descs_slice(), k, l.desc_dim()),
+            Descriptors::new(r.descs_slice(), k, r.desc_dim()),
             nn_cossim,
             &mut mnn_out,
         )?;

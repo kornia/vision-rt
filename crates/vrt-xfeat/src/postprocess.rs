@@ -261,6 +261,7 @@ pub struct XFeatResult {
     /// [`kpts_to_host`](Self::kpts_to_host) applies [`scale`](Self::scale) → original px.
     pub kpts: CudaSlice<f32>,
     /// L2-normalised 64-D descriptors on device, capacity `top_k×64`.
+    /// Ask [`desc_dim`](Self::desc_dim) for the width rather than assuming it.
     pub descs: CudaSlice<f32>,
     /// Combined NMS scores on device, capacity `top_k`.
     pub scores: CudaSlice<f32>,
@@ -290,6 +291,15 @@ impl XFeatResult {
     /// Capacity (max keypoints) this result was allocated for.
     pub fn capacity(&self) -> usize {
         self.top_k
+    }
+
+    /// Descriptor width of [`descs`](Self::descs).
+    ///
+    /// Sourced from the extractor that produced them, so a `Descriptors` built from this
+    /// carries the *data's* width. Passing a matcher's own `dim()` instead compares a
+    /// value against itself and passes unconditionally.
+    pub fn desc_dim(&self) -> usize {
+        crate::matching::Matcher::XFEAT_DIM
     }
 
     /// Valid keypoint count — reads the pinned scalar, so call **after** the

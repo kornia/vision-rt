@@ -189,6 +189,14 @@ impl RaCoAlikedResult {
         &self.norm_kpts
     }
 
+    /// Descriptor width of [`descs_slice`](Self::descs_slice).
+    ///
+    /// Sourced from the extractor that produced them: a matcher's own `dim()` passed in
+    /// its place would compare a value against itself and pass unconditionally.
+    pub fn desc_dim(&self) -> usize {
+        DESC_DIM
+    }
+
     /// GPU-resident L2-normalised descriptors `[K*128]`. Valid after the stream sync.
     pub fn descs_slice(&self) -> &CudaSlice<f32> {
         &self.descs

@@ -106,17 +106,20 @@ fn read_netpbm_rgb8(path: &Path) -> Result<Image<u8, 3>, vrt::BoxError> {
     )?)
 }
 
-/// Convert one frame, returning its original size and the uniform scale applied.
+/// Original pixel size of a frame, and the per-axis scale the resize applied to it.
+type Prepared = ((usize, usize), (f64, f64));
+
+/// Convert one frame, returning its original size and the per-axis scale applied.
 fn convert(
     src: &Path,
     dst: &Path,
     max_side: usize,
     interpolation: InterpolationMode,
-) -> Result<((usize, usize), f64), vrt::BoxError> {
+) -> Result<Prepared, vrt::BoxError> {
     let img = read_netpbm_rgb8(src)?;
     let scaled = resize_to_fit(&img, max_side, interpolation)?;
     write_image_png_rgb8(dst, &scaled.image)?;
-    Ok(((img.cols(), img.rows()), scaled.scale))
+    Ok(((img.cols(), img.rows()), (scaled.scale_x, scaled.scale_y)))
 }
 
 fn luma(img: &Image<u8, 3>, x: usize, y: usize) -> f64 {
@@ -214,8 +217,10 @@ fn main() -> Result<(), vrt::BoxError> {
             continue;
         };
         println!(
-            "{seq}: {} images, {orig1:?} scaled by {scale1:.4}",
-            sizes.len()
+            "{seq}: {} images, {orig1:?} scaled by ({:.6}, {:.6})",
+            sizes.len(),
+            scale1.0,
+            scale1.1
         );
 
         let img1 = read_image_any_rgb8(od.join("img1.png"))?;
@@ -233,8 +238,11 @@ fn main() -> Result<(), vrt::BoxError> {
             }
             let h = mat3_from_row_major(&v[..9]);
 
-            // Uniform scale plus the half-pixel offset kornia's resize actually applies.
-            let (s1, s2) = (resize_matrix(scale1), resize_matrix(scale_i));
+            // The scale actually applied, per axis, plus the half-pixel offset.
+            let (s1, s2) = (
+                resize_matrix(scale1.0, scale1.1),
+                resize_matrix(scale_i.0, scale_i.1),
+            );
             if s1.determinant().abs() < 1e-12 {
                 return Err("degenerate image scale".into());
             }
@@ -266,7 +274,10 @@ fn main() -> Result<(), vrt::BoxError> {
             match photometric_check(&img1, &img_i, &hs) {
                 Some((overlap, corr)) if corr >= MIN_CORRELATION => {
                     println!("  img{i}: overlap {overlap:5.1}%  corr {corr:+.3}");
-                    manifest.push(format!("{seq} img1.png img{i}.png {name} {scale_i:.10}"));
+                    manifest.push(format!(
+                        "{seq} img1.png img{i}.png {name} {:.12} {:.12}",
+                        scale_i.0, scale_i.1
+                    ));
                 }
                 Some((overlap, corr)) => {
                     suspect += 1;

@@ -133,10 +133,10 @@ columns run at the same k3072 keypoint budget. Format: inliers, precision.
 
 | pair | rot | RaCo-ALIKED + LightGlue+ | RaCo-ALIKED + mutual-NN | XFeat + mutual-NN |
 |---|---|---|---|---|
-| bark/2 | −31° | 446, **91.8%** | 232, 21.7% | 598, 47.0% |
-| bark/3 | **+150°** | 135, **82.8%** | 0, 0.0% | 0, **0.0%** |
-| bark/4 | **−120°** | 129, **89.0%** | 0, 0.0% | 0, **0.0%** |
-| bark/5 | −23° | 139, **93.9%** | 19, 2.0% | 1, 0.1% |
+| bark/2 | −31° | 445, **91.6%** | 231, 21.6% | 601, 47.2% |
+| bark/3 | **+150°** | 130, **79.8%** | 0, 0.0% | 0, **0.0%** |
+| bark/4 | **−120°** | 128, **88.3%** | 0, 0.0% | 0, **0.0%** |
+| bark/5 | −23° | 140, **94.6%** | 19, 2.0% | 1, 0.1% |
 | bark/6 | +153° | 0, 0.0% | 0, 0.0% | 0, 0.0% |
 | boat/2 | −14° | 684, **97.7%** | 1877, 88.4% | 1067, 59.7% |
 | boat/3 | −40° | 591, **97.2%** | 241, 28.0% | 410, 36.5% |
@@ -144,11 +144,11 @@ columns run at the same k3072 keypoint budget. Format: inliers, precision.
 | boat/5 | +8° | 301, **90.9%** | 469, 52.5% | 74, 11.2% |
 | boat/6 | −41° | 109, **59.6%** | 1, 0.2% | 7, 1.6% |
 | graf/2 | −15° | 597, **94.3%** | 800, 61.4% | 808, 54.9% |
-| graf/3 | +20° | 461, **81.9%** | 566, 47.2% | 499, 42.7% |
+| graf/3 | +20° | 461, **81.9%** | 566, 47.2% | 500, 42.7% |
 | graf/4 | −27° | 391, **82.1%** | 14, 2.1% | 187, 21.2% |
 | graf/5 | +5° | 296, **84.6%** | 471, 51.8% | 214, 26.3% |
 | graf/6 | +38° | 244, **80.5%** | 5, 0.8% | 17, 2.8% |
-| **total** | | **4928** | 4695 | 3882 |
+| **total** | | **4922** | 4694 | 3886 |
 
 `rot` is the in-plane rotation recovered by polar decomposition of the ground-truth
 homography — `bark` is a far harder rotation test than "rotation sequence" suggests.
@@ -166,39 +166,39 @@ per scene per co-visibility band (0.1 = barely overlapping), sampled with a fixe
 
 | co-vis | pairs | RaCo-ALIKED + LightGlue+ | RaCo-ALIKED + mutual-NN | XFeat + mutual-NN |
 |---|---|---|---|---|
-| 0.1 | 18 | **86.0%** | 40.1% | 21.8% |
-| 0.2 | 18 | **90.4%** | 56.5% | 39.0% |
-| 0.3 | 18 | **89.0%** | 61.0% | 48.2% |
-| 0.4 | 18 | **91.1%** | 68.2% | 54.1% |
-| 0.5 | 18 | **92.1%** | 72.2% | 58.5% |
-| **all** | **90** | **90.1%** (22515 inl) | 62.1% (57221) | 47.8% (39572) |
+| 0.1 | 18 | **87.0%** | 40.3% | 21.6% |
+| 0.2 | 18 | **91.0%** | 56.9% | 39.4% |
+| 0.3 | 18 | **89.7%** | 61.3% | 48.4% |
+| 0.4 | 18 | **91.4%** | 68.5% | 54.4% |
+| 0.5 | 18 | **92.1%** | 72.3% | 58.9% |
+| **all** | **90** | **90.6%** (22642 inl) | 62.3% (57427) | 48.0% (39790) |
 
 Loosening the threshold does not change the ordering, only the spread — at 3 px the totals
-are 99.5% / 78.2% / 72.3%, at 5 px 99.9% / 82.2% / 79.4%.
+are 99.5% / 78.2% / 72.3%, at 5 px 99.9% / 82.2% / 79.5%.
 
 ### What the two benchmarks agree on
 
 - **LightGlue wins on both counts, at equal budget.** With all three columns at k3072 it
-  returns both the most correct correspondences on Oxford (4928 vs 4695 vs 3882) *and* the
+  returns both the most correct correspondences on Oxford (4922 vs 4694 vs 3886) *and* the
   highest precision. An earlier revision of this table gave XFeat the most inliers; that
   was an artifact of running it at 4096 keypoints against RaCo's 3072 and of scoring in
   the downscaled frame. Both are fixed, and the conclusion reversed.
 - **The rotation claim holds on real images, at large angles.** XFeat scores **0.0%** on
   every pair past ~79° — `bark/3` (+150°), `bark/4` (−120°), `boat/4` (−80°) — and is
-  nonzero on every pair below it, while RaCo-ALIKED + LightGlue holds **82.8 / 89.0 /
+  nonzero on every pair below it, while RaCo-ALIKED + LightGlue holds **79.8 / 88.3 /
   90.0%** on those three. What is *not* handled is extreme scale: `bark/6` combines 153°
   with a 4.2× zoom and every method returns nothing.
 - **LightGlue buys precision, not recall.** Columns 1 and 2 use *identical* RaCo keypoints
   and *identical* ALIKED 128-D descriptors; only the matcher differs, so column 2 tests
-  the descriptors alone. Mutual-NN finds nearly as many true correspondences (4695 vs
-  4928) and buries them in outliers.
+  the descriptors alone. Mutual-NN finds nearly as many true correspondences (4694 vs
+  4922) and buries them in outliers.
 - **Difficulty separates them.** Across the co-visibility bands LightGlue decays
-  gracefully (92.1% → 86.0%) while mutual-NN falls off a cliff (72.2% → 40.1%) and XFeat
-  falls further (58.5% → 21.8%). Easy pairs hide this, which is why the bands are reported
+  gracefully (92.1% → 87.0%) while mutual-NN falls off a cliff (72.3% → 40.3%) and XFeat
+  falls further (58.9% → 21.6%). Easy pairs hide this, which is why the bands are reported
   separately rather than as one mean.
 - **Roughly where the literature sits, though not exactly comparable.** The IMC2021
   leaderboard's own ALIKED-2k + LightGlue entry reports a per-scene matching score at 3 px
-  of 0.686–0.945. At *our* 3 px we measure 99.5%, above that range; at 1 px, 90.1%, inside
+  of 0.686–0.945. At *our* 3 px we measure 99.5%, above that range; at 1 px, 90.6%, inside
   it. The metrics are not the same quantity — different scenes (validation vs test),
   different keypoint budget, and their score is computed under its own thresholding — so
   treat this as an order-of-magnitude sanity check, not a like-for-like result.

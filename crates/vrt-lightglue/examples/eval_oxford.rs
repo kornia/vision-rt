@@ -21,7 +21,7 @@
 //!       <dataset_dir> <raco.engine> <lightglue.engine> \
 //!       [inlier_px] [nn_cossim] [xfeat.engine] [xfeat_cossim]
 //!
-//! `dataset_dir` holds `manifest.txt` with `seq left right homography scale` per line; produce
+//! `dataset_dir` holds `manifest.txt` with `seq left right homography sx sy` per line; produce
 //! it with `scripts/get_oxford.sh` followed by `examples/prep_oxford`, which also
 //! photometrically verifies the rescaled ground truth before you trust any number here.
 
@@ -63,12 +63,15 @@ fn score(
     rk: &[(f32, f32)],
     h: &Mat3F64,
     thresh: f32,
+    scale: (f32, f32),
 ) -> (usize, usize, f32) {
     let inl = pairs
         .iter()
         .filter(|(i, j)| {
             let (ex, ey) = warp(h, lk[*i].0, lk[*i].1);
-            let (dx, dy) = (ex - rk[*j].0, ey - rk[*j].1);
+            // Undo the resize so the threshold means the same thing on every sequence.
+            let dx = (ex - rk[*j].0) / scale.0;
+            let dy = (ey - rk[*j].1) / scale.1;
             (dx * dx + dy * dy).sqrt() <= thresh
         })
         .count();
@@ -131,14 +134,13 @@ fn main() -> Result<(), vrt::BoxError> {
     for line in manifest.lines().filter(|l| !l.trim().is_empty()) {
         let f: Vec<&str> = line.split_whitespace().collect();
         let (seq, left_n, right_n, hf) = (f[0], f[1], f[2], f[3]);
-        // prep_oxford records the uniform scale it applied to the right image. Scoring in
+        // prep_oxford records the per-axis scale it applied to the right image. Scoring in
         // the resized frame with a fixed pixel threshold would make the criterion 11%
-        // looser on boat than on bark; converting it here keeps one common criterion.
-        let scale_r: f32 = f
-            .get(4)
-            .ok_or("manifest is missing the scale column — regenerate it with prep_oxford")?
-            .parse()?;
-        let thresh_resized = thresh * scale_r;
+        // looser on boat than on bark, so the error is converted back to original pixels
+        // instead — per axis, because the two scales differ by a rounding step.
+        let missing = "manifest is missing its two scale columns — regenerate with prep_oxford";
+        let sx: f32 = f.get(4).ok_or(missing)?.parse()?;
+        let sy: f32 = f.get(5).ok_or(missing)?.parse()?;
         let dir = root.join(seq);
 
         let hv = read_floats(&dir.join(hf))?;
@@ -159,16 +161,16 @@ fn main() -> Result<(), vrt::BoxError> {
             x.submit(&left, &right)?;
         }
         mnn.submit(
-            Descriptors::new(l.descs_slice(), k, DESC_DIM),
-            Descriptors::new(r.descs_slice(), k, DESC_DIM),
+            Descriptors::new(l.descs_slice(), k, l.desc_dim()),
+            Descriptors::new(r.descs_slice(), k, r.desc_dim()),
             nn_cossim,
             &mut mnn_out,
         )?;
         stream.synchronize()?;
 
         let (lk, rk) = (l.keypoints_host()?, r.keypoints_host()?);
-        let (lm, li, lp) = score(&lg_out.pairs(0.0)?, &lk, &rk, &h, thresh_resized);
-        let (mm, mi, mp) = score(&mnn_out.pairs(), &lk, &rk, &h, thresh_resized);
+        let (lm, li, lp) = score(&lg_out.pairs(0.0)?, &lk, &rk, &h, thresh, (sx, sy));
+        let (mm, mi, mp) = score(&mnn_out.pairs(), &lk, &rk, &h, thresh, (sx, sy));
         lg_tot += li;
         mnn_tot += mi;
 
@@ -176,7 +178,7 @@ fn main() -> Result<(), vrt::BoxError> {
         let (xm, xi, xp) = match &mut xf {
             Some(x) => {
                 let (pairs, xlk, xrk) = x.finish(&stream, xf_cossim)?;
-                score(&pairs, &xlk, &xrk, &h, thresh_resized)
+                score(&pairs, &xlk, &xrk, &h, thresh, (sx, sy))
             }
             None => (0, 0, 0.0),
         };
