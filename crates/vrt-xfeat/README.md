@@ -31,6 +31,31 @@ Match two results with `Matcher::new(stream)` → `submit(&a.descs, a.count(),
 &b.descs, b.count(), cossim, &mut MatchResult)` → `stream.synchronize()` →
 `MatchResult::pairs()`. All CUDA kernels are NVRTC-JIT-compiled at runtime.
 
+## Breaking change: `submit_match` is now `submit`
+
+`Matcher::submit_match` and `LightGlue::submit_match` are both `submit`, matching every
+other model in the workspace, and the descriptor arguments are now a single
+`Descriptors::new(buf, count, dim)` instead of a `(&buf, count)` pair.
+
+No deprecated forwarder is provided, deliberately. The old signature has nowhere to get
+the descriptor width from, so a shim would have to assume the matcher's own — which is
+exactly the tautology that let a 64-D buffer reach a 128-D kernel and return
+plausible-looking nonsense. A compile error is the better outcome.
+
+Known caller to update: `sensor-rt`, `crates/sensor-oak/examples/oakd_xfeat_stereo`.
+
+```rust
+// before
+matcher.submit_match(&l.descs, l.count(), &r.descs, r.count(), 0.82, &mut out)?;
+// after — the width comes from whatever produced the descriptors
+matcher.submit(
+    Descriptors::new(&l.descs, l.count(), l.desc_dim()),
+    Descriptors::new(&r.descs, r.count(), r.desc_dim()),
+    0.82,
+    &mut out,
+)?;
+```
+
 ## Model & credits
 
 The weights are **XFeat** by Potje, Cadar, Araujo, Martins & Nascimento —

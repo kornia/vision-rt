@@ -18,14 +18,18 @@ use kornia_io::functional::read_image_any_rgb8;
 use vrt_raco_aliked::{RaCoAliked, DESC_DIM};
 use vrt_xfeat::{Descriptors, Matcher};
 
+#[path = "common/mod.rs"]
+mod common;
+use common::arg_or;
+
 fn main() -> Result<(), vrt::BoxError> {
     let a: Vec<String> = std::env::args().collect();
     if a.len() < 4 {
         eprintln!("Usage: raco_mutualnn <raco.engine> <left.png> <right.png> [min_cossim] [iters]");
         std::process::exit(1);
     }
-    let min_cossim: f32 = a.get(4).and_then(|s| s.parse().ok()).unwrap_or(0.0);
-    let iters: usize = a.get(5).and_then(|s| s.parse().ok()).unwrap_or(20);
+    let min_cossim: f32 = arg_or(&a, 4, "min_cossim", 0.0)?;
+    let iters: usize = arg_or(&a, 5, "iters", 20)?;
 
     // One shared stream: extraction and matching are a single continuous queue, and one
     // synchronize drains both.

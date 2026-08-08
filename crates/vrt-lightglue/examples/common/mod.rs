@@ -49,10 +49,15 @@ pub fn arg_or<T: FromStr>(
 }
 
 /// `Mat3F64` is column-major (glam); every ground-truth file here is row-major.
-pub fn mat3_from_row_major(v: &[f64]) -> Mat3F64 {
-    let mut a = [0.0; 9];
-    a.copy_from_slice(v);
-    Mat3F64::from_cols_array(&a).transpose()
+///
+/// Fallible rather than slicing-and-panicking: the callers read these from files, so a
+/// short one is bad input, not a bug, and `copy_from_slice`'s panic names neither the
+/// file nor the expected length.
+pub fn mat3_from_row_major(v: &[f64]) -> Result<Mat3F64, vrt::BoxError> {
+    let a: [f64; 9] = v
+        .try_into()
+        .map_err(|_| format!("expected 9 floats for a 3x3 matrix, got {}", v.len()))?;
+    Ok(Mat3F64::from_cols_array(&a).transpose())
 }
 
 pub fn parse_interpolation(s: &str) -> Result<InterpolationMode, vrt::BoxError> {
@@ -255,7 +260,8 @@ mod tests {
     /// every published number without failing anything.
     #[test]
     fn mat3_from_row_major_transposes() {
-        let m = mat3_from_row_major(&[799.4, 0.0, 524.0, 0.0, 799.4, 289.0, 0.0, 0.0, 1.0]);
+        let m = mat3_from_row_major(&[799.4, 0.0, 524.0, 0.0, 799.4, 289.0, 0.0, 0.0, 1.0])
+            .expect("9 floats is the valid length");
         // Column-major storage: `x_axis` is the first COLUMN of the logical matrix.
         assert_eq!(m.x_axis.x, 799.4);
         assert_eq!(m.x_axis.y, 0.0);
@@ -264,6 +270,8 @@ mod tests {
             "cx must land in the top-right, not the bottom-left"
         );
         assert_eq!(m.z_axis.y, 289.0);
+        // A wrong length is an error, not a panic.
+        assert!(mat3_from_row_major(&[1.0, 2.0, 3.0]).is_err());
         // And it must act like K on a point.
         let p = m * Vec3F64::new(1.0, 2.0, 1.0);
         assert!((p.x - (799.4 + 524.0)).abs() < 1e-9);

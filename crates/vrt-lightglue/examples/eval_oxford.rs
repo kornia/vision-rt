@@ -131,6 +131,8 @@ fn main() -> Result<(), vrt::BoxError> {
 
     let manifest = std::fs::read_to_string(root.join("manifest.txt"))?;
     let (mut lg_tot, mut mnn_tot, mut xf_tot) = (0usize, 0usize, 0usize);
+    let (mut lg_pct, mut mnn_pct, mut xf_pct) = (0.0f64, 0.0f64, 0.0f64);
+    let mut n_pairs = 0usize;
     for line in manifest.lines().filter(|l| !l.trim().is_empty()) {
         let f: Vec<&str> = line.split_whitespace().collect();
         let (seq, left_n, right_n, hf) = (f[0], f[1], f[2], f[3]);
@@ -144,10 +146,7 @@ fn main() -> Result<(), vrt::BoxError> {
         let dir = root.join(seq);
 
         let hv = read_floats(&dir.join(hf))?;
-        if hv.len() < 9 {
-            return Err(format!("{seq}/{hf}: expected 9 floats, got {}", hv.len()).into());
-        }
-        let h = mat3_from_row_major(&hv[..9]);
+        let h = mat3_from_row_major(&hv).map_err(|e| format!("{seq}/{hf}: {e}"))?;
 
         let left = read_image_any_rgb8(dir.join(left_n))?.to_cuda(&stream)?;
         let right = read_image_any_rgb8(dir.join(right_n))?.to_cuda(&stream)?;
@@ -183,6 +182,10 @@ fn main() -> Result<(), vrt::BoxError> {
             None => (0, 0, 0.0),
         };
         xf_tot += xi;
+        lg_pct += lp as f64;
+        mnn_pct += mp as f64;
+        xf_pct += xp as f64;
+        n_pairs += 1;
 
         println!(
             "{:<14} {:>7} {:>6} {:>6.1}% {:>7} {:>6} {:>6.1}% {:>7} {:>6} {:>6.1}%",
@@ -200,6 +203,15 @@ fn main() -> Result<(), vrt::BoxError> {
     }
     println!(
         "\ntotal correct correspondences: LightGlue+ {lg_tot}, RaCo mutual-NN {mnn_tot}, XFeat {xf_tot}"
+    );
+    // Every pair weighted equally, so a single dense pair cannot carry the summary.
+    let n = n_pairs.max(1) as f64;
+    println!(
+        "macro-average precision over {n_pairs} pairs: LightGlue+ {:.1}%, RaCo mutual-NN \
+         {:.1}%, XFeat {:.1}%",
+        lg_pct / n,
+        mnn_pct / n,
+        xf_pct / n
     );
     Ok(())
 }

@@ -176,6 +176,64 @@ per scene per co-visibility band (0.1 = barely overlapping), sampled with a fixe
 Loosening the threshold does not change the ordering, only the spread — at 3 px the totals
 are 99.5% / 78.2% / 72.3%, at 5 px 99.9% / 82.2% / 79.5%.
 
+### Is the mutual-NN baseline handicapped?
+
+A mutual-NN baseline with no similarity gate is low-precision by construction, so "the
+matcher beats it" would be circular. Both gates were therefore swept, with LightGlue's
+column as the control (it is invariant across every row below).
+
+Oxford, macro-average precision — tuning the gate barely moves ALIKED:
+
+| ALIKED gate | inliers | macro precision |
+|---|---|---|
+| 0.00 (ungated) | 4694 | 23.7% |
+| 0.50 | 4536 | 24.7% |
+| **0.70** | 2846 | **25.7%** |
+| 0.80 | 1288 | 24.1% |
+| 0.85 | 377 | 13.2% |
+| 0.90 | 10 | 6.7% |
+
+Best tuned mutual-NN reaches 25.7% against LightGlue's **80.9%**, and pays 40% of its
+inliers to get there. XFeat's own sweep peaks at 25.0% (gate 0.90, half the inliers).
+
+IMC is the case where the gate genuinely matters, and where the ungated number *was*
+understating the baseline:
+
+| configuration | inliers | micro | macro |
+|---|---|---|---|
+| ALIKED NN, ungated | 57427 | 62.3% | 57.7% |
+| ALIKED NN, gate 0.85 | 16924 | **89.2%** | 71.4% |
+| RaCo-ALIKED + LightGlue+ | **22642** | **90.6%** | **89.3%** |
+
+At a tuned gate mutual-NN's pooled precision nearly reaches LightGlue's — but it returns
+*fewer* correct correspondences doing so (16924 vs 22642), and its macro average stays 18
+points behind because it collapses on the hard pairs specifically (co-visibility 0.1:
+37.5% against 85.4%). So the honest statement is not "LightGlue buys precision": it is
+that **the mutual-NN precision/recall curve does not reach LightGlue's operating point** —
+LightGlue is simultaneously more precise and higher recall than any gate setting tested.
+
+### Reproducing these numbers
+
+```bash
+# Oxford: fetch, prepare (records the per-axis scale it applied), evaluate
+./crates/vrt-lightglue/scripts/get_oxford.sh /data/oxford
+cargo run --release -p vrt-lightglue --example prep_oxford -- \
+    /data/oxford /data/oxford_prepared 640 bilinear
+cargo run --release -p vrt-lightglue --example eval_oxford -- \
+    /data/oxford_prepared raco-aliked-extractor-k3072-...fp16.engine \
+    lightglue-matcher-k1024-...fp16.engine 3.0 0.0 xfeat-backbone-...engine 0.0
+
+# IMC: metadata only (needs h5py + numpy), then evaluate
+python3 crates/vrt-lightglue/scripts/prep_imc.py /data/imc2021/phototourism 6 0
+cargo run --release -p vrt-lightglue --example eval_imc -- \
+    /data/imc2021/phototourism raco-aliked-extractor-k3072-...fp16.engine \
+    lightglue-matcher-k1024-...fp16.engine 1.0 0.0 xfeat-backbone-...engine bilinear 0.0
+```
+
+The trailing arguments are the inlier threshold and the two mutual-NN gates; the tables
+above use the values shown. Both examples print the configuration they ran with, so a
+pasted run is self-describing.
+
 ### What the two benchmarks agree on
 
 - **LightGlue wins on both counts, at equal budget.** With all three columns at k3072 it
@@ -188,10 +246,12 @@ are 99.5% / 78.2% / 72.3%, at 5 px 99.9% / 82.2% / 79.5%.
   nonzero on every pair below it, while RaCo-ALIKED + LightGlue holds **79.8 / 88.3 /
   90.0%** on those three. What is *not* handled is extreme scale: `bark/6` combines 153°
   with a 4.2× zoom and every method returns nothing.
-- **LightGlue buys precision, not recall.** Columns 1 and 2 use *identical* RaCo keypoints
-  and *identical* ALIKED 128-D descriptors; only the matcher differs, so column 2 tests
-  the descriptors alone. Mutual-NN finds nearly as many true correspondences (4694 vs
-  4922) and buries them in outliers.
+- **LightGlue's operating point is outside mutual-NN's curve.** Columns 1 and 2 use
+  *identical* RaCo keypoints and *identical* ALIKED 128-D descriptors; only the matcher
+  differs, so column 2 tests the descriptors alone. Ungated, mutual-NN finds nearly as
+  many true correspondences (4694 vs 4922) and buries them in outliers; gated, it gets
+  precise but returns fewer. Neither setting reaches LightGlue on both axes at once — see
+  the sweep above, which is why the gate is reported rather than assumed.
 - **Difficulty separates them.** Across the co-visibility bands LightGlue decays
   gracefully (92.1% → 87.0%) while mutual-NN falls off a cliff (72.3% → 40.3%) and XFeat
   falls further (58.9% → 21.6%). Easy pairs hide this, which is why the bands are reported

@@ -184,6 +184,40 @@ pub struct Descriptors<'a> {
     dim: usize,
 }
 
+/// The `submit` preconditions, as arithmetic over lengths.
+///
+/// Split out from [`Matcher::submit`] because it needs no GPU: keeping it inline would
+/// leave the only coverage of these guards behind an `#[ignore]`d device test, which is
+/// how the previous version of the width check shipped broken.
+fn check_descriptors(
+    which: &'static str,
+    buf_len: usize,
+    count: usize,
+    dim: usize,
+    kernel_dim: usize,
+    cap: usize,
+) -> Result<(), XFeatError> {
+    if dim != kernel_dim {
+        return Err(XFeatError::DescriptorWidth {
+            which,
+            buf_dim: dim,
+            kernel_dim,
+        });
+    }
+    if buf_len < count * dim {
+        return Err(XFeatError::DescriptorDim {
+            which,
+            expected: count * dim,
+            got: buf_len,
+            dim,
+        });
+    }
+    if count > cap {
+        return Err(XFeatError::MatchCapacity { which, count, cap });
+    }
+    Ok(())
+}
+
 impl<'a> Descriptors<'a> {
     /// `buf` holds at least `count * dim` L2-normalised floats, row-major per descriptor.
     pub fn new(buf: &'a CudaSlice<f32>, count: usize, dim: usize) -> Self {
@@ -194,6 +228,10 @@ impl<'a> Descriptors<'a> {
 impl Matcher {
     /// XFeat's descriptor width, and the default for [`new`](Self::new).
     pub const XFEAT_DIM: usize = 64;
+
+    /// Floats held in the shared reference tile — 16 KB of `f32`, the budget the tile
+    /// height is derived from.
+    const SHARED_FLOATS: usize = 4096;
 
     /// Compile the match kernel for 64-D descriptors (XFeat). Share `stream` with the
     /// extractor so extraction + matching run on one continuous stream.
@@ -213,12 +251,13 @@ impl Matcher {
     /// the register array; on this part occupancy has repeatedly beaten
     /// instruction-level parallelism, so measure before assuming 128-D costs only 2x.
     pub fn with_dim(stream: Arc<CudaStream>, dim: usize) -> Result<Self, XFeatError> {
-        // Shared tile is MATCH_TILE * dim floats; keep it near 16 KB.
-        let tile = match dim {
-            64 => 64,
-            128 => 32,
-            _ => return Err(XFeatError::UnsupportedDim(dim)),
-        };
+        // Shared tile is MATCH_TILE * dim floats, held at ~16 KB. Deriving the tile
+        // rather than tabulating it means 64 and 128 are not special: 256-D (SuperPoint)
+        // or any other multiple of the warp width works without a source edit.
+        let tile = Self::SHARED_FLOATS / dim.max(1);
+        if dim == 0 || !dim.is_multiple_of(32) || tile == 0 {
+            return Err(XFeatError::UnsupportedDim(dim));
+        }
         let src = MATCH_SRC
             .replace("{TILE}", &tile.to_string())
             .replace("{DESC_D}", &dim.to_string());
@@ -261,28 +300,7 @@ impl Matcher {
         // matches while the kernels never ran leaves `pairs()` reading zero-filled
         // pinned memory, which reports a fabricated match at index 0.
         for (which, d) in [("descs0", &descs0), ("descs1", &descs1)] {
-            if d.dim != self.dim {
-                return Err(XFeatError::DescriptorWidth {
-                    which,
-                    buf_dim: d.dim,
-                    kernel_dim: self.dim,
-                });
-            }
-            if d.buf.len() < d.count * d.dim {
-                return Err(XFeatError::DescriptorDim {
-                    which,
-                    expected: d.count * d.dim,
-                    got: d.buf.len(),
-                    dim: d.dim,
-                });
-            }
-            if d.count > out.cap {
-                return Err(XFeatError::MatchCapacity {
-                    which,
-                    count: d.count,
-                    cap: out.cap,
-                });
-            }
+            check_descriptors(which, d.buf.len(), d.count, d.dim, self.dim, out.cap)?;
         }
 
         out.min_cossim = min_cossim;
@@ -346,6 +364,49 @@ impl Matcher {
             )?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod guard_tests {
+    use super::*;
+
+    const D: usize = 128;
+
+    /// The case a length check cannot catch, and the whole reason the width is declared:
+    /// a 64-D set long enough to look like a valid 128-D one.
+    #[test]
+    fn rejects_a_width_that_passes_the_length_check() {
+        // 2048 x 64 floats offered as 1024 x 128 — the length check passes.
+        assert!(check_descriptors("descs0", 2048 * 64, 1024, 64, D, 4096).is_err());
+        // The rejection must come from the declared width, not the length: the same
+        // buffer and count with the correct width is accepted, so the length check
+        // was never what failed.
+        assert!(check_descriptors("descs0", 2048 * 64, 1024, D, D, 4096).is_ok());
+    }
+
+    #[test]
+    fn rejects_a_buffer_too_short_for_its_count() {
+        assert!(check_descriptors("descs0", 4 * D, 64, D, D, 4096).is_err());
+    }
+
+    #[test]
+    fn rejects_a_count_over_capacity() {
+        assert!(check_descriptors("descs0", 64 * D, 64, D, D, 8).is_err());
+    }
+
+    #[test]
+    fn accepts_an_over_allocated_buffer() {
+        // Every real caller over-allocates to a capacity; that must stay legal.
+        assert!(check_descriptors("descs0", 4096 * D, 2000, D, D, 4096).is_ok());
+    }
+
+    /// The tile is derived, so widths beyond the two originally tabulated work.
+    #[test]
+    fn shared_tile_is_derived_from_the_width() {
+        for (dim, want) in [(64usize, 64usize), (128, 32), (256, 16)] {
+            assert_eq!(Matcher::SHARED_FLOATS / dim, want, "dim {dim}");
+        }
     }
 }
 

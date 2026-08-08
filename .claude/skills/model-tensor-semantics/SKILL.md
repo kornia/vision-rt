@@ -52,10 +52,11 @@ space doesn't affect it.
 
 | Tensor | Shape | Meaning |
 |--------|-------|---------|
-| `descriptors` | (1, 64, H/8, W/8) | dense 64-D feature map (XFeat's own width; the
-  matcher also compiles for the 128-D ALIKED descriptors `vrt-raco-aliked` emits) |
+| `descriptors` | (1, 64, H/8, W/8) | dense 64-D feature map |
 | `heatmap`     | (1, 1, H, W)      | keypoint confidence |
 | `reliability` | (1, 1, H, W)      | per-pixel reliability weight |
+
+64 is XFeat's own width. The matcher is separate and compiles for others — see below.
 
 Engine MUST expose exactly those three output names (`model.rs` errors with
 `MissingOutput` otherwise).

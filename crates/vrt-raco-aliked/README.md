@@ -106,98 +106,24 @@ percentages.
 
 ## Accuracy on real data
 
-The synthetic pair below is a sanity check, not evidence. Two real benchmarks with
-published ground truth ship as examples.
+Measured on the **Oxford/VGG affine** and **IMC 2021 phototourism** benchmarks, both
+shipping as examples in `vrt-lightglue`. Headline, at k3072 for every method:
 
-> Measured 2026-08-08 on a Jetson Orin Nano (SM87, TensorRT 10.3.0.30, MAXN_SUPER),
-> `raco-aliked-extractor-k3072` + `lightglue-matcher-k1024`, both fp16, images at long
-> side 640. Every configuration below is reproducible with the commands given; no number
-> here is carried over from an earlier run.
+| | Oxford inliers | Oxford macro precision | IMC macro precision |
+|---|---|---|---|
+| RaCo-ALIKED + LightGlue+ | **4922** | **80.9%** | **89.3%** |
+| RaCo-ALIKED + mutual-NN | 4694 | 23.7% | 57.7% |
+| XFeat + mutual-NN | 3886 | 20.3% | 41.8% |
 
-### Oxford/VGG affine — planar, ground-truth homographies
+RaCo's rotation robustness is the reason to reach for this crate over `vrt-xfeat`: XFeat
+scores **0.0%** on every Oxford pair past ~79° of in-plane rotation — `bark/3` (+150°),
+`bark/4` (−120°), `boat/4` (−80°) — where this pipeline holds **79.8 / 88.3 / 90.0%**.
 
-15 pairs; `bark`/`boat` are rotation+zoom, `graf` is viewpoint. A match is an inlier when
-`H·left` lands within **3 px at original image resolution** — `prep_oxford` records the
-uniform scale it applied and `eval_oxford` converts, so every sequence is scored under one
-criterion rather than under whatever its own downscale factor happened to be. All three
-columns run at the same k3072 keypoint budget. Format: inliers, precision.
-
-| pair | rot | RaCo-ALIKED + LightGlue+ | RaCo-ALIKED + mutual-NN | XFeat + mutual-NN |
-|---|---|---|---|---|
-| bark/2 | −31° | 445, **91.6%** | 231, 21.6% | 601, 47.2% |
-| bark/3 | **+150°** | 130, **79.8%** | 0, 0.0% | 0, **0.0%** |
-| bark/4 | **−120°** | 128, **88.3%** | 0, 0.0% | 0, **0.0%** |
-| bark/5 | −23° | 140, **94.6%** | 19, 2.0% | 1, 0.1% |
-| bark/6 | +153° | 0, 0.0% | 0, 0.0% | 0, 0.0% |
-| boat/2 | −14° | 684, **97.7%** | 1877, 88.4% | 1067, 59.7% |
-| boat/3 | −40° | 591, **97.2%** | 241, 28.0% | 410, 36.5% |
-| boat/4 | **−80°** | 405, **90.0%** | 0, 0.0% | 0, **0.0%** |
-| boat/5 | +8° | 301, **90.9%** | 469, 52.5% | 74, 11.2% |
-| boat/6 | −41° | 109, **59.6%** | 1, 0.2% | 7, 1.6% |
-| graf/2 | −15° | 597, **94.3%** | 800, 61.4% | 808, 54.9% |
-| graf/3 | +20° | 461, **81.9%** | 566, 47.2% | 500, 42.7% |
-| graf/4 | −27° | 391, **82.1%** | 14, 2.1% | 187, 21.2% |
-| graf/5 | +5° | 296, **84.6%** | 471, 51.8% | 214, 26.3% |
-| graf/6 | +38° | 244, **80.5%** | 5, 0.8% | 17, 2.8% |
-| **total** | | **4922** | 4694 | 3886 |
-
-`rot` is the in-plane rotation recovered by polar decomposition of the ground-truth
-homography — `bark` is a far harder rotation test than "rotation sequence" suggests.
-
-### IMC 2021 phototourism — 3D scenes, ground-truth poses, stratified by difficulty
-
-Oxford is planar: one homography maps every pixel. Phototourism is not, so ground truth
-can only say a match must lie on its **epipolar line**, and a match is an inlier when its
-**Sampson error** against `F = K2⁻ᵀ[t]ₓR K1⁻¹` is under 1 px (`kornia_3d::pose`). That is a
-*weaker* test than Oxford's — a match on the right line at the wrong depth passes — so
-these numbers are not comparable to the Oxford ones. Sampson mixes both images' frames, so
-unlike Oxford this threshold is **not** converted to original resolution; it applies in the
-640-long-side frame. 90 pairs from `reichstag`, `sacre_coeur` and `st_peters_square`, six
-per scene per co-visibility band (0.1 = barely overlapping), sampled with a fixed seed.
-
-| co-vis | pairs | RaCo-ALIKED + LightGlue+ | RaCo-ALIKED + mutual-NN | XFeat + mutual-NN |
-|---|---|---|---|---|
-| 0.1 | 18 | **87.0%** | 40.3% | 21.6% |
-| 0.2 | 18 | **91.0%** | 56.9% | 39.4% |
-| 0.3 | 18 | **89.7%** | 61.3% | 48.4% |
-| 0.4 | 18 | **91.4%** | 68.5% | 54.4% |
-| 0.5 | 18 | **92.1%** | 72.3% | 58.9% |
-| **all** | **90** | **90.6%** (22642 inl) | 62.3% (57427) | 48.0% (39790) |
-
-Loosening the threshold does not change the ordering, only the spread — at 3 px the totals
-are 99.5% / 78.2% / 72.3%, at 5 px 99.9% / 82.2% / 79.5%.
-
-### What the two benchmarks agree on
-
-- **LightGlue wins on both counts, at equal budget.** With all three columns at k3072 it
-  returns both the most correct correspondences on Oxford (4922 vs 4694 vs 3886) *and* the
-  highest precision. An earlier revision of this table gave XFeat the most inliers; that
-  was an artifact of running it at 4096 keypoints against RaCo's 3072 and of scoring in
-  the downscaled frame. Both are fixed, and the conclusion reversed.
-- **The rotation claim holds on real images, at large angles.** XFeat scores **0.0%** on
-  every pair past ~79° — `bark/3` (+150°), `bark/4` (−120°), `boat/4` (−80°) — and is
-  nonzero on every pair below it, while RaCo-ALIKED + LightGlue holds **79.8 / 88.3 /
-  90.0%** on those three. What is *not* handled is extreme scale: `bark/6` combines 153°
-  with a 4.2× zoom and every method returns nothing.
-- **LightGlue buys precision, not recall.** Columns 1 and 2 use *identical* RaCo keypoints
-  and *identical* ALIKED 128-D descriptors; only the matcher differs, so column 2 tests
-  the descriptors alone. Mutual-NN finds nearly as many true correspondences (4694 vs
-  4922) and buries them in outliers.
-- **Difficulty separates them.** Across the co-visibility bands LightGlue decays
-  gracefully (92.1% → 87.0%) while mutual-NN falls off a cliff (72.3% → 40.3%) and XFeat
-  falls further (58.9% → 21.6%). Easy pairs hide this, which is why the bands are reported
-  separately rather than as one mean.
-- **Roughly where the literature sits, though not exactly comparable.** The IMC2021
-  leaderboard's own ALIKED-2k + LightGlue entry reports a per-scene matching score at 3 px
-  of 0.686–0.945. At *our* 3 px we measure 99.5%, above that range; at 1 px, 90.6%, inside
-  it. The metrics are not the same quantity — different scenes (validation vs test),
-  different keypoint budget, and their score is computed under its own thresholding — so
-  treat this as an order-of-magnitude sanity check, not a like-for-like result.
-
-> Mutual-NN's similarity gate is descriptor-specific and unforgiving: XFeat's tuned 0.82
-> applied to ALIKED's 128-D descriptors returns **zero** matches on 10 of the 15 Oxford
-> pairs. The two families therefore get separate CLI gates, both defaulting to ungated, so
-> neither column is silently measured through a threshold picked for the other.
+The full tables, the per-pair rotation angles, the mutual-NN gate sweep and the commands
+that produce all of it live in
+**[`crates/vrt-lightglue/README.md`](../vrt-lightglue/README.md#accuracy-on-real-data)**.
+They are kept in one place deliberately: these numbers get re-measured, and two copies
+drift.
 
 ## Licences
 

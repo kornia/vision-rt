@@ -32,7 +32,9 @@ use kornia_algebra::{Mat3F64, Vec3F64};
 
 #[path = "common/mod.rs"]
 mod common;
-use common::{mat3_from_row_major, parse_interpolation, read_floats, resize_matrix, resize_to_fit};
+use common::{
+    arg_or, mat3_from_row_major, parse_interpolation, read_floats, resize_matrix, resize_to_fit,
+};
 
 /// Below this, treat the rescaled ground truth as broken rather than the matcher.
 const MIN_CORRELATION: f64 = 0.3;
@@ -85,9 +87,11 @@ fn read_netpbm_rgb8(path: &Path) -> Result<Image<u8, 3>, vrt::BoxError> {
     let need = w * h * src_channels;
     if raw.len() < i + need {
         return Err(format!(
-            "{}: truncated ({} of {need} bytes)",
+            "{}: truncated ({} of {need} payload bytes)",
             path.display(),
-            raw.len() - i
+            // The header parse can leave `i` one past the end on a file truncated mid
+            // header, so this subtraction must not be allowed to wrap.
+            raw.len().saturating_sub(i)
         )
         .into());
     }
@@ -177,7 +181,7 @@ fn main() -> Result<(), vrt::BoxError> {
         std::process::exit(1);
     }
     let (src_root, out_root) = (PathBuf::from(&a[1]), PathBuf::from(&a[2]));
-    let max_side: usize = a.get(3).and_then(|s| s.parse().ok()).unwrap_or(640);
+    let max_side: usize = arg_or(&a, 3, "max_side", 640)?;
     let interpolation = parse_interpolation(a.get(4).map(String::as_str).unwrap_or("bilinear"))?;
     std::fs::create_dir_all(&out_root)?;
 
@@ -233,10 +237,7 @@ fn main() -> Result<(), vrt::BoxError> {
                 continue;
             }
             let v = read_floats(&hp)?;
-            if v.len() < 9 {
-                return Err(format!("{}: expected 9 floats", hp.display()).into());
-            }
-            let h = mat3_from_row_major(&v[..9]);
+            let h = mat3_from_row_major(&v).map_err(|e| format!("{}: {e}", hp.display()))?;
 
             // The scale actually applied, per axis, plus the half-pixel offset.
             let (s1, s2) = (

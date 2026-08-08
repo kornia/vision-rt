@@ -78,9 +78,9 @@ impl Calib {
             return Err(format!("{}: expected 21 floats, got {}", path.display(), v.len()).into());
         }
         Ok(Self {
-            k: mat3_from_row_major(&v[0..9]),
+            k: mat3_from_row_major(&v[0..9])?,
             pose: Pose3d::new(
-                mat3_from_row_major(&v[9..18]),
+                mat3_from_row_major(&v[9..18])?,
                 Vec3F64::new(v[18], v[19], v[20]),
             ),
         })
@@ -158,6 +158,8 @@ struct Tally {
     pairs: usize,
     matches: usize,
     inliers: usize,
+    /// Sum of per-pair precisions, for the macro average.
+    pct_sum: f64,
 }
 
 impl Tally {
@@ -165,12 +167,30 @@ impl Tally {
         self.pairs += 1;
         self.matches += m;
         self.inliers += i;
+        if m > 0 {
+            self.pct_sum += 100.0 * i as f64 / m as f64;
+        }
     }
+
+    /// Pooled ("micro") precision: inliers over matches across the whole band.
+    ///
+    /// Weighted by match volume, so a single high-match pair can dominate a band — and
+    /// the three columns differ severalfold in volume, so it weights them differently
+    /// too. Read it next to [`macro_pct`](Self::macro_pct), never alone.
     fn pct(&self) -> f32 {
         if self.matches == 0 {
             0.0
         } else {
             100.0 * self.inliers as f32 / self.matches as f32
+        }
+    }
+
+    /// Mean of the per-pair precisions: every pair counts once.
+    fn macro_pct(&self) -> f32 {
+        if self.pairs == 0 {
+            0.0
+        } else {
+            (self.pct_sum / self.pairs as f64) as f32
         }
     }
 }
@@ -295,6 +315,7 @@ fn main() -> Result<(), vrt::BoxError> {
             dst.pairs += src.pairs;
             dst.matches += src.matches;
             dst.inliers += src.inliers;
+            dst.pct_sum += src.pct_sum;
         }
     }
     println!(
@@ -311,6 +332,27 @@ fn main() -> Result<(), vrt::BoxError> {
         tot.2.inliers,
         tot.2.pct()
     );
+    // Pooled precision is match-volume weighted; the macro average gives every pair one
+    // vote. Reporting only the first lets one dense pair speak for a whole band.
+    println!(
+        "\nmacro-average precision (mean over pairs, each weighted equally):\n\
+         {:<8} {:>5} {:>22.1} {:>22.1} {:>22.1}",
+        "all",
+        tot.0.pairs,
+        tot.0.macro_pct(),
+        tot.1.macro_pct(),
+        tot.2.macro_pct()
+    );
+    for (band, (lg, nn, x)) in &bands {
+        println!(
+            "{:<8} {:>5} {:>22.1} {:>22.1} {:>22.1}",
+            band,
+            lg.pairs,
+            lg.macro_pct(),
+            nn.macro_pct(),
+            x.macro_pct()
+        );
+    }
     if skipped > 0 {
         println!("\n{skipped} pairs skipped (near-zero baseline; F is degenerate)");
     }

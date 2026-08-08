@@ -108,8 +108,11 @@ in-plane rotations recovered by polar decomposition of the homographies are **+1
 where RaCo-ALIKED + LightGlue+ holds **79.8 / 88.3 / 90.0%**.
 
 At an equal keypoint budget LightGlue+ also returns the most correct correspondences
-outright (4922, against 4694 for mutual-NN on the same descriptors and 3886 for XFeat), so
-the matcher buys precision without giving up recall.
+outright (4922, against 4694 for mutual-NN on the same descriptors and 3886 for XFeat).
+That holds against a *tuned* mutual-NN too, not just an ungated one: sweeping the
+similarity gate moves the baseline along a precision/recall curve that never reaches
+LightGlue's operating point — at its best IMC setting it is 1.4 points less precise while
+returning 25% fewer correct correspondences. The sweep is published alongside the tables.
 
 Difficulty is what separates them. On **IMC 2021 phototourism** (90 pairs, real 3D scenes,
 ground-truth poses, Sampson error <= 1 px) precision across co-visibility bands from 0.5
