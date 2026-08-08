@@ -20,8 +20,6 @@
 //!   cargo run --release -p vrt-lightglue --example eval_rotation -- \
 //!       <image> <raco.engine> <lightglue.engine> [xfeat.engine] [step_deg] [inlier_px]
 
-use std::path::Path;
-
 use kornia_algebra::{Mat3F64, Vec3F64};
 use kornia_image::{Image, ImageSize};
 use kornia_imgproc::warp::warp_perspective_u8;
@@ -102,6 +100,46 @@ fn inscribe(src: &Image<u8, 3>) -> Result<Image<u8, 3>, vrt::BoxError> {
     Ok(canvas)
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The sweep generates its query image with the same matrix it then scores against,
+    /// so a convention error would partly cancel — the numbers would stay high while the
+    /// *label* on each row was wrong. These check the matrix against hand-computed
+    /// geometry instead, which the sweep itself cannot do.
+    #[test]
+    fn rotation_matrix_matches_hand_computed_geometry() {
+        let c = 100.0;
+        let apply = |deg: f64, x: f64, y: f64| {
+            let p = rotation_about_centre(deg, c) * Vec3F64::new(x, y, 1.0);
+            (p.x / p.z, p.y / p.z)
+        };
+        // The centre is the fixed point at every angle.
+        for deg in [0.0, 37.0, 90.0, 180.0] {
+            let (x, y) = apply(deg, c, c);
+            assert!((x - c).abs() < 1e-9 && (y - c).abs() < 1e-9, "deg {deg}");
+        }
+        // 90°: the point right of centre goes below it (y grows downward in image space).
+        let (x, y) = apply(90.0, c + 10.0, c);
+        assert!((x - c).abs() < 1e-9 && (y - (c + 10.0)).abs() < 1e-9);
+        // 180°: every point maps to its reflection through the centre.
+        let (x, y) = apply(180.0, c + 10.0, c - 4.0);
+        assert!((x - (c - 10.0)).abs() < 1e-9 && (y - (c + 4.0)).abs() < 1e-9);
+        // 0° is exactly the identity, so the 0° row measures only resampling.
+        let (x, y) = apply(0.0, 7.0, 11.0);
+        assert!((x - 7.0).abs() < 1e-12 && (y - 11.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn scale_matrix_matches_hand_computed_geometry() {
+        let c = 100.0;
+        let p = scale_about_centre(0.5, c) * Vec3F64::new(c + 40.0, c, 1.0);
+        assert!(((p.x / p.z) - (c + 20.0)).abs() < 1e-9);
+        assert!(((p.y / p.z) - c).abs() < 1e-9);
+    }
+}
+
 /// (matches, inliers) under the exact ground-truth rotation.
 fn score(
     pairs: &[(usize, usize)],
@@ -131,6 +169,9 @@ fn main() -> Result<(), vrt::BoxError> {
         std::process::exit(1);
     }
     let step: f64 = arg_or(&a, 5, "step_deg", 15.0)?;
+    if !(step.is_finite() && step > 0.0) {
+        return Err(format!("step_deg must be positive and finite, got {step}").into());
+    }
     let thresh: f32 = arg_or(&a, 6, "inlier_px", 3.0)?;
     assert_eq!(CANVAS % DIM_DIVISOR, 0, "canvas must sit on the model grid");
 
@@ -139,9 +180,11 @@ fn main() -> Result<(), vrt::BoxError> {
     let mut glue = LightGlue::from_engine_file(&a[3], stream.clone())?;
     let mnn = Matcher::with_dim(stream.clone(), vrt_raco_aliked::DESC_DIM)?;
     let k = raco.num_keypoints();
+    // No `.filter(exists)`: a mistyped path must fail, not silently print an XFeat
+    // column of 0.0% at every angle that reads exactly like a measured total failure —
+    // which is the column the rotation claim rests on.
     let mut xf = a
         .get(4)
-        .filter(|p| Path::new(p.as_str()).exists())
         .map(|p| XFeatBaseline::load(p, &stream, k))
         .transpose()?;
 
@@ -193,7 +236,7 @@ fn main() -> Result<(), vrt::BoxError> {
             &mut mnn_out,
         )?;
         if let Some(x) = &mut xf {
-            x.submit(&dev_ref, &dev_rot)?;
+            x.submit(&dev_ref, &dev_rot, None)?;
         }
         stream.synchronize()?;
 
@@ -255,7 +298,7 @@ fn main() -> Result<(), vrt::BoxError> {
             &mut mnn_out,
         )?;
         if let Some(x) = &mut xf {
-            x.submit(&dev_ref, &dev)?;
+            x.submit(&dev_ref, &dev, None)?;
         }
         stream.synchronize()?;
 

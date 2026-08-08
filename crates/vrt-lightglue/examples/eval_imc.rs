@@ -35,7 +35,7 @@
 //! transfers between the two harnesses; the interpolation kernel is the one extra,
 //! because only this one resizes at evaluation time.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
 use kornia_image::Image;
@@ -234,6 +234,7 @@ fn main() -> Result<(), vrt::BoxError> {
          images' frames, so no single scale converts it."
     );
 
+    let mut cache: HashMap<std::path::PathBuf, (Image<u8, 3>, (f64, f64))> = HashMap::new();
     let manifest = std::fs::read_to_string(root.join("imc_manifest.txt"))?;
     let mut bands: BTreeMap<String, (Tally, Tally, Tally)> = BTreeMap::new();
     let mut skipped = 0usize;
@@ -261,12 +262,29 @@ fn main() -> Result<(), vrt::BoxError> {
         };
 
         let img_dir = base.join("images");
-        let (im1, s1) = load_scaled(&img_dir.join(format!("{i1}.jpg")), interpolation)?;
-        let (im2, s2) = load_scaled(&img_dir.join(format!("{i2}.jpg")), interpolation)?;
+        // The 90 pairs are drawn from ~135 distinct images, so decoding and resampling per
+        // pair repeats roughly a quarter of the work. Cache by path.
+        for id in [i1, i2] {
+            let path = img_dir.join(format!("{id}.jpg"));
+            if !cache.contains_key(&path) {
+                cache.insert(path.clone(), load_scaled(&path, interpolation)?);
+            }
+        }
+        let (im1, s1) = cache[&img_dir.join(format!("{i1}.jpg"))].clone();
+        let (im2, s2) = cache[&img_dir.join(format!("{i2}.jpg"))].clone();
         let fmat = fundamental(&rmat, &tvec, &c1.scaled_k(s1), &c2.scaled_k(s2));
 
         let (dl, dr) = (im1.to_cuda(&stream)?, im2.to_cuda(&stream)?);
+        // Phototourism aspect ratios vary, so the two frames usually differ in size. Each
+        // `submit` sets the context's input shape and may reallocate the session's output
+        // buffers — host-side calls that are NOT stream-ordered, so issuing the second
+        // while the first enqueue is still in flight mutates a live context. Every other
+        // caller in the repo feeds same-sized frames; this is the one that does not.
+        let differing = im1.size() != im2.size();
         raco.submit(&dl, &mut l)?;
+        if differing {
+            stream.synchronize()?;
+        }
         raco.submit(&dr, &mut r)?;
         glue.submit(&l, &r, &mut lg_out)?;
         mnn.submit(
@@ -278,7 +296,7 @@ fn main() -> Result<(), vrt::BoxError> {
         // XFeat depends only on the uploaded images, so enqueue it here rather than after
         // the readback: one synchronise for every model instead of two.
         if let Some(x) = &mut xf {
-            x.submit(&dl, &dr)?;
+            x.submit(&dl, &dr, differing.then_some(&stream))?;
         }
         stream.synchronize()?;
 
@@ -287,10 +305,16 @@ fn main() -> Result<(), vrt::BoxError> {
         e.0.add(score(&lg_out.pairs(0.0)?, &lk, &rk, &fmat, thresh));
         e.1.add(score(&mnn_out.pairs(), &lk, &rk, &fmat, thresh));
 
-        if let Some(x) = &mut xf {
-            let (pairs, xlk, xrk) = x.finish(&stream, xf_cossim)?;
-            e.2.add(score(&pairs, &xlk, &xrk, &fmat, thresh));
-        }
+        // Always tally, even with no XFeat engine, so `Tally::pairs` means the same
+        // thing in every column and in both harnesses.
+        let xf_score = match &mut xf {
+            Some(x) => {
+                let (pairs, xlk, xrk) = x.finish(&stream, xf_cossim)?;
+                score(&pairs, &xlk, &xrk, &fmat, thresh)
+            }
+            None => (0, 0),
+        };
+        e.2.add(xf_score);
     }
 
     // 23 = the `{:>8} {:>6} {:>6.1}%` group each column prints below; the header must be

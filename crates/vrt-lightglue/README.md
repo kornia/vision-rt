@@ -149,17 +149,17 @@ the ground-truth homography.
 | bark/4 | **−120°** | 0, 0.0% | 69, **78.4%** | 0, 0.0% | 0, **0.0%** |
 | bark/5 | −23° | 294, **89.1%** | 151, 96.2% | 26, 2.7% | 3, 0.4% |
 | bark/6 | +153° | 0, 0.0% | 0, 0.0% | 0, 0.0% | 0, 0.0% |
-| boat/2 | −14° | 2011, **97.8%** | 684, 98.3% | 1895, 88.9% | 1057, 60.0% |
+| boat/2 | −14° | 2011, **97.8%** | 684, 98.3% | 1895, 88.9% | 1058, 60.1% |
 | boat/3 | −40° | 1693, **96.1%** | 586, 96.9% | 240, 28.2% | 370, 33.3% |
 | boat/4 | **−80°** | 1080, **87.6%** | 418, 91.5% | 0, 0.0% | 0, **0.0%** |
 | boat/5 | +8° | 795, **94.9%** | 311, 91.7% | 480, 51.2% | 84, 12.7% |
 | boat/6 | −41° | 219, 45.3% | 118, 59.6% | 3, 0.5% | 3, 0.7% |
 | graf/2 | −15° | 1539, **93.0%** | 599, 95.1% | 856, 65.7% | 825, 55.4% |
-| graf/3 | +20° | 1157, **80.3%** | 450, 82.1% | 572, 47.7% | 494, 41.9% |
+| graf/3 | +20° | 1157, **80.3%** | 450, 82.1% | 572, 47.7% | 493, 41.8% |
 | graf/4 | −27° | 951, **77.4%** | 386, 82.7% | 16, 2.3% | 198, 21.7% |
 | graf/5 | +5° | 733, **78.6%** | 288, 85.7% | 522, 56.5% | 208, 26.4% |
 | graf/6 | +38° | 548, **70.4%** | 240, 79.2% | 5, 0.9% | 19, 3.1% |
-| **total inliers** | | **12412** | 4868 | 4821 | 3835 |
+| **total inliers** | | **12412** | 4868 | 4821 | 3837 |
 | **macro precision** | | 71.0% | **80.5%** | 24.3% | 20.1% |
 
 ### IMC 2021 phototourism — 3D scenes, ground-truth poses
@@ -284,7 +284,7 @@ reach LightGlue's operating point at any gate tested.**
 # Oxford: fetch, prepare (records the per-axis scale it applied), evaluate
 ./crates/vrt-lightglue/scripts/get_oxford.sh /data/oxford
 cargo run --release -p vrt-lightglue --example prep_oxford -- \
-    /data/oxford /data/oxford_prepared 640 bilinear
+    /data/oxford /data/oxford_prepared 640 lanczos
 cargo run --release -p vrt-lightglue --example eval_oxford -- \
     /data/oxford_prepared raco-aliked-extractor-k3072-...fp16.engine \
     <lightglue-k3072-or-k1024>.engine 3.0 -1.0 xfeat-backbone-...engine -1.0

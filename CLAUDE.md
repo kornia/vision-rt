@@ -126,7 +126,8 @@ that instantiates N pipelines + supplies poses, not a rework.
 
 ```bash
 cargo build --release -j2                              # full build (capped jobs)
-cargo test -p vrt-hub                                  # CPU-only unit tests
+cargo test -p vrt-hub -p vrt-xfeat --lib               # CPU-only unit tests (no GPU)
+cargo test -p vrt-lightglue --examples                 # benchmark-harness geometry tests
 cargo test -p vrt-xfeat --release -- --ignored         # GPU kernel tests (on-device)
 TRT_STUB=1 cargo clippy --all-targets -- -D warnings   # off-Jetson check (no CUDA/TRT)
 ```

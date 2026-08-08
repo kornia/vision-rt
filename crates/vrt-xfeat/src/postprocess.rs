@@ -28,6 +28,12 @@ use std::sync::Arc;
 
 use vrt::cuda::{cfg_1d, cfg_2d, cfg_per_item};
 
+/// The descriptor kernels with the width substituted in, so `XFEAT_DESC_DIM` is the one
+/// place it is written rather than a constant that happens to agree with three literals.
+fn kernels_src() -> String {
+    KERNELS_SRC.replace("{XFEAT_D}", &XFEAT_DESC_DIM.to_string())
+}
+
 /// XFeat's descriptor width, owned by the post-processing that produces the descriptors.
 ///
 /// It lives here, not on `Matcher`, because it describes the *data*: the sampling and
@@ -88,6 +94,7 @@ pub enum XFeatError {
 // ── Kernel source ─────────────────────────────────────────────────────────────
 
 const KERNELS_SRC: &str = r#"
+#define XFEAT_D {XFEAT_D}
 /* xfeat_score_nms — fused NMS + score map.
    For each pixel (x,y): if heatmap[y,x] > threshold AND no neighbour in the
    5×5 window has a strictly greater value, write heatmap[y,x]*reliability[y,x]
@@ -165,7 +172,7 @@ extern "C" __global__ void xfeat_sample_descs(
               + (1.0f - wx) *           wy * __ldg(&desc_map[base + y1 * Wd + x0])
               +           wx *           wy * __ldg(&desc_map[base + y1 * Wd + x1]);
 
-    descs_out[k * 64 + c] = val;
+    descs_out[k * XFEAT_D + c] = val;
 }
 
 /* xfeat_l2_norm — in-place L2-normalise each 64-D descriptor row.
@@ -180,7 +187,7 @@ extern "C" __global__ void xfeat_l2_norm(
 
     __shared__ float shmem[2];
 
-    float v = descs[k * 64 + c];
+    float v = descs[k * XFEAT_D + c];
     float s = v * v;
     s += __shfl_down_sync(0xFFFFFFFF, s, 16);
     s += __shfl_down_sync(0xFFFFFFFF, s,  8);
@@ -192,7 +199,7 @@ extern "C" __global__ void xfeat_l2_norm(
     __syncthreads();
     float norm = sqrtf(shmem[0] + shmem[1]);
     if (norm < 1e-8f) norm = 1e-8f;
-    descs[k * 64 + c] = v / norm;
+    descs[k * XFEAT_D + c] = v / norm;
 }
 
 /* xfeat_compact_scores — stream-compact NMS survivors.
@@ -291,7 +298,7 @@ impl XFeatResult {
     pub fn alloc(stream: &Arc<CudaStream>, top_k: usize) -> Result<Self, XFeatError> {
         Ok(Self {
             kpts: stream.alloc_zeros::<f32>(top_k * 2)?,
-            descs: unsafe { stream.alloc::<f32>(top_k * 64)? },
+            descs: unsafe { stream.alloc::<f32>(top_k * XFEAT_DESC_DIM)? },
             scores: stream.alloc_zeros::<f32>(top_k)?,
             count_pin: vrt::PinnedBuffer::<i32>::alloc(1)?,
             stream: stream.clone(),
@@ -388,7 +395,7 @@ impl XFeatPostproc {
             "xfeat_topk_select",
         ];
         let [fn_score_nms, fn_sample_descs, fn_l2_norm, fn_histogram, fn_cutoff, fn_select]: [CudaKernel; 6] =
-            CudaKernel::compile_many(stream.context(), KERNELS_SRC, &names)?
+            CudaKernel::compile_many(stream.context(), &kernels_src(), &names)?
                 .try_into().unwrap_or_else(|_| unreachable!("compile_many returns names.len() kernels"));
 
         Ok(Self {
@@ -479,7 +486,7 @@ impl XFeatPostproc {
         let total = n_pixels as i32;
         let (k_i, h_i, w_i) = (k as i32, h as i32, w as i32);
         let (hd_i, wd_i) = (hd as i32, wd as i32);
-        let cfg64 = cfg_per_item(k, 64);
+        let cfg64 = cfg_per_item(k, XFEAT_DESC_DIM as u32);
 
         // 1. histogram → 2. cutoff → 3. select survivors into out.kpts/out.scores
         self.fn_histogram

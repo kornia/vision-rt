@@ -113,7 +113,7 @@ in `vrt-lightglue`. At a matched k3072 budget for every column:
 |---|---|---|---|---|
 | RaCo-ALIKED + LightGlue+ | **12412** | **71.0%** | **66946** | **88.5%** |
 | RaCo-ALIKED + mutual-NN | 4821 | 24.3% | 56509 | 56.1% |
-| XFeat + mutual-NN | 3835 | 20.1% | 37812 | 40.6% |
+| XFeat + mutual-NN | 3837 | 20.1% | 37812 | 40.6% |
 
 Rotation robustness is the reason to reach for this crate over `vrt-xfeat`. Swept in
 isolation (`examples/eval_rotation`, one image against rotated copies of itself, exact

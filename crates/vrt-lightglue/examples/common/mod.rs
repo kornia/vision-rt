@@ -74,9 +74,9 @@ pub fn mat3_from_row_major(v: &[f64]) -> Result<Mat3F64, vrt::BoxError> {
 /// widens the *separable* kernel by the downscale factor; kornia documents `Nearest` and
 /// `Bilinear` as "unaffected by this flag", and they route to fixed 1-tap / 2-tap
 /// samplers ([`resize_u8_path`] in kornia-imgproc `resize/mod.rs`). Downscaling by more
-/// than ~2x under `bilinear` therefore aliases the high-frequency texture keypoint
+/// than ~2x under `bilinear` or `nearest` therefore aliases the high-frequency texture keypoint
 /// detectors fire on. All four are accepted because the published tables were measured
-/// under `bilinear` and must stay reproducible — pick `lanczos` for a new measurement.
+/// under `lanczos`, which is a separable path and so does honour the flag.
 ///
 /// All four share the same half-pixel geometry, so [`resize_matrix`] is valid for every
 /// one of them: `Nearest`'s `floor((i + 0.5) * scale)` is exactly `round` of the
@@ -139,6 +139,15 @@ pub fn resize_to_fit(
     max_side: usize,
     interpolation: InterpolationMode,
 ) -> Result<Scaled, vrt::BoxError> {
+    // The output feeds RaCo *and* XFeat, and XFeat floors to its own hardcoded 32. If
+    // RaCo's divisor ever moves, images sized on RaCo's grid stop being multiples of
+    // XFeat's and every XFeat keypoint in the baseline column shifts — silently, because
+    // XFeat just rescales by a ratio that is no longer 1.
+    const XFEAT_GRID: usize = 32;
+    assert!(
+        DIM_DIVISOR.is_multiple_of(XFEAT_GRID),
+        "DIM_DIVISOR {DIM_DIVISOR} must stay a multiple of XFeat's {XFEAT_GRID}px grid"
+    );
     let (w, h) = (src.cols(), src.rows());
     let scale = (max_side as f64 / w.max(h) as f64).min(1.0);
     let (rw, rh) = (
@@ -166,7 +175,7 @@ pub fn resize_to_fit(
     // bytes/pixel, on a 7.4 GB box.
     //
     // `true` requests antialiasing but only the separable kernels honour it — see
-    // [`parse_interpolation`]. Under the `bilinear` default this is a fixed 2-tap
+    // [`parse_interpolation`]. Under `bilinear` this is a fixed 2-tap
     // sampler and a >2x reduction DOES alias; that is the state the published tables
     // were measured in, so it is recorded rather than silently changed.
     resize_fast_u8_aa::<3>(src, &mut resized, interpolation, true)?;
@@ -305,12 +314,20 @@ impl XFeatBaseline {
 
     /// Enqueue extraction for both images. Separate from [`Self::finish`] so the caller can
     /// submit this alongside the other models and pay for one stream synchronise, not two.
+    /// `sync_between` must be `Some` when the two frames differ in size: each `submit`
+    /// sets the execution context's input shape and can reallocate session-owned output
+    /// buffers, and those are host-side calls rather than stream-ordered ones, so the
+    /// second would mutate a context whose first enqueue is still in flight.
     pub fn submit(
         &mut self,
         left: &Image<u8, 3>,
         right: &Image<u8, 3>,
+        sync_between: Option<&Arc<CudaStream>>,
     ) -> Result<(), vrt::BoxError> {
         self.xfeat.submit(left, &mut self.left)?;
+        if let Some(stream) = sync_between {
+            stream.synchronize()?;
+        }
         self.xfeat.submit(right, &mut self.right)?;
         Ok(())
     }

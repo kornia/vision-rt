@@ -168,7 +168,12 @@ fn main() -> Result<(), vrt::BoxError> {
         // XFeat depends only on the uploaded images, so enqueue it before the readback:
         // one synchronise for every model instead of two.
         if let Some(x) = &mut xf {
-            x.submit(&left, &right)?;
+            // Oxford sequences are uniform within a sequence, so no sync is needed here.
+            x.submit(
+                &left,
+                &right,
+                (left.size() != right.size()).then_some(&stream),
+            )?;
         }
         mnn.submit(
             Descriptors::new(l.descs_slice(), l.count(), l.desc_dim()),

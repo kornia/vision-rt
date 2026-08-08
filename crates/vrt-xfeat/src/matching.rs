@@ -65,7 +65,13 @@ extern "C" __global__ void xfeat_match_argmax(
 
     __shared__ float tile[MATCH_TILE][DESC_D];
 
-    int   best_j = 0;
+    /* -1 is not a valid reference index, so a query that never takes the branch below
+       reports "no match" rather than reference 0. NaN compares false against everything,
+       so a poisoned descriptor row (an fp16 overflow, or a zero vector divided by a zero
+       norm) would otherwise silently collapse the whole reverse direction onto index 0 —
+       and the reverse direction is launched with sim_out = NULL, so no similarity gate
+       downstream can catch it. */
+    int   best_j = -1;
     float best_s = -1e30f;
 
     for (int j0 = 0; j0 < Nr; j0 += MATCH_TILE) {
@@ -150,8 +156,10 @@ impl MatchResult {
         );
         (0..self.n0)
             .filter(|&i| {
-                let j = m12[i] as usize;
-                m21[j] as usize == i && s12[i] >= self.min_cossim
+                // -1 means the kernel found no candidate at all (see the sentinel note in
+                // the kernel source); it must not be read as reference index 0.
+                let j = m12[i];
+                j >= 0 && m21[j as usize] == i as i32 && s12[i] >= self.min_cossim
             })
             .map(|i| (i, m12[i] as usize))
             .collect()

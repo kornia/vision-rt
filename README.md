@@ -110,7 +110,7 @@ from 0° to 180°** and **99.3–100% from 1× to 5× zoom**; XFeat is at 26.6% 
 120°.
 
 At a matched keypoint budget LightGlue+ dominates on both axes: **12412** Oxford inliers
-against 4821 for mutual-NN on the same descriptors and 3835 for XFeat, at roughly three
+against 4821 for mutual-NN on the same descriptors and 3837 for XFeat, at roughly three
 times the precision. That holds against a *tuned* mutual-NN, not just an ungated one —
 sweeping the similarity gate moves the baseline along a precision/recall curve that never
 reaches LightGlue's operating point. The sweep is published alongside the tables.
