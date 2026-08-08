@@ -192,6 +192,48 @@ Totals, both configurations (inliers, pooled precision, macro precision):
 | RaCo-ALIKED mutual-NN | 56509 | 61.1% | 56.1% |
 | XFeat mutual-NN | 37812 | 47.0% | 40.6% |
 
+### Rotation and scale, isolated
+
+`bark` is the usual evidence for rotation robustness and it cannot settle the question:
+every large-rotation pair in it also carries a large zoom (`bark/3` 150° + 1.85×, `bark/4`
+120° + 2.48×, `bark/6` 153° + 4.09×). `examples/eval_rotation` removes the confound by
+matching one image against rotated and scaled copies of itself, inscribed by its diagonal
+in a square canvas so no content is lost at any angle and the ground-truth homography is
+exact by construction. 0° / 1.0× measures the resampling floor.
+
+**Pure in-plane rotation** (precision, 3 px):
+
+| deg | 0 | 15 | 30 | 45 | 60 | 90 | 120 | 150 | 180 |
+|---|---|---|---|---|---|---|---|---|---|
+| RaCo-ALIKED + LightGlue+ | 100% | **99.9%** | **99.6%** | **99.6%** | **99.6%** | **99.0%** | **98.5%** | **98.8%** | **99.4%** |
+| RaCo-ALIKED + mutual-NN | 100% | 84.6% | 45.6% | 2.5% | 0.0% | 0.0% | 0.0% | 0.0% | 0.0% |
+| XFeat + mutual-NN | 100% | 79.1% | 58.7% | 26.6% | 1.5% | 0.3% | 0.0% | 0.0% | 0.0% |
+
+**Pure scale** (precision, 3 px):
+
+| zoom | 1.0× | 1.5× | 2.0× | 2.5× | 3.0× | 4.0× | 5.0× |
+|---|---|---|---|---|---|---|---|
+| RaCo-ALIKED + LightGlue+ | 100% | **100%** | **100%** | **100%** | **99.3%** | **100%** | **99.5%** |
+| RaCo-ALIKED + mutual-NN | 100% | 93.2% | 89.1% | 84.4% | 70.7% | 52.4% | 23.1% |
+| XFeat + mutual-NN | 100% | 78.3% | 55.5% | 32.9% | 18.4% | 7.4% | 9.7% |
+
+Three things follow.
+
+- **Rotation is fully handled, all the way to 180°.** No degradation is visible above the
+  resampling floor across the entire sweep.
+- **Scale is fully handled to 5×** as well, the widest this canvas supports.
+- **The invariance is the matcher's, not the descriptors'.** Columns 1 and 2 share
+  identical RaCo keypoints and identical ALIKED descriptors. Under raw mutual-NN those
+  descriptors die at 45° — no better than XFeat's. LightGlue recovers the correspondences
+  from the same descriptors, so what is rotation-invariant here is the learned matching
+  over RaCo's repeatable keypoints, not the descriptor vectors.
+
+Which explains the Oxford failures: `bark/6` combines 153°, 4.09× zoom **and** 6.3% image
+overlap, and it is the combination that defeats it — neither nuisance alone does, at any
+magnitude tested. `bark/4` (120°, 2.48×, 16.2% overlap) is a different story again: k1024
+holds it at 78.4% while k3072 scores 0%, so that one is a matcher-budget artifact rather
+than a robustness limit.
+
 ### Is the mutual-NN baseline handicapped?
 
 An ungated mutual-NN baseline is low-precision by construction, so "the matcher beats it"
@@ -228,10 +270,10 @@ reach LightGlue's operating point at any gate tested.**
   Restricting to the most confident 1024 keypoints evidently helps where the detector is
   least reliable. Worth knowing before picking an engine; not something either number
   alone shows.
-- **XFeat stops at rotation.** It scores **0.0%** on every pair past ~79° — `bark/3`
-  (+150°), `bark/4` (−120°), `boat/4` (−80°) — and is nonzero on every pair below it.
-  Extreme *scale* defeats everything: `bark/6` is 153° and a 4.2× zoom, and all four
-  configurations return nothing.
+- **XFeat stops at rotation, and so do the ALIKED descriptors on their own.** On Oxford
+  XFeat scores **0.0%** on every pair past ~79°. The controlled sweep above shows why, and
+  shows it is not a descriptor property RaCo fixes: under raw mutual-NN, ALIKED dies at 45°
+  too. LightGlue is what carries the rotation invariance.
 - **Pooled and macro precision disagree, so both are reported.** Pooling weights by match
   volume, and the columns differ severalfold in volume; on Oxford the two differ by ~10 points
   between the matcher configurations.

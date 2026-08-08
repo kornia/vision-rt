@@ -115,9 +115,12 @@ in `vrt-lightglue`. At a matched k3072 budget for every column:
 | RaCo-ALIKED + mutual-NN | 4821 | 24.3% | 56509 | 56.1% |
 | XFeat + mutual-NN | 3835 | 20.1% | 37812 | 40.6% |
 
-RaCo's rotation robustness is the reason to reach for this crate over `vrt-xfeat`: XFeat
-scores **0.0%** on every Oxford pair past ~79° of in-plane rotation — `bark/3` (+150°),
-`bark/4` (−120°), `boat/4` (−80°).
+Rotation robustness is the reason to reach for this crate over `vrt-xfeat`. Swept in
+isolation (`examples/eval_rotation`, one image against rotated copies of itself, exact
+ground truth), RaCo-ALIKED + LightGlue+ holds **98.5–100% precision from 0° to 180°** and
+**99.3–100% from 1× to 5× zoom**, while XFeat + mutual-NN falls to 26.6% by 45° and 0% by
+120°. Note the invariance is the *matcher's*: the same ALIKED descriptors under raw
+mutual-NN also collapse at 45°.
 
 Full tables, both matcher configurations, the mutual-NN gate sweep and the commands that
 produce all of it live in

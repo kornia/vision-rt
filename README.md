@@ -104,7 +104,10 @@ accurate. What it does not survive is rotation. On the Oxford/VGG affine benchma
 (ground-truth homographies, 3 px at original resolution, every column at k3072), the
 in-plane rotations recovered from the homographies are **+150°**, **-120°** and **-80°**
 for `bark/3`, `bark/4` and `boat/4`; XFeat + mutual-NN scores **0.0%** on all three — and
-on every pair past ~79°, while staying nonzero below it.
+on every pair past ~79°, while staying nonzero below it. Swept in isolation on synthetic
+rotations with exact ground truth, RaCo-ALIKED + LightGlue+ holds **98.5–100% precision
+from 0° to 180°** and **99.3–100% from 1× to 5× zoom**; XFeat is at 26.6% by 45° and 0% by
+120°.
 
 At a matched keypoint budget LightGlue+ dominates on both axes: **12412** Oxford inliers
 against 4821 for mutual-NN on the same descriptors and 3835 for XFeat, at roughly three
