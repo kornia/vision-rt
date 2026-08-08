@@ -48,8 +48,8 @@ fn main() -> Result<(), vrt::BoxError> {
         raco.submit(&left, l)?;
         raco.submit(&right, r)?;
         matcher.submit(
-            Descriptors::new(l.descs_slice(), k, l.desc_dim()),
-            Descriptors::new(r.descs_slice(), k, r.desc_dim()),
+            Descriptors::new(l.descs_slice(), l.count(), l.desc_dim()),
+            Descriptors::new(r.descs_slice(), r.count(), r.desc_dim()),
             min_cossim,
             m,
         )?;

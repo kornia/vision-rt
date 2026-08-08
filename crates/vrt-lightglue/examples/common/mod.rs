@@ -16,7 +16,7 @@ use cudarc::driver::CudaStream;
 use kornia_algebra::{Mat3F64, Vec3F64};
 use kornia_image::{Image, ImageSize};
 use kornia_imgproc::interpolation::InterpolationMode;
-use kornia_imgproc::resize::resize;
+use kornia_imgproc::resize::resize_fast_u8_aa;
 use vrt_raco_aliked::DIM_DIVISOR;
 use vrt_xfeat::{Descriptors, MatchResult, Matcher, XFeat, XFeatParams, XFeatResult};
 
@@ -132,29 +132,25 @@ pub fn resize_to_fit(
         );
     }
 
-    let src_f32 = Image::<f32, 3>::new(
-        src.size(),
-        src.as_slice().iter().map(|&v| v as f32).collect(),
-    )?;
-    let mut dst_f32 = Image::<f32, 3>::from_size_val(
+    let mut resized = Image::<u8, 3>::from_size_val(
         ImageSize {
             width: rw,
             height: rh,
         },
-        0.0,
+        0,
     )?;
-    resize(&src_f32, &mut dst_f32, interpolation)?;
+    // Antialiased, and on u8 directly. The plain `resize` is a fixed 2/4-tap sampler that
+    // does not widen its kernel for downscale, so a >2x reduction — which is every IMC
+    // image — aliases exactly the high-frequency texture keypoint detectors fire on. It
+    // also needed two full-resolution f32 buffers, 12 bytes/pixel, on a 7.4 GB box.
+    resize_fast_u8_aa::<3>(src, &mut resized, interpolation, true)?;
 
     // Crop top-left anchored, so pixel coordinates are unchanged by the crop.
-    let f = dst_f32.as_slice();
+    let f = resized.as_slice();
     let mut cropped = Vec::with_capacity(cw * ch * 3);
     for y in 0..ch {
         let row = y * rw * 3;
-        cropped.extend(
-            f[row..row + cw * 3]
-                .iter()
-                .map(|&v| v.round().clamp(0.0, 255.0) as u8),
-        );
+        cropped.extend_from_slice(&f[row..row + cw * 3]);
     }
     Ok(Scaled {
         image: Image::<u8, 3>::new(
@@ -279,20 +275,55 @@ mod tests {
     }
 
     /// The half-pixel term is exactly what a bare `diag(s, s, 1)` gets wrong.
-    /// The applied scale differs from the requested one because the destination is an
-    /// integer number of pixels. bark is the case that bites: 512 * (640/765) = 428.34.
+    /// `resize_to_fit` must report the scale it *applied*, not the one it asked for.
+    ///
+    /// This calls `resize_to_fit`. An earlier version re-derived the formula inline and
+    /// asserted on its own copy, so reverting the function to a single uniform scale left
+    /// it green — it could not fail for the bug it was written to catch.
     #[test]
-    fn applied_scale_is_not_the_requested_scale() {
-        let (w, h, max_side) = (765.0f64, 512.0f64, 640.0f64);
-        let requested = max_side / w;
-        let (sx, sy) = ((w * requested).round() / w, (h * requested).round() / h);
-        assert!((sx - requested).abs() < 1e-12, "x happens to be exact here");
+    fn resize_to_fit_reports_the_applied_scale_per_axis() {
+        // Oxford bark: 765x512 -> 640x428, cropped to 640x416.
+        let src = Image::<u8, 3>::from_size_val(
+            ImageSize {
+                width: 765,
+                height: 512,
+            },
+            0,
+        )
+        .unwrap();
+        let out = resize_to_fit(&src, 640, InterpolationMode::Bilinear).unwrap();
+
+        assert_eq!(out.image.cols(), 640);
+        assert_eq!(out.image.rows(), 416, "cropped to the 32px grid");
+
+        let requested = 640.0 / 765.0;
+        assert!((out.scale_x - requested).abs() < 1e-12, "x is exact here");
         assert!(
-            (sy - requested).abs() > 1e-6,
-            "y must differ from the requested scale, else this test proves nothing"
+            (out.scale_y - requested).abs() > 1e-6,
+            "y must differ from the requested scale — that is the whole bug"
+        );
+        assert!(
+            (out.scale_y - 428.0 / 512.0).abs() < 1e-12,
+            "y is the applied scale"
         );
         // ~0.28 px at the bottom of the cropped image, against a ~2.5 px threshold.
-        assert!(((sy - requested) * 416.0).abs() > 0.2);
+        assert!(((out.scale_y - requested) * 416.0).abs() > 0.2);
+    }
+
+    /// A square image scales exactly on both axes — the case that must NOT report a
+    /// spurious difference, so the test above is measuring something real.
+    #[test]
+    fn resize_to_fit_is_exact_when_the_scale_divides() {
+        let src = Image::<u8, 3>::from_size_val(
+            ImageSize {
+                width: 1280,
+                height: 640,
+            },
+            0,
+        )
+        .unwrap();
+        let out = resize_to_fit(&src, 640, InterpolationMode::Bilinear).unwrap();
+        assert_eq!((out.scale_x, out.scale_y), (0.5, 0.5));
     }
 
     #[test]

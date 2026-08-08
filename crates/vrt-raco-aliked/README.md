@@ -106,21 +106,21 @@ percentages.
 
 ## Accuracy on real data
 
-Measured on the **Oxford/VGG affine** and **IMC 2021 phototourism** benchmarks, both
-shipping as examples in `vrt-lightglue`. Headline, at k3072 for every method:
+Measured on **Oxford/VGG affine** and **IMC 2021 phototourism**, both shipping as examples
+in `vrt-lightglue`. At a matched k3072 budget for every column:
 
-| | Oxford inliers | Oxford macro precision | IMC macro precision |
-|---|---|---|---|
-| RaCo-ALIKED + LightGlue+ | **4922** | **80.9%** | **89.3%** |
-| RaCo-ALIKED + mutual-NN | 4694 | 23.7% | 57.7% |
-| XFeat + mutual-NN | 3886 | 20.3% | 41.8% |
+| | Oxford inliers | Oxford macro | IMC inliers | IMC macro |
+|---|---|---|---|---|
+| RaCo-ALIKED + LightGlue+ | **12025** | **70.2%** | **65283** | **87.9%** |
+| RaCo-ALIKED + mutual-NN | 4695 | 23.7% | 55102 | 55.4% |
+| XFeat + mutual-NN | 3885 | 20.3% | 37062 | 40.2% |
 
 RaCo's rotation robustness is the reason to reach for this crate over `vrt-xfeat`: XFeat
 scores **0.0%** on every Oxford pair past ~79° of in-plane rotation — `bark/3` (+150°),
-`bark/4` (−120°), `boat/4` (−80°) — where this pipeline holds **79.8 / 88.3 / 90.0%**.
+`bark/4` (−120°), `boat/4` (−80°).
 
-The full tables, the per-pair rotation angles, the mutual-NN gate sweep and the commands
-that produce all of it live in
+Full tables, both matcher configurations, the mutual-NN gate sweep and the commands that
+produce all of it live in
 **[`crates/vrt-lightglue/README.md`](../vrt-lightglue/README.md#accuracy-on-real-data)**.
 They are kept in one place deliberately: these numbers get re-measured, and two copies
 drift.

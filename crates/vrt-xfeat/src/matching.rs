@@ -184,6 +184,20 @@ pub struct Descriptors<'a> {
     dim: usize,
 }
 
+/// Shared-tile height for a descriptor width, and the validation of that width.
+///
+/// Pure, so the supported-width rule can be tested without compiling a kernel — the
+/// previous version asserted `SHARED_FLOATS / dim` in a test that never called
+/// `with_dim`, so it would have passed against a hardcoded lookup table.
+fn tile_for_dim(dim: usize) -> Result<usize, XFeatError> {
+    // A multiple of the warp width keeps the tile load coalesced; the upper bound is the
+    // register file, not the shared budget.
+    if dim == 0 || !dim.is_multiple_of(32) || dim > Matcher::MAX_DIM {
+        return Err(XFeatError::UnsupportedDim(dim));
+    }
+    Ok(Matcher::SHARED_FLOATS / dim)
+}
+
 /// The `submit` preconditions, as arithmetic over lengths.
 ///
 /// Split out from [`Matcher::submit`] because it needs no GPU: keeping it inline would
@@ -227,7 +241,16 @@ impl<'a> Descriptors<'a> {
 
 impl Matcher {
     /// XFeat's descriptor width, and the default for [`new`](Self::new).
-    pub const XFEAT_DIM: usize = 64;
+    ///
+    /// Re-exported from the post-processing that actually emits the descriptors, so this
+    /// cannot drift from the data it describes.
+    pub const XFEAT_DIM: usize = crate::postprocess::XFEAT_DESC_DIM;
+
+    /// Largest width the kernel can hold. The query lives in registers as
+    /// `float q[DESC_D]`, and CUDA caps a thread at 255 registers, so 256-D would spill
+    /// the whole query to local memory. Raising this needs the reduction tiled over the
+    /// width first.
+    pub const MAX_DIM: usize = 128;
 
     /// Floats held in the shared reference tile — 16 KB of `f32`, the budget the tile
     /// height is derived from.
@@ -239,8 +262,12 @@ impl Matcher {
         Self::with_dim(stream, Self::XFEAT_DIM)
     }
 
-    /// Compile for an arbitrary descriptor width — 128 for ALIKED
-    /// (`vrt-raco-aliked`), 64 for XFeat.
+    /// Compile for a descriptor width — 128 for ALIKED (`vrt-raco-aliked`), 64 for XFeat.
+    ///
+    /// Any non-zero multiple of 32 up to [`MAX_DIM`](Self::MAX_DIM) works; the tile height
+    /// is derived from the shared budget rather than tabulated. The ceiling is the
+    /// register file: the query array is `float q[DESC_D]`, so 256-D would exceed CUDA's
+    /// 255 registers per thread and spill.
     ///
     /// The width is a compile-time constant in the kernel, not a runtime argument, so
     /// the per-thread query array and the shared tile stay statically sized and the
@@ -251,13 +278,7 @@ impl Matcher {
     /// the register array; on this part occupancy has repeatedly beaten
     /// instruction-level parallelism, so measure before assuming 128-D costs only 2x.
     pub fn with_dim(stream: Arc<CudaStream>, dim: usize) -> Result<Self, XFeatError> {
-        // Shared tile is MATCH_TILE * dim floats, held at ~16 KB. Deriving the tile
-        // rather than tabulating it means 64 and 128 are not special: 256-D (SuperPoint)
-        // or any other multiple of the warp width works without a source edit.
-        let tile = Self::SHARED_FLOATS / dim.max(1);
-        if dim == 0 || !dim.is_multiple_of(32) || tile == 0 {
-            return Err(XFeatError::UnsupportedDim(dim));
-        }
+        let tile = tile_for_dim(dim)?;
         let src = MATCH_SRC
             .replace("{TILE}", &tile.to_string())
             .replace("{DESC_D}", &dim.to_string());
@@ -296,9 +317,12 @@ impl Matcher {
     ) -> Result<(), XFeatError> {
         let (n0, n1) = (descs0.count, descs1.count);
 
-        // Validate before touching `out`. A half-updated result whose `n0` claims N
-        // matches while the kernels never ran leaves `pairs()` reading zero-filled
-        // pinned memory, which reports a fabricated match at index 0.
+        // Invalidate first, validate second. `MatchResult` is documented as reusable, so
+        // returning an error with `n0` still set from the last successful submit would
+        // have `pairs()` hand the caller the *previous* pair's matches; leaving `n0` set
+        // to this pair's count would have it read buffers the kernels never wrote. Only
+        // zero is safe in both directions.
+        out.n0 = 0;
         for (which, d) in [("descs0", &descs0), ("descs1", &descs1)] {
             check_descriptors(which, d.buf.len(), d.count, d.dim, self.dim, out.cap)?;
         }
@@ -401,12 +425,29 @@ mod guard_tests {
         assert!(check_descriptors("descs0", 4096 * D, 2000, D, D, 4096).is_ok());
     }
 
-    /// The tile is derived, so widths beyond the two originally tabulated work.
+    /// The tile derivation and the width rule, through the function `with_dim` calls.
+    ///
+    /// An earlier version asserted `SHARED_FLOATS / dim` directly, which would have passed
+    /// against a hardcoded lookup table — i.e. it could not fail for the thing it named.
     #[test]
-    fn shared_tile_is_derived_from_the_width() {
-        for (dim, want) in [(64usize, 64usize), (128, 32), (256, 16)] {
-            assert_eq!(Matcher::SHARED_FLOATS / dim, want, "dim {dim}");
-        }
+    fn tile_is_derived_and_the_width_rule_is_enforced() {
+        assert_eq!(tile_for_dim(64).unwrap(), 64);
+        assert_eq!(tile_for_dim(128).unwrap(), 32);
+        assert_eq!(
+            tile_for_dim(96).unwrap(),
+            42,
+            "not a power of two, still fine"
+        );
+
+        assert!(tile_for_dim(0).is_err());
+        assert!(
+            tile_for_dim(48).is_err(),
+            "not a multiple of the warp width"
+        );
+        // 256 floats of query would exceed CUDA's 255 registers per thread. The docs
+        // previously advertised it as working on the strength of a division.
+        assert!(tile_for_dim(256).is_err(), "above MAX_DIM");
+        assert_eq!(Matcher::MAX_DIM, 128);
     }
 }
 
@@ -484,7 +525,7 @@ mod tests {
             state = state
                 .wrapping_mul(6364136223846793005)
                 .wrapping_add(1442695040888963407);
-            ((state >> 33) as f32 / (1u64 << 31) as f32) - 1.0
+            ((state >> 32) as f32 / (1u64 << 31) as f32) - 1.0
         };
         let mut v: Vec<f32> = (0..n * d).map(|_| next()).collect();
         for row in v.chunks_exact_mut(d) {

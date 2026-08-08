@@ -29,7 +29,11 @@
 //! Prepare metadata once with `scripts/prep_imc.py`, then:
 //!   cargo run --release -p vrt-lightglue --example eval_imc -- \
 //!       <phototourism_dir> <raco.engine> <lightglue.engine> \
-//!       [inlier_px] [min_cossim] [xfeat.engine] [nearest|bilinear|bicubic|lanczos]
+//!       [inlier_px] [nn_cossim] [xfeat.engine] [xfeat_cossim] [nearest|bilinear|bicubic|lanczos]
+//!
+//! Arguments 1-7 mean the same thing here as in `eval_oxford`, so a command line
+//! transfers between the two harnesses; the interpolation kernel is the one extra,
+//! because only this one resizes at evaluation time.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -200,8 +204,8 @@ fn main() -> Result<(), vrt::BoxError> {
     if a.len() < 4 {
         eprintln!(
             "Usage: eval_imc <phototourism_dir> <raco.engine> <lightglue.engine> \
-             [inlier_px] [nn_cossim] [xfeat.engine] [nearest|bilinear|bicubic|lanczos] \
-             [xfeat_cossim]"
+             [inlier_px] [nn_cossim] [xfeat.engine] [xfeat_cossim] \
+             [nearest|bilinear|bicubic|lanczos]"
         );
         std::process::exit(1);
     }
@@ -209,8 +213,9 @@ fn main() -> Result<(), vrt::BoxError> {
     // Default matches the headline table in the READMEs; 3 px is the sensitivity check.
     let thresh: f64 = arg_or(&a, 4, "inlier_px", 1.0)?;
     let nn_cossim: f32 = arg_or(&a, 5, "nn_cossim", DEFAULT_NN_COSSIM)?;
-    let interpolation = parse_interpolation(a.get(7).map(String::as_str).unwrap_or("bilinear"))?;
-    let xf_cossim: f32 = arg_or(&a, 8, "xfeat_cossim", DEFAULT_XF_COSSIM)?;
+    // Indices 1-7 match eval_oxford exactly, so one command line works against both.
+    let xf_cossim: f32 = arg_or(&a, 7, "xfeat_cossim", DEFAULT_XF_COSSIM)?;
+    let interpolation = parse_interpolation(a.get(8).map(String::as_str).unwrap_or("bilinear"))?;
 
     let stream = vrt::Stream::new_standalone()?.cuda_stream().clone();
     let mut raco = RaCoAliked::from_engine_file(&a[2], stream.clone())?;
@@ -248,7 +253,14 @@ fn main() -> Result<(), vrt::BoxError> {
 
     for line in manifest.lines().filter(|l| !l.trim().is_empty()) {
         let f: Vec<&str> = line.split_whitespace().collect();
-        let (scene, band, i1, i2) = (f[0], f[1].to_string(), f[2], f[3]);
+        let [scene, band, i1, i2] = f[..] else {
+            return Err(format!(
+                "imc_manifest.txt: expected 4 fields, got {}: {line:?}",
+                f.len()
+            )
+            .into());
+        };
+        let band = band.to_string();
         let base = root.join(scene).join("set_100");
 
         let img_dir = base.join("images");
@@ -268,8 +280,8 @@ fn main() -> Result<(), vrt::BoxError> {
         raco.submit(&dr, &mut r)?;
         glue.submit(&l, &r, &mut lg_out)?;
         mnn.submit(
-            Descriptors::new(l.descs_slice(), k, l.desc_dim()),
-            Descriptors::new(r.descs_slice(), k, r.desc_dim()),
+            Descriptors::new(l.descs_slice(), l.count(), l.desc_dim()),
+            Descriptors::new(r.descs_slice(), r.count(), r.desc_dim()),
             nn_cossim,
             &mut mnn_out,
         )?;

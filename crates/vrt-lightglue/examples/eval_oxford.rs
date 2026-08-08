@@ -135,14 +135,19 @@ fn main() -> Result<(), vrt::BoxError> {
     let mut n_pairs = 0usize;
     for line in manifest.lines().filter(|l| !l.trim().is_empty()) {
         let f: Vec<&str> = line.split_whitespace().collect();
-        let (seq, left_n, right_n, hf) = (f[0], f[1], f[2], f[3]);
+        let [seq, left_n, right_n, hf, sx_s, sy_s] = f[..] else {
+            return Err(format!(
+                "manifest.txt: expected 6 fields (seq left right H sx sy), got {}: {line:?} \
+                 — regenerate with prep_oxford",
+                f.len()
+            )
+            .into());
+        };
         // prep_oxford records the per-axis scale it applied to the right image. Scoring in
         // the resized frame with a fixed pixel threshold would make the criterion 11%
         // looser on boat than on bark, so the error is converted back to original pixels
         // instead — per axis, because the two scales differ by a rounding step.
-        let missing = "manifest is missing its two scale columns — regenerate with prep_oxford";
-        let sx: f32 = f.get(4).ok_or(missing)?.parse()?;
-        let sy: f32 = f.get(5).ok_or(missing)?.parse()?;
+        let (sx, sy): (f32, f32) = (sx_s.parse()?, sy_s.parse()?);
         let dir = root.join(seq);
 
         let hv = read_floats(&dir.join(hf))?;
@@ -160,8 +165,8 @@ fn main() -> Result<(), vrt::BoxError> {
             x.submit(&left, &right)?;
         }
         mnn.submit(
-            Descriptors::new(l.descs_slice(), k, l.desc_dim()),
-            Descriptors::new(r.descs_slice(), k, r.desc_dim()),
+            Descriptors::new(l.descs_slice(), l.count(), l.desc_dim()),
+            Descriptors::new(r.descs_slice(), r.count(), r.desc_dim()),
             nn_cossim,
             &mut mnn_out,
         )?;

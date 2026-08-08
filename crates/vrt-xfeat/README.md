@@ -27,9 +27,11 @@ stream.synchronize()?;                     // the caller owns the one sync
 let kpts = res.kpts_to_host()?;     // original-image pixels
 ```
 
-Match two results with `Matcher::new(stream)` → `submit(&a.descs, a.count(),
-&b.descs, b.count(), cossim, &mut MatchResult)` → `stream.synchronize()` →
-`MatchResult::pairs()`. All CUDA kernels are NVRTC-JIT-compiled at runtime.
+Match two results with `Matcher::new(stream)` →
+`submit(Descriptors::new(&a.descs, a.count(), a.desc_dim()), ..., cossim, &mut MatchResult)`
+→ `stream.synchronize()` → `MatchResult::pairs()`. The descriptor width travels with the
+buffer; see the breaking-change note below. All CUDA kernels are NVRTC-JIT-compiled at
+runtime.
 
 ## Breaking change: `submit_match` is now `submit`
 

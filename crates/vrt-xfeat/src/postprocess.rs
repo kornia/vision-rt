@@ -28,6 +28,14 @@ use std::sync::Arc;
 
 use vrt::cuda::{cfg_1d, cfg_2d, cfg_per_item};
 
+/// XFeat's descriptor width, owned by the post-processing that produces the descriptors.
+///
+/// It lives here, not on `Matcher`, because it describes the *data*: the sampling and
+/// L2-norm kernels below emit exactly this many floats per keypoint. Sourcing it from the
+/// matcher would make `check_descriptors` compare the matcher's constant against itself,
+/// which is the tautology the width check exists to avoid.
+pub const XFEAT_DESC_DIM: usize = 64;
+
 /// Errors from XFeat post-processing and matching.
 #[derive(Debug, thiserror::Error)]
 pub enum XFeatError {
@@ -43,7 +51,9 @@ pub enum XFeatError {
     Preproc(#[from] kornia_imgproc::preprocess::PreprocessError),
     #[error("input image {0}x{1} too small — each side must be ≥ 32px")]
     InputTooSmall(usize, usize),
-    #[error("descriptor width {0} is not supported — the match kernel is compiled for 64 or 128")]
+    #[error(
+        "descriptor width {0} is not supported — it must be a non-zero multiple of 32 and          at most 128 (the query array is held in registers, and 256 floats exceeds CUDA's          255-register limit per thread)"
+    )]
     UnsupportedDim(usize),
     #[error(
         "{which} holds {got} floats but {expected} are needed for {dim}-D descriptors; \
@@ -299,7 +309,7 @@ impl XFeatResult {
     /// carries the *data's* width. Passing a matcher's own `dim()` instead compares a
     /// value against itself and passes unconditionally.
     pub fn desc_dim(&self) -> usize {
-        crate::matching::Matcher::XFEAT_DIM
+        XFEAT_DESC_DIM
     }
 
     /// Valid keypoint count — reads the pinned scalar, so call **after** the

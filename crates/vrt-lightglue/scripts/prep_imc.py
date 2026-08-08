@@ -45,7 +45,16 @@ def load_calib(path: pathlib.Path) -> np.ndarray:
         )
 
 
+def decode_key(key: object) -> str:
+    """Pair keys may arrive as a bytes dtype; `str(np.bytes_(b'a-b'))` is "b'a-b'"."""
+    return key.decode() if isinstance(key, bytes) else str(key)
+
+
 def main() -> None:
+    # One generator for the whole run. Rebuilding it per band would reseed to the same
+    # state each time, so two bands with equal-length pools select identical positional
+    # indices -- correlated strata, which is what sampling was meant to avoid.
+    rng = random.Random(SEED)
     manifest = []
     for scene in sorted(p.name for p in ROOT.iterdir() if p.is_dir()):
         base = ROOT / scene / "set_100"
@@ -62,7 +71,7 @@ def main() -> None:
             if not f.exists():
                 continue
             for key in np.load(f):
-                seen.setdefault(str(key), th)
+                seen.setdefault(decode_key(key), th)
 
         by_band: dict[str, list[str]] = {b: [] for b in BANDS}
         for key, band in seen.items():
@@ -76,9 +85,15 @@ def main() -> None:
             # images. A seeded sample over the same bands and the same budget reaches 135
             # — the determinism the prefix was there for costs nothing to keep.
             pool = sorted(by_band[band])
-            picked = sorted(random.Random(SEED).sample(pool, min(PER_BAND, len(pool))))
+            picked = sorted(rng.sample(pool, min(PER_BAND, len(pool))))
             for key in picked:
-                a, b = key.split("-")
+                # "<image1>-<image2>". Unpacking blind raises ValueError and kills the run
+                # after calib files are already written, so report and skip instead.
+                parts = key.split("-")
+                if len(parts) != 2:
+                    print(f"  skipping unparseable pair key {key!r}")
+                    continue
+                a, b = parts
                 manifest.append(f"{scene} {band} {a} {b}")
                 wanted.update((a, b))
             print(f"{scene} band {band}: {len(by_band[band]):5d} pairs, took {len(picked)}")
