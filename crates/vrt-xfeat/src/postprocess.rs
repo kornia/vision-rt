@@ -52,7 +52,9 @@ pub enum XFeatError {
     #[error("input image {0}x{1} too small — each side must be ≥ 32px")]
     InputTooSmall(usize, usize),
     #[error(
-        "descriptor width {0} is not supported — it must be a non-zero multiple of 32 and          at most 128 (the query array is held in registers, and 256 floats exceeds CUDA's          255-register limit per thread)"
+        "descriptor width {0} is not supported — it must be a non-zero multiple of 32 and \
+         at most 128 (the query array is held in registers, and 256 floats exceeds CUDA's \
+         255-register limit per thread)"
     )]
     UnsupportedDim(usize),
     #[error(

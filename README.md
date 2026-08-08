@@ -106,16 +106,16 @@ in-plane rotations recovered from the homographies are **+150°**, **-120°** an
 for `bark/3`, `bark/4` and `boat/4`; XFeat + mutual-NN scores **0.0%** on all three — and
 on every pair past ~79°, while staying nonzero below it.
 
-At a matched keypoint budget LightGlue+ dominates on both axes: **12025** Oxford inliers
-against 4695 for mutual-NN on the same descriptors and 3885 for XFeat, at roughly three
+At a matched keypoint budget LightGlue+ dominates on both axes: **12412** Oxford inliers
+against 4821 for mutual-NN on the same descriptors and 3835 for XFeat, at roughly three
 times the precision. That holds against a *tuned* mutual-NN, not just an ungated one —
 sweeping the similarity gate moves the baseline along a precision/recall curve that never
 reaches LightGlue's operating point. The sweep is published alongside the tables.
 
 On **IMC 2021 phototourism** (90 pairs, real 3D scenes, ground-truth poses, Sampson error
 <= 1 px) macro precision across co-visibility bands from 0.5 down to 0.1 goes **92.3% ->
-85.7%** for LightGlue+, **69.0% -> 39.2%** for mutual-NN on the same descriptors, and
-**55.2% -> 21.2%** for XFeat. Both benchmarks ship as examples in `vrt-lightglue`.
+86.7%** for LightGlue+, **70.2% -> 39.7%** for mutual-NN on the same descriptors, and
+**55.6% -> 21.3%** for XFeat. Both benchmarks ship as examples in `vrt-lightglue`.
 
 `K` picks a structurally different graph — at K≥3072 RaCo's ranker is bypassed, halving
 extraction, while the O(K²) matcher grows. Extraction and matching therefore want opposite

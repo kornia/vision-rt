@@ -86,6 +86,7 @@ def main() -> None:
             # — the determinism the prefix was there for costs nothing to keep.
             pool = sorted(by_band[band])
             picked = sorted(rng.sample(pool, min(PER_BAND, len(pool))))
+            taken = 0
             for key in picked:
                 # "<image1>-<image2>". Unpacking blind raises ValueError and kills the run
                 # after calib files are already written, so report and skip instead.
@@ -96,7 +97,10 @@ def main() -> None:
                 a, b = parts
                 manifest.append(f"{scene} {band} {a} {b}")
                 wanted.update((a, b))
-            print(f"{scene} band {band}: {len(by_band[band]):5d} pairs, took {len(picked)}")
+                taken += 1
+            # `taken`, not `len(picked)`: a skipped key would otherwise be reported as
+            # sampled, and the band would look fuller than the manifest actually is.
+            print(f"{scene} band {band}: {len(by_band[band]):5d} pairs, took {taken}")
 
         out = base / "calib_txt"
         out.mkdir(exist_ok=True)
@@ -104,6 +108,13 @@ def main() -> None:
             c = load_calib(base / "calibration" / f"calibration_{img}.h5")
             np.savetxt(out / f"{img}.txt", c.reshape(1, -1), fmt="%.12g")
 
+    # An empty manifest must not be written: `eval_imc` skips blank lines, so a lone "\n"
+    # produces a complete-looking all-zero table with no error anywhere to explain it.
+    if not manifest:
+        raise SystemExit(
+            f"{ROOT}: no pairs found — no scene had a readable set_100/new-vis-pairs/. "
+            "No manifest was written."
+        )
     (ROOT / "imc_manifest.txt").write_text("\n".join(manifest) + "\n")
     print(f"\n{len(manifest)} evaluation pairs -> {ROOT}/imc_manifest.txt")
 

@@ -19,8 +19,7 @@ for seq in bark boat graf; do
   if [ -d "$seq" ]; then echo "have $seq"; continue; fi
   echo "=== fetching $seq"
   # -f is load-bearing: without it curl writes the server's HTML error page into the
-  # tarball and exits 0, tar then fails inside an && list (which `set -e` does not catch),
-  # and the empty directory left behind satisfies the "have $seq" guard above forever.
+  # tarball and exits 0, tar then fails inside an && list (which `set -e` does not catch).
   if ! curl -fsSL -m 300 -o "$seq.tar.gz" \
     "https://www.robots.ox.ac.uk/~vgg/research/affine/det_eval_files/$seq.tar.gz"; then
     echo "FAILED to download $seq"
@@ -28,13 +27,19 @@ for seq in bark boat graf; do
     failed=$((failed + 1))
     continue
   fi
-  mkdir -p "$seq"
-  if ! tar xzf "$seq.tar.gz" -C "$seq"; then
+  # Extract into a staging directory and rename only on success. Extracting straight
+  # into "$seq" means a run interrupted mid-tar (Ctrl-C, OOM, power) leaves a partly
+  # populated directory that satisfies the "have $seq" guard above forever, and
+  # prep_oxford then builds a quietly short manifest from it. The rename is atomic.
+  rm -rf "$seq.partial"
+  mkdir -p "$seq.partial"
+  if ! tar xzf "$seq.tar.gz" -C "$seq.partial"; then
     echo "FAILED to extract $seq"
-    rm -rf "$seq" "$seq.tar.gz"
+    rm -rf "$seq.partial" "$seq.tar.gz"
     failed=$((failed + 1))
     continue
   fi
+  mv "$seq.partial" "$seq"
   rm -f "$seq.tar.gz"
 done
 

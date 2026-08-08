@@ -541,9 +541,14 @@ mod tests {
     #[test]
     #[ignore]
     fn gpu_match_agrees_with_cpu_reference() {
+        // The width the *fixtures* are built at, not `Matcher::XFEAT_DIM`: sourcing it
+        // from the matcher would compare the matcher's constant against itself, which is
+        // the tautology `Descriptors` exists to prevent. Mirrors the 128-D test below.
+        const D: usize = 64;
         let ctx = cudarc::driver::CudaContext::new(0).unwrap();
         let stream = ctx.new_stream().unwrap();
         let matcher = Matcher::new(stream.clone()).unwrap();
+        assert_eq!(matcher.dim(), D);
 
         for (n0, n1) in [(4096usize, 4096usize), (1000, 3000), (1, 4096), (130, 1)] {
             let h0 = random_descs(n0, 42);
@@ -555,8 +560,8 @@ mod tests {
             let run = |out: &mut MatchResult| {
                 matcher
                     .submit(
-                        Descriptors::new(&d0, n0, Matcher::XFEAT_DIM),
-                        Descriptors::new(&d1, n1, Matcher::XFEAT_DIM),
+                        Descriptors::new(&d0, n0, D),
+                        Descriptors::new(&d1, n1, D),
                         -1.0,
                         out,
                     )
@@ -569,7 +574,7 @@ mod tests {
             let gpu = run(&mut out);
             let gpu_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
-            let cpu = cpu_match_reference(&h0, &h1, -1.0, Matcher::XFEAT_DIM);
+            let cpu = cpu_match_reference(&h0, &h1, -1.0, D);
 
             let gset: std::collections::HashSet<_> = gpu.iter().copied().collect();
             let cset: std::collections::HashSet<_> = cpu.iter().copied().collect();

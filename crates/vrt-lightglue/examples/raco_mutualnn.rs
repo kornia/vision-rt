@@ -29,7 +29,9 @@ fn main() -> Result<(), vrt::BoxError> {
         std::process::exit(1);
     }
     let min_cossim: f32 = arg_or(&a, 4, "min_cossim", 0.0)?;
-    let iters: usize = arg_or(&a, 5, "iters", 20)?;
+    // At least one timed pass: `min` over an empty loop leaves `best` at infinity and the
+    // run prints "inf ms" as though it had measured something.
+    let iters: usize = arg_or(&a, 5, "iters", 20)?.max(1);
 
     // One shared stream: extraction and matching are a single continuous queue, and one
     // synchronize drains both.

@@ -69,7 +69,20 @@ fn read_netpbm_rgb8(path: &Path) -> Result<Image<u8, 3>, vrt::BoxError> {
         }
         fields.push(std::str::from_utf8(&raw[start..i])?.parse()?);
     }
-    i += 1; // exactly one whitespace byte separates the header from the payload
+    // Exactly one whitespace character separates the header from the payload — but on a
+    // CRLF-terminated file that character is "\r\n", two bytes. Skipping a fixed one would
+    // leave the '\n' as the first payload byte, shifting every pixel by one channel: the
+    // length check below still passes (the file is one byte longer to match) and the
+    // image comes out silently wrong rather than failing.
+    match raw.get(i) {
+        Some(b'\r') if raw.get(i + 1) == Some(&b'\n') => i += 2,
+        Some(c) if (*c as char).is_whitespace() => i += 1,
+        _ => {
+            return Err(
+                format!("{}: header is not terminated by whitespace", path.display()).into(),
+            )
+        }
+    }
     let (w, h, maxval) = (fields[0], fields[1], fields[2]);
     if maxval != 255 {
         return Err(format!(
@@ -126,9 +139,10 @@ fn convert(
     Ok(((img.cols(), img.rows()), (scaled.scale_x, scaled.scale_y)))
 }
 
-fn luma(img: &Image<u8, 3>, x: usize, y: usize) -> f64 {
-    let p = (y * img.cols() + x) * 3;
-    let s = img.as_slice();
+/// Rec.601 luma of one pixel. Takes the slice rather than the `Image` so the caller's
+/// per-pixel loop does not re-borrow it a quarter of a million times per pair.
+fn luma(s: &[u8], cols: usize, x: usize, y: usize) -> f64 {
+    let p = (y * cols + x) * 3;
     0.299 * s[p] as f64 + 0.587 * s[p + 1] as f64 + 0.114 * s[p + 2] as f64
 }
 
@@ -138,17 +152,22 @@ fn photometric_check(a: &Image<u8, 3>, b: &Image<u8, 3>, h: &Mat3F64) -> Option<
         return None;
     }
     let hi = h.inverse();
-    let (mut xs, mut ys) = (Vec::new(), Vec::new());
+    // The overlap is most of the frame on a good pair, so size for it once instead of
+    // growing two 260k-element vectors by doubling on every sequence.
+    let n_px = b.rows() * b.cols();
+    let (mut xs, mut ys) = (Vec::with_capacity(n_px), Vec::with_capacity(n_px));
+    let (a_px, a_cols) = (a.as_slice(), a.cols());
+    let (b_px, b_cols) = (b.as_slice(), b.cols());
     for y in 0..b.rows() {
-        for x in 0..b.cols() {
+        for x in 0..b_cols {
             let p = hi * Vec3F64::new(x as f64, y as f64, 1.0);
             if p.z.abs() < 1e-12 {
                 continue;
             }
             let (sx, sy) = (p.x / p.z, p.y / p.z);
-            if sx >= 0.0 && sy >= 0.0 && (sx as usize) < a.cols() && (sy as usize) < a.rows() {
-                xs.push(luma(a, sx as usize, sy as usize));
-                ys.push(luma(b, x, y));
+            if sx >= 0.0 && sy >= 0.0 && (sx as usize) < a_cols && (sy as usize) < a.rows() {
+                xs.push(luma(a_px, a_cols, sx as usize, sy as usize));
+                ys.push(luma(b_px, b_cols, x, y));
             }
         }
     }
@@ -182,7 +201,7 @@ fn main() -> Result<(), vrt::BoxError> {
     }
     let (src_root, out_root) = (PathBuf::from(&a[1]), PathBuf::from(&a[2]));
     let max_side: usize = arg_or(&a, 3, "max_side", 640)?;
-    let interpolation = parse_interpolation(a.get(4).map(String::as_str).unwrap_or("bilinear"))?;
+    let interpolation = parse_interpolation(a.get(4).map(String::as_str).unwrap_or("lanczos"))?;
     std::fs::create_dir_all(&out_root)?;
 
     let mut seqs: Vec<String> = std::fs::read_dir(&src_root)?
@@ -230,12 +249,25 @@ fn main() -> Result<(), vrt::BoxError> {
         let img1 = read_image_any_rgb8(od.join("img1.png"))?;
         for i in 2..=6 {
             let hp = sd.join(format!("H1to{i}p"));
-            let Some(&(_orig_i, scale_i)) = sizes.get(&i) else {
-                continue;
-            };
-            if !hp.exists() {
+            let (has_img, has_h) = (sizes.contains_key(&i), hp.exists());
+            // Neither present: this sequence legitimately has fewer than 6 frames.
+            // Exactly one present: the download is truncated, and dropping the pair
+            // silently is precisely what the `suspect` gate below exists to prevent —
+            // the benchmark would shrink with nothing in the output saying so.
+            if !has_img && !has_h {
                 continue;
             }
+            if !has_img {
+                suspect += 1;
+                println!("  img{i}: H1to{i}p present but img{i} is missing  <-- SUSPECT, excluded");
+                continue;
+            }
+            if !has_h {
+                suspect += 1;
+                println!("  img{i}: image present but H1to{i}p is missing  <-- SUSPECT, excluded");
+                continue;
+            }
+            let &(_orig_i, scale_i) = sizes.get(&i).expect("has_img was just checked");
             let v = read_floats(&hp)?;
             let h = mat3_from_row_major(&v).map_err(|e| format!("{}: {e}", hp.display()))?;
 

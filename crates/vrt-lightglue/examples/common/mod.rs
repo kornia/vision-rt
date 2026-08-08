@@ -20,12 +20,20 @@ use kornia_imgproc::resize::resize_fast_u8_aa;
 use vrt_raco_aliked::DIM_DIVISOR;
 use vrt_xfeat::{Descriptors, MatchResult, Matcher, XFeat, XFeatParams, XFeatResult};
 
-/// Read a whitespace-separated list of floats.
+/// Read a whitespace-separated list of floats, naming the file on any failure.
+///
+/// Every token must parse. `filter_map(|t| t.parse().ok())` is the tempting form and it
+/// is the same trap [`arg_or`] documents: a corrupt ground-truth file would silently lose
+/// the unparseable tokens, and the callers only check the *count*, so a 10-token file with
+/// one bad entry would sail through as a valid 3x3 built from the wrong numbers.
 pub fn read_floats(path: &Path) -> Result<Vec<f64>, vrt::BoxError> {
-    Ok(std::fs::read_to_string(path)?
-        .split_whitespace()
-        .filter_map(|t| t.parse().ok())
-        .collect())
+    let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    text.split_whitespace()
+        .map(|t| {
+            t.parse()
+                .map_err(|_| format!("{}: cannot parse {t:?} as a number", path.display()).into())
+        })
+        .collect()
 }
 
 /// Parse an optional positional argument, or fail loudly.
@@ -60,6 +68,19 @@ pub fn mat3_from_row_major(v: &[f64]) -> Result<Mat3F64, vrt::BoxError> {
     Ok(Mat3F64::from_cols_array(&a).transpose())
 }
 
+/// Parse the resampling kernel name.
+///
+/// **Only `bicubic` and `lanczos` anti-alias.** `resize_fast_u8_aa`'s `antialias` flag
+/// widens the *separable* kernel by the downscale factor; kornia documents `Nearest` and
+/// `Bilinear` as "unaffected by this flag", and they route to fixed 1-tap / 2-tap
+/// samplers ([`resize_u8_path`] in kornia-imgproc `resize/mod.rs`). Downscaling by more
+/// than ~2x under `bilinear` therefore aliases the high-frequency texture keypoint
+/// detectors fire on. All four are accepted because the published tables were measured
+/// under `bilinear` and must stay reproducible — pick `lanczos` for a new measurement.
+///
+/// All four share the same half-pixel geometry, so [`resize_matrix`] is valid for every
+/// one of them: `Nearest`'s `floor((i + 0.5) * scale)` is exactly `round` of the
+/// `align_corners=False` centre, not a different convention.
 pub fn parse_interpolation(s: &str) -> Result<InterpolationMode, vrt::BoxError> {
     match s {
         "nearest" => Ok(InterpolationMode::Nearest),
@@ -72,8 +93,10 @@ pub fn parse_interpolation(s: &str) -> Result<InterpolationMode, vrt::BoxError> 
 
 /// The pixel-coordinate map induced by [`resize_to_fit`], as a homogeneous matrix.
 ///
-/// `resize` samples at `src = a*dst + (a - 1)/2` with `a = src/dst` (half-pixel centres,
-/// kornia-imgproc `resize/mod.rs`), so the forward map is `dst = s*src + (s - 1)/2`. The
+/// `resize_fast_u8_aa` samples at `src = a*dst + (a - 1)/2` with `a = src/dst` — the
+/// `align_corners=False` half-pixel centre every one of its kernels uses (`bilinear.rs`
+/// `bilinear_tap`, `common.rs` `center`, `nearest.rs` `nearest_index`, all in
+/// kornia-imgproc `resize/`) — so the forward map is `dst = s*src + (s - 1)/2`. The
 /// translation term is small — a fifth of a pixel at these scales — but it is not zero,
 /// and a bare `diag(s, s, 1)` silently biases every rescaled intrinsic and homography.
 ///
@@ -139,10 +162,13 @@ pub fn resize_to_fit(
         },
         0,
     )?;
-    // Antialiased, and on u8 directly. The plain `resize` is a fixed 2/4-tap sampler that
-    // does not widen its kernel for downscale, so a >2x reduction — which is every IMC
-    // image — aliases exactly the high-frequency texture keypoint detectors fire on. It
-    // also needed two full-resolution f32 buffers, 12 bytes/pixel, on a 7.4 GB box.
+    // On u8 directly: the f32 `resize` needed two full-resolution f32 buffers, 12
+    // bytes/pixel, on a 7.4 GB box.
+    //
+    // `true` requests antialiasing but only the separable kernels honour it — see
+    // [`parse_interpolation`]. Under the `bilinear` default this is a fixed 2-tap
+    // sampler and a >2x reduction DOES alias; that is the state the published tables
+    // were measured in, so it is recorded rather than silently changed.
     resize_fast_u8_aa::<3>(src, &mut resized, interpolation, true)?;
 
     // Crop top-left anchored, so pixel coordinates are unchanged by the crop.
@@ -164,6 +190,76 @@ pub fn resize_to_fit(
         scale_x: rw as f64 / w as f64,
         scale_y: rh as f64 / h as f64,
     })
+}
+
+/// One pair's precision, from its `(matches, inliers)`.
+///
+/// The same expression [`Tally::add`] folds in, so a printed per-pair row and the macro
+/// average over those rows cannot disagree about what "precision" means. A pair with no
+/// matches is 0%, not undefined — the matcher returned nothing and that is a result.
+pub fn pair_pct((m, i): (usize, usize)) -> f64 {
+    if m == 0 {
+        0.0
+    } else {
+        100.0 * i as f64 / m as f64
+    }
+}
+
+/// One matcher column's running score over a set of pairs.
+///
+/// Shared by both harnesses: `eval_oxford` previously carried the same four quantities as
+/// seven loose scalars, so the two evaluations could drift on what "macro precision" meant
+/// while both claiming to report it.
+#[derive(Default, Clone, Copy)]
+pub struct Tally {
+    pub pairs: usize,
+    pub matches: usize,
+    pub inliers: usize,
+    /// Sum of per-pair precisions, for the macro average.
+    pub pct_sum: f64,
+}
+
+impl Tally {
+    /// Fold in one pair's `(matches, inliers)`.
+    ///
+    /// A pair with no matches still counts as a pair and contributes 0% — a matcher that
+    /// returns nothing has not earned a missing row.
+    pub fn add(&mut self, scored: (usize, usize)) {
+        self.pairs += 1;
+        self.matches += scored.0;
+        self.inliers += scored.1;
+        self.pct_sum += pair_pct(scored);
+    }
+
+    /// Fold in a whole sub-tally, for a totals row.
+    pub fn add_tally(&mut self, other: &Tally) {
+        self.pairs += other.pairs;
+        self.matches += other.matches;
+        self.inliers += other.inliers;
+        self.pct_sum += other.pct_sum;
+    }
+
+    /// Pooled ("micro") precision: inliers over matches across the whole set.
+    ///
+    /// Weighted by match volume, so a single high-match pair can dominate — and the
+    /// columns differ severalfold in volume, so it weights them differently too. Read it
+    /// next to [`macro_pct`](Self::macro_pct), never alone.
+    pub fn pct(&self) -> f64 {
+        if self.matches == 0 {
+            0.0
+        } else {
+            100.0 * self.inliers as f64 / self.matches as f64
+        }
+    }
+
+    /// Mean of the per-pair precisions: every pair counts once.
+    pub fn macro_pct(&self) -> f64 {
+        if self.pairs == 0 {
+            0.0
+        } else {
+            self.pct_sum / self.pairs as f64
+        }
+    }
 }
 
 /// XFeat plus its native 64-D mutual-NN, the independent baseline both evaluations

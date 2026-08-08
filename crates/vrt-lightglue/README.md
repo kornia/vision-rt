@@ -119,8 +119,11 @@ The synthetic pair below is a sanity check, not evidence. Two real benchmarks wi
 published ground truth ship as examples, with their dataset preparation in-repo.
 
 > Measured 2026-08-08 on a Jetson Orin Nano (SM87, TensorRT 10.3.0.30, MAXN_SUPER),
-> `raco-aliked-extractor-k3072` fp16, images downscaled to long side 640 with an
-> antialiased filter. Reproduce with the commands under *Reproducing these numbers*.
+> `raco-aliked-extractor-k3072` fp16, images downscaled to long side 640 with
+> **Lanczos + antialias** (`resize_fast_u8_aa`). The antialias flag only affects the
+> separable kernels — bilinear and nearest ignore it — so bilinear, the previous
+> default, was *not* antialiased despite passing the flag. Reproduce with the
+> commands under *Reproducing these numbers*.
 
 ### Two LightGlue configurations, and why both are reported
 
@@ -141,23 +144,23 @@ the ground-truth homography.
 
 | pair | rot | LightGlue+ k3072 | LightGlue+ k1024 | RaCo-ALIKED NN | XFeat NN |
 |---|---|---|---|---|---|
-| bark/2 | −31° | 1251, **88.6%** | 445, 91.6% | 231, 21.6% | 602, 47.3% |
-| bark/3 | **+150°** | 142, **67.3%** | 130, 88.3% | 0, 0.0% | 0, **0.0%** |
-| bark/4 | **−120°** | 0, 0.0% | 128, **88.3%** | 0, 0.0% | 0, **0.0%** |
-| bark/5 | −23° | 298, **87.1%** | 140, 94.6% | 20, 2.1% | 1, 0.1% |
+| bark/2 | −31° | 1253, **89.4%** | 436, 92.2% | 206, 19.9% | 576, 45.8% |
+| bark/3 | **+150°** | 139, **64.4%** | 132, 78.1% | 0, 0.0% | 0, **0.0%** |
+| bark/4 | **−120°** | 0, 0.0% | 69, **78.4%** | 0, 0.0% | 0, **0.0%** |
+| bark/5 | −23° | 294, **89.1%** | 151, 96.2% | 26, 2.7% | 3, 0.4% |
 | bark/6 | +153° | 0, 0.0% | 0, 0.0% | 0, 0.0% | 0, 0.0% |
-| boat/2 | −14° | 1995, **96.8%** | 684, 97.7% | 1877, 88.4% | 1067, 59.6% |
-| boat/3 | −40° | 1662, **96.3%** | 591, 97.2% | 241, 28.0% | 410, 36.5% |
-| boat/4 | **−80°** | 1068, **87.0%** | 405, 90.0% | 0, 0.0% | 0, **0.0%** |
-| boat/5 | +8° | 744, **92.3%** | 301, 90.9% | 469, 52.5% | 74, 11.2% |
-| boat/6 | −41° | 211, 46.6% | 109, 59.6% | 1, 0.2% | 7, 1.6% |
-| graf/2 | −15° | 1447, **90.6%** | 597, 94.3% | 800, 61.4% | 807, 54.8% |
-| graf/3 | +20° | 1101, **79.3%** | 461, 81.9% | 566, 47.2% | 499, 42.6% |
-| graf/4 | −27° | 900, **75.8%** | 391, 82.1% | 14, 2.1% | 187, 21.2% |
-| graf/5 | +5° | 689, **75.9%** | 296, 84.6% | 471, 51.8% | 214, 26.3% |
-| graf/6 | +38° | 517, **69.7%** | 244, 80.5% | 5, 0.8% | 17, 2.8% |
-| **total inliers** | | **12025** | 4912 | 4695 | 3885 |
-| **macro precision** | | 70.2% | **80.8%** | 23.7% | 20.3% |
+| boat/2 | −14° | 2011, **97.8%** | 684, 98.3% | 1895, 88.9% | 1057, 60.0% |
+| boat/3 | −40° | 1693, **96.1%** | 586, 96.9% | 240, 28.2% | 370, 33.3% |
+| boat/4 | **−80°** | 1080, **87.6%** | 418, 91.5% | 0, 0.0% | 0, **0.0%** |
+| boat/5 | +8° | 795, **94.9%** | 311, 91.7% | 480, 51.2% | 84, 12.7% |
+| boat/6 | −41° | 219, 45.3% | 118, 59.6% | 3, 0.5% | 3, 0.7% |
+| graf/2 | −15° | 1539, **93.0%** | 599, 95.1% | 856, 65.7% | 825, 55.4% |
+| graf/3 | +20° | 1157, **80.3%** | 450, 82.1% | 572, 47.7% | 494, 41.9% |
+| graf/4 | −27° | 951, **77.4%** | 386, 82.7% | 16, 2.3% | 198, 21.7% |
+| graf/5 | +5° | 733, **78.6%** | 288, 85.7% | 522, 56.5% | 208, 26.4% |
+| graf/6 | +38° | 548, **70.4%** | 240, 79.2% | 5, 0.9% | 19, 3.1% |
+| **total inliers** | | **12412** | 4868 | 4821 | 3835 |
+| **macro precision** | | 71.0% | **80.5%** | 24.3% | 20.1% |
 
 ### IMC 2021 phototourism — 3D scenes, ground-truth poses
 
@@ -173,52 +176,55 @@ Macro-average precision (each pair weighted equally), k1024:
 
 | co-vis | pairs | LightGlue+ | RaCo-ALIKED NN | XFeat NN |
 |---|---|---|---|---|
-| 0.1 | 18 | **85.7%** | 39.2% | 21.2% |
-| 0.2 | 18 | **86.3%** | 47.0% | 33.4% |
-| 0.3 | 18 | **88.9%** | 61.0% | 45.3% |
-| 0.4 | 18 | **90.8%** | 60.7% | 45.7% |
-| 0.5 | 18 | **92.3%** | 69.0% | 55.2% |
-| **all** | **90** | **88.8%** | 55.4% | 40.2% |
+| 0.1 | 18 | **86.7%** | 39.7% | 21.3% |
+| 0.2 | 18 | **86.9%** | 47.5% | 33.8% |
+| 0.3 | 18 | **88.9%** | 61.8% | 46.2% |
+| 0.4 | 18 | **90.4%** | 61.4% | 46.1% |
+| 0.5 | 18 | **92.3%** | 70.2% | 55.6% |
+| **all** | **90** | **89.1%** | 56.1% | 40.6% |
 
 Totals, both configurations (inliers, pooled precision, macro precision):
 
 | | inliers | micro | macro |
 |---|---|---|---|
-| LightGlue+ k3072 (matched) | **65283** | **89.2%** | **87.9%** |
-| LightGlue+ k1024 (mixed-K) | 22174 | 90.1% | 88.8% |
-| RaCo-ALIKED mutual-NN | 55102 | 60.4% | 55.4% |
-| XFeat mutual-NN | 37062 | 46.6% | 40.2% |
+| LightGlue+ k3072 (matched) | **66946** | 89.7% | 88.5% |
+| LightGlue+ k1024 (mixed-K) | 22284 | **90.2%** | **89.1%** |
+| RaCo-ALIKED mutual-NN | 56509 | 61.1% | 56.1% |
+| XFeat mutual-NN | 37812 | 47.0% | 40.6% |
 
 ### Is the mutual-NN baseline handicapped?
 
 An ungated mutual-NN baseline is low-precision by construction, so "the matcher beats it"
 would be circular. Both gates were swept, LightGlue invariant throughout as the control.
 
-Oxford — tuning barely moves ALIKED: 23.7% macro ungated, peaking at **25.7%** (gate 0.70)
-while giving up 40% of its inliers; 13.2% by 0.85. XFeat peaks at 25.0% (gate 0.90, half
-its inliers).
+Oxford, ALIKED gate (LightGlue invariant at 80.5% throughout, as the control):
 
-IMC is where the gate genuinely matters and the ungated figure understates the baseline:
+| gate | inliers | macro precision |
+|---|---|---|
+| −1.0 (ungated) | 4821 | 24.3% |
+| 0.50 | 4643 | 25.0% |
+| **0.70** | 2935 | **27.9%** |
+| 0.80 | 1278 | 24.2% |
+| 0.85 | 368 | 11.5% |
 
-| IMC configuration | inliers | micro | macro |
-|---|---|---|---|
-| ALIKED NN, ungated | 55102 | 60.4% | 55.4% |
-| ALIKED NN, gate 0.85 | ~16900 | ~89% | ~71% |
-| LightGlue+ k3072 | **65283** | **89.2%** | **87.9%** |
+XFeat's own sweep peaks at 24.9% (gate 0.90) against 20.1% ungated, for 39% of its
+inliers. Best tuned mutual-NN therefore reaches 27.9% against LightGlue's 80.5%, and pays
+39% of its correspondences for it.
 
-At a tuned gate mutual-NN's *pooled* precision approaches LightGlue's — while returning a
-quarter of the correct correspondences and staying ~17 points behind on the macro average,
-because it collapses on the hard pairs specifically. **The mutual-NN precision/recall curve
-does not reach LightGlue's operating point at any gate tested.**
+IMC is where the gate genuinely matters and the ungated figure understates the baseline: a
+0.85 gate lifts pooled precision to roughly LightGlue's while returning about a quarter of
+the correct correspondences and staying ~17 points behind on the macro average, because it
+collapses on the hard pairs specifically. **The mutual-NN precision/recall curve does not
+reach LightGlue's operating point at any gate tested.**
 
 ### What the two benchmarks agree on
 
-- **At a matched budget LightGlue dominates on both axes.** k3072 against k3072: 12025
-  inliers vs 4695 on Oxford and 65283 vs 55102 on IMC, at roughly three times and 1.6
+- **At a matched budget LightGlue dominates on both axes.** k3072 against k3072: 12412
+  inliers vs 4821 on Oxford and 66946 vs 56509 on IMC, at roughly three times and 1.6
   times the precision. This is the claim an earlier revision asserted without running it.
 - **Mixed-K trades recall for precision, and is better under extreme rotation.** k1024
-  returns 2.4× fewer Oxford inliers but 10 points more macro precision — and holds
-  `bark/4` (−120°) at 88.3% where the k3072 matcher returns 2 matches and scores 0%.
+  returns 2.5× fewer Oxford inliers but 10 points more macro precision — and holds
+  `bark/4` (−120°) at 78.4% where the k3072 matcher scores 0%.
   Restricting to the most confident 1024 keypoints evidently helps where the detector is
   least reliable. Worth knowing before picking an engine; not something either number
   alone shows.
@@ -227,8 +233,8 @@ does not reach LightGlue's operating point at any gate tested.**
   Extreme *scale* defeats everything: `bark/6` is 153° and a 4.2× zoom, and all four
   configurations return nothing.
 - **Pooled and macro precision disagree, so both are reported.** Pooling weights by match
-  volume, and the columns differ severalfold in volume; on Oxford k3072 the gap is 10
-  points.
+  volume, and the columns differ severalfold in volume; on Oxford the two differ by ~10 points
+  between the matcher configurations.
 
 ### Reproducing these numbers
 
@@ -239,13 +245,13 @@ cargo run --release -p vrt-lightglue --example prep_oxford -- \
     /data/oxford /data/oxford_prepared 640 bilinear
 cargo run --release -p vrt-lightglue --example eval_oxford -- \
     /data/oxford_prepared raco-aliked-extractor-k3072-...fp16.engine \
-    <lightglue-k3072-or-k1024>.engine 3.0 0.0 xfeat-backbone-...engine 0.0
+    <lightglue-k3072-or-k1024>.engine 3.0 -1.0 xfeat-backbone-...engine -1.0
 
 # IMC: metadata only (needs h5py + numpy), then evaluate
 python3 crates/vrt-lightglue/scripts/prep_imc.py /data/imc2021/phototourism 6 0
 cargo run --release -p vrt-lightglue --example eval_imc -- \
     /data/imc2021/phototourism raco-aliked-extractor-k3072-...fp16.engine \
-    <lightglue-k3072-or-k1024>.engine 1.0 0.0 xfeat-backbone-...engine 0.0 bilinear
+    <lightglue-k3072-or-k1024>.engine 1.0 -1.0 xfeat-backbone-...engine -1.0 lanczos
 ```
 
 Arguments 1–7 mean the same thing in both harnesses, so a command line transfers between

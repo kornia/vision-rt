@@ -35,16 +35,20 @@ use vrt_xfeat::{Descriptors, Matcher};
 
 #[path = "common/mod.rs"]
 mod common;
-use common::{arg_or, mat3_from_row_major, read_floats, XFeatBaseline};
+use common::{arg_or, mat3_from_row_major, pair_pct, read_floats, Tally, XFeatBaseline};
 
 /// Mutual-NN similarity gates, one per descriptor family.
 ///
 /// The gate is descriptor-specific and unforgiving: XFeat's tuned 0.82 applied to ALIKED's
-/// 128-D descriptors returns **zero** matches on 10 of these 15 pairs. Both default to
-/// ungated so the two mutual-NN columns measure the descriptors rather than a threshold
-/// picked for one of them, and both are separately overridable.
-const DEFAULT_NN_COSSIM: f32 = 0.0;
-const DEFAULT_XF_COSSIM: f32 = 0.0;
+/// 128-D descriptors returns **zero** matches on 10 of these 15 pairs. Both default to the
+/// loosest gate so the two mutual-NN columns measure the descriptors rather than a
+/// threshold picked for one of them, and both are separately overridable.
+///
+/// 0.0 is the loosest gate *reported*, not literally ungated: it still drops a pair whose
+/// best cosine is negative (truly ungated is -1.0). Immaterial for L2-normalised
+/// descriptors, but the tables call this row "ungated", so the difference is recorded.
+const DEFAULT_NN_COSSIM: f32 = -1.0;
+const DEFAULT_XF_COSSIM: f32 = -1.0;
 
 fn warp(h: &Mat3F64, x: f32, y: f32) -> (f32, f32) {
     let p = *h * Vec3F64::new(x as f64, y as f64, 1.0);
@@ -56,7 +60,10 @@ fn warp(h: &Mat3F64, x: f32, y: f32) -> (f32, f32) {
     ((p.x / p.z) as f32, (p.y / p.z) as f32)
 }
 
-/// (matches, inliers, inlier %) for a match set scored against the ground truth.
+/// (matches, inliers) for a match set scored against the ground truth.
+///
+/// Same shape as `eval_imc`'s `score`, so both harnesses feed one shared [`Tally`] and the
+/// precision is derived in exactly one place ([`common::pair_pct`]).
 fn score(
     pairs: &[(usize, usize)],
     lk: &[(f32, f32)],
@@ -64,7 +71,7 @@ fn score(
     h: &Mat3F64,
     thresh: f32,
     scale: (f32, f32),
-) -> (usize, usize, f32) {
+) -> (usize, usize) {
     let inl = pairs
         .iter()
         .filter(|(i, j)| {
@@ -75,12 +82,7 @@ fn score(
             (dx * dx + dy * dy).sqrt() <= thresh
         })
         .count();
-    let pct = if pairs.is_empty() {
-        0.0
-    } else {
-        100.0 * inl as f32 / pairs.len() as f32
-    };
-    (pairs.len(), inl, pct)
+    (pairs.len(), inl)
 }
 
 fn main() -> Result<(), vrt::BoxError> {
@@ -129,10 +131,14 @@ fn main() -> Result<(), vrt::BoxError> {
         "", "LightGlue+ m/inl/%", "RaCo mutual-NN m/inl/%", "XFeat mutual-NN m/inl/%"
     );
 
-    let manifest = std::fs::read_to_string(root.join("manifest.txt"))?;
-    let (mut lg_tot, mut mnn_tot, mut xf_tot) = (0usize, 0usize, 0usize);
-    let (mut lg_pct, mut mnn_pct, mut xf_pct) = (0.0f64, 0.0f64, 0.0f64);
-    let mut n_pairs = 0usize;
+    let manifest_path = root.join("manifest.txt");
+    let manifest = std::fs::read_to_string(&manifest_path).map_err(|e| {
+        format!(
+            "{}: {e} — produce it with prep_oxford",
+            manifest_path.display()
+        )
+    })?;
+    let (mut lg, mut mnn_t, mut xf_t) = (Tally::default(), Tally::default(), Tally::default());
     for line in manifest.lines().filter(|l| !l.trim().is_empty()) {
         let f: Vec<&str> = line.split_whitespace().collect();
         let [seq, left_n, right_n, hf, sx_s, sy_s] = f[..] else {
@@ -173,50 +179,47 @@ fn main() -> Result<(), vrt::BoxError> {
         stream.synchronize()?;
 
         let (lk, rk) = (l.keypoints_host()?, r.keypoints_host()?);
-        let (lm, li, lp) = score(&lg_out.pairs(0.0)?, &lk, &rk, &h, thresh, (sx, sy));
-        let (mm, mi, mp) = score(&mnn_out.pairs(), &lk, &rk, &h, thresh, (sx, sy));
-        lg_tot += li;
-        mnn_tot += mi;
+        let lg_s = score(&lg_out.pairs(0.0)?, &lk, &rk, &h, thresh, (sx, sy));
+        let mnn_s = score(&mnn_out.pairs(), &lk, &rk, &h, thresh, (sx, sy));
 
         // XFeat on the same pair, its own keypoints and its own 64-D matcher.
-        let (xm, xi, xp) = match &mut xf {
+        let xf_s = match &mut xf {
             Some(x) => {
                 let (pairs, xlk, xrk) = x.finish(&stream, xf_cossim)?;
                 score(&pairs, &xlk, &xrk, &h, thresh, (sx, sy))
             }
-            None => (0, 0, 0.0),
+            None => (0, 0),
         };
-        xf_tot += xi;
-        lg_pct += lp as f64;
-        mnn_pct += mp as f64;
-        xf_pct += xp as f64;
-        n_pairs += 1;
+        lg.add(lg_s);
+        mnn_t.add(mnn_s);
+        xf_t.add(xf_s);
 
         println!(
             "{:<14} {:>7} {:>6} {:>6.1}% {:>7} {:>6} {:>6.1}% {:>7} {:>6} {:>6.1}%",
             format!("{seq}/{}", right_n.trim_end_matches(".png")),
-            lm,
-            li,
-            lp,
-            mm,
-            mi,
-            mp,
-            xm,
-            xi,
-            xp
+            lg_s.0,
+            lg_s.1,
+            pair_pct(lg_s),
+            mnn_s.0,
+            mnn_s.1,
+            pair_pct(mnn_s),
+            xf_s.0,
+            xf_s.1,
+            pair_pct(xf_s)
         );
     }
     println!(
-        "\ntotal correct correspondences: LightGlue+ {lg_tot}, RaCo mutual-NN {mnn_tot}, XFeat {xf_tot}"
+        "\ntotal correct correspondences: LightGlue+ {}, RaCo mutual-NN {}, XFeat {}",
+        lg.inliers, mnn_t.inliers, xf_t.inliers
     );
     // Every pair weighted equally, so a single dense pair cannot carry the summary.
-    let n = n_pairs.max(1) as f64;
     println!(
-        "macro-average precision over {n_pairs} pairs: LightGlue+ {:.1}%, RaCo mutual-NN \
+        "macro-average precision over {} pairs: LightGlue+ {:.1}%, RaCo mutual-NN \
          {:.1}%, XFeat {:.1}%",
-        lg_pct / n,
-        mnn_pct / n,
-        xf_pct / n
+        lg.pairs,
+        lg.macro_pct(),
+        mnn_t.macro_pct(),
+        xf_t.macro_pct()
     );
     Ok(())
 }

@@ -47,9 +47,15 @@ use vrt_xfeat::{Descriptors, Matcher};
 
 /// Mutual-NN similarity gates, one per descriptor family. The gate is descriptor-specific
 /// and unforgiving, so the two families get separate knobs rather than sharing one that is
-/// necessarily wrong for at least one of them. Both default to ungated.
-const DEFAULT_NN_COSSIM: f32 = 0.0;
-const DEFAULT_XF_COSSIM: f32 = 0.0;
+/// necessarily wrong for at least one of them.
+///
+/// 0.0 is the *loosest gate reported*, not literally ungated: it still drops a mutual-NN
+/// pair whose best cosine is negative. Truly ungated is -1.0 (what the GPU/CPU agreement
+/// tests use). The distinction is immaterial for L2-normalised descriptors — an
+/// anti-correlated best match over thousands of candidates is noise — but the tables call
+/// this row "ungated", so what it actually admits is recorded here.
+const DEFAULT_NN_COSSIM: f32 = -1.0;
+const DEFAULT_XF_COSSIM: f32 = -1.0;
 
 /// Long side the images are resized to. The published engines' shape profile tops out at
 /// 640, and RaCo needs both sides to be multiples of 32.
@@ -62,7 +68,7 @@ use kornia_algebra::{Mat3F64, Vec2F64, Vec3F64};
 mod common;
 use common::{
     arg_or, mat3_from_row_major, parse_interpolation, read_floats, resize_matrix, resize_to_fit,
-    XFeatBaseline,
+    Tally, XFeatBaseline,
 };
 
 /// Camera calibration as written by `scripts/prep_imc.py`: K (9), R (9), T (3).
@@ -97,17 +103,40 @@ impl Calib {
     }
 }
 
-/// Ground-truth fundamental matrix mapping `a`'s pixels to epipolar lines in `b`.
+/// Relative pose `a`-camera → `b`-camera, or `None` when the baseline is degenerate.
 ///
-/// Sampson error is invariant to F's scale (numerator and denominator both scale with it),
-/// so no normalisation is needed here.
-fn fundamental(a: &Calib, ka: &Mat3F64, b: &Calib, kb: &Mat3F64) -> Option<Mat3F64> {
+/// Split from [`fundamental`] so the caller can reject a pair *before* decoding and
+/// resizing its two JPEGs — and, more importantly, so `fundamental` takes one image's
+/// pose and its own K together rather than four loose arguments two of which could be
+/// swapped without the types noticing.
+fn relative_pose(a: &Calib, b: &Calib) -> Option<(Mat3F64, Vec3F64)> {
     let (r, t) = Pose3d::between(&a.pose, &b.pose).to_rt();
     // A near-zero baseline is a pure rotation: F degenerates and every match would pass
     // the epipolar test vacuously, so report it rather than scoring the pair.
-    if t.length() < 1e-9 {
+    //
+    // The threshold is relative to the cameras' own translation magnitudes, because
+    // phototourism poses are in arbitrary SfM units: a fixed 1e-9 is meaningless against a
+    // scene whose coordinates happen to be large, and vacuous against one where they are
+    // small. This scales with the reconstruction instead.
+    //
+    // MEASURED on the current 90-pair set: the smallest baseline is 1.2% of its scene's
+    // mean camera-centre spread (sacre_coeur, 0.047 against 4.06), so nothing here is
+    // near-degenerate and this guard does not fire. It exists for the pair that would be.
+    // A tighter gate — rejecting weak-but-usable baselines — would need the scene's depth
+    // range, which this metadata does not carry.
+    let scale = a.pose.translation.length() + b.pose.translation.length();
+    if t.length() <= 1e-6 * scale.max(f64::MIN_POSITIVE) {
         return None;
     }
+    Some((r, t))
+}
+
+/// Ground-truth fundamental matrix mapping image-1 pixels to epipolar lines in image 2,
+/// from the relative pose and the two *scaled* intrinsics.
+///
+/// Sampson error is invariant to F's scale (numerator and denominator both scale with it),
+/// so no normalisation is needed here.
+fn fundamental(r: &Mat3F64, t: &Vec3F64, k1: &Mat3F64, k2: &Mat3F64) -> Mat3F64 {
     // E = [t]x R.
     let skew = Mat3F64::from_cols(
         Vec3F64::new(0.0, t.z, -t.y),
@@ -121,7 +150,7 @@ fn fundamental(a: &Calib, ka: &Mat3F64, b: &Calib, kb: &Mat3F64) -> Option<Mat3F
     // deliberately wrong conventions (factors swapped, images flipped, skew transposed)
     // while reading like a verified invariant, and `--release` compiled it out anyway.
     // The convention is pinned by the benchmark numbers, not by an assert.
-    Some(kb.inverse().transpose() * (skew * r) * ka.inverse())
+    k2.inverse().transpose() * (skew * *r) * k1.inverse()
 }
 
 fn score(
@@ -157,48 +186,6 @@ fn load_scaled(
     Ok((scaled.image, (scaled.scale_x, scaled.scale_y)))
 }
 
-#[derive(Default, Clone, Copy)]
-struct Tally {
-    pairs: usize,
-    matches: usize,
-    inliers: usize,
-    /// Sum of per-pair precisions, for the macro average.
-    pct_sum: f64,
-}
-
-impl Tally {
-    fn add(&mut self, (m, i): (usize, usize)) {
-        self.pairs += 1;
-        self.matches += m;
-        self.inliers += i;
-        if m > 0 {
-            self.pct_sum += 100.0 * i as f64 / m as f64;
-        }
-    }
-
-    /// Pooled ("micro") precision: inliers over matches across the whole band.
-    ///
-    /// Weighted by match volume, so a single high-match pair can dominate a band — and
-    /// the three columns differ severalfold in volume, so it weights them differently
-    /// too. Read it next to [`macro_pct`](Self::macro_pct), never alone.
-    fn pct(&self) -> f32 {
-        if self.matches == 0 {
-            0.0
-        } else {
-            100.0 * self.inliers as f32 / self.matches as f32
-        }
-    }
-
-    /// Mean of the per-pair precisions: every pair counts once.
-    fn macro_pct(&self) -> f32 {
-        if self.pairs == 0 {
-            0.0
-        } else {
-            (self.pct_sum / self.pairs as f64) as f32
-        }
-    }
-}
-
 fn main() -> Result<(), vrt::BoxError> {
     let a: Vec<String> = std::env::args().collect();
     if a.len() < 4 {
@@ -215,7 +202,7 @@ fn main() -> Result<(), vrt::BoxError> {
     let nn_cossim: f32 = arg_or(&a, 5, "nn_cossim", DEFAULT_NN_COSSIM)?;
     // Indices 1-7 match eval_oxford exactly, so one command line works against both.
     let xf_cossim: f32 = arg_or(&a, 7, "xfeat_cossim", DEFAULT_XF_COSSIM)?;
-    let interpolation = parse_interpolation(a.get(8).map(String::as_str).unwrap_or("bilinear"))?;
+    let interpolation = parse_interpolation(a.get(8).map(String::as_str).unwrap_or("lanczos"))?;
 
     let stream = vrt::Stream::new_standalone()?.cuda_stream().clone();
     let mut raco = RaCoAliked::from_engine_file(&a[2], stream.clone())?;
@@ -263,17 +250,20 @@ fn main() -> Result<(), vrt::BoxError> {
         let band = band.to_string();
         let base = root.join(scene).join("set_100");
 
-        let img_dir = base.join("images");
-        let (im1, s1) = load_scaled(&img_dir.join(format!("{i1}.jpg")), interpolation)?;
-        let (im2, s2) = load_scaled(&img_dir.join(format!("{i2}.jpg")), interpolation)?;
         let c1 = Calib::load(&base.join("calib_txt").join(format!("{i1}.txt")))?;
         let c2 = Calib::load(&base.join("calib_txt").join(format!("{i2}.txt")))?;
-        let (k1, k2) = (c1.scaled_k(s1), c2.scaled_k(s2));
-        let Some(fmat) = fundamental(&c1, &k1, &c2, &k2) else {
+        // Poses first: a degenerate pair is rejected before its two JPEGs are decoded and
+        // resized, which is the expensive half of the loop.
+        let Some((rmat, tvec)) = relative_pose(&c1, &c2) else {
             // Coincident centres give a degenerate F; every match would "pass".
             skipped += 1;
             continue;
         };
+
+        let img_dir = base.join("images");
+        let (im1, s1) = load_scaled(&img_dir.join(format!("{i1}.jpg")), interpolation)?;
+        let (im2, s2) = load_scaled(&img_dir.join(format!("{i2}.jpg")), interpolation)?;
+        let fmat = fundamental(&rmat, &tvec, &c1.scaled_k(s1), &c2.scaled_k(s2));
 
         let (dl, dr) = (im1.to_cuda(&stream)?, im2.to_cuda(&stream)?);
         raco.submit(&dl, &mut l)?;
@@ -303,8 +293,10 @@ fn main() -> Result<(), vrt::BoxError> {
         }
     }
 
+    // 23 = the `{:>8} {:>6} {:>6.1}%` group each column prints below; the header must be
+    // measured against that, not eyeballed, or every column heading sits one off.
     println!(
-        "\n{:<8} {:>5} {:>22} {:>22} {:>22}",
+        "\n{:<8} {:>5} {:>23} {:>23} {:>23}",
         "covis", "pairs", "LightGlue+ m/inl/%", "RaCo-ALIKED NN m/inl/%", "XFeat NN m/inl/%"
     );
     let mut tot = (Tally::default(), Tally::default(), Tally::default());
@@ -323,12 +315,9 @@ fn main() -> Result<(), vrt::BoxError> {
             x.inliers,
             x.pct()
         );
-        for (dst, src) in [(&mut tot.0, lg), (&mut tot.1, nn), (&mut tot.2, x)] {
-            dst.pairs += src.pairs;
-            dst.matches += src.matches;
-            dst.inliers += src.inliers;
-            dst.pct_sum += src.pct_sum;
-        }
+        tot.0.add_tally(lg);
+        tot.1.add_tally(nn);
+        tot.2.add_tally(x);
     }
     println!(
         "{:<8} {:>5} {:>8} {:>6} {:>6.1}% {:>8} {:>6} {:>6.1}% {:>8} {:>6} {:>6.1}%",
@@ -348,7 +337,7 @@ fn main() -> Result<(), vrt::BoxError> {
     // vote. Reporting only the first lets one dense pair speak for a whole band.
     println!(
         "\nmacro-average precision (mean over pairs, each weighted equally):\n\
-         {:<8} {:>5} {:>22.1} {:>22.1} {:>22.1}",
+         {:<8} {:>5} {:>23.1} {:>23.1} {:>23.1}",
         "all",
         tot.0.pairs,
         tot.0.macro_pct(),
@@ -357,7 +346,7 @@ fn main() -> Result<(), vrt::BoxError> {
     );
     for (band, (lg, nn, x)) in &bands {
         println!(
-            "{:<8} {:>5} {:>22.1} {:>22.1} {:>22.1}",
+            "{:<8} {:>5} {:>23.1} {:>23.1} {:>23.1}",
             band,
             lg.pairs,
             lg.macro_pct(),

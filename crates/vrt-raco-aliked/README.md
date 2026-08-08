@@ -111,9 +111,9 @@ in `vrt-lightglue`. At a matched k3072 budget for every column:
 
 | | Oxford inliers | Oxford macro | IMC inliers | IMC macro |
 |---|---|---|---|---|
-| RaCo-ALIKED + LightGlue+ | **12025** | **70.2%** | **65283** | **87.9%** |
-| RaCo-ALIKED + mutual-NN | 4695 | 23.7% | 55102 | 55.4% |
-| XFeat + mutual-NN | 3885 | 20.3% | 37062 | 40.2% |
+| RaCo-ALIKED + LightGlue+ | **12412** | **71.0%** | **66946** | **88.5%** |
+| RaCo-ALIKED + mutual-NN | 4821 | 24.3% | 56509 | 56.1% |
+| XFeat + mutual-NN | 3835 | 20.1% | 37812 | 40.6% |
 
 RaCo's rotation robustness is the reason to reach for this crate over `vrt-xfeat`: XFeat
 scores **0.0%** on every Oxford pair past ~79° of in-plane rotation — `bark/3` (+150°),
