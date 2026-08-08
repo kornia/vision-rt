@@ -32,7 +32,7 @@ use kornia_algebra::{Mat3F64, Vec3F64};
 
 #[path = "common/mod.rs"]
 mod common;
-use common::{mat3_from_row_major, parse_interpolation, read_floats, resize_to_fit};
+use common::{mat3_from_row_major, parse_interpolation, read_floats, resize_matrix, resize_to_fit};
 
 /// Below this, treat the rescaled ground truth as broken rather than the matcher.
 const MIN_CORRELATION: f64 = 0.3;
@@ -106,21 +106,17 @@ fn read_netpbm_rgb8(path: &Path) -> Result<Image<u8, 3>, vrt::BoxError> {
     )?)
 }
 
-/// Image dimensions as (width, height).
-type Dims = (usize, usize);
-
-/// Convert one frame, returning original and resized dimensions.
+/// Convert one frame, returning its original size and the uniform scale applied.
 fn convert(
     src: &Path,
     dst: &Path,
     max_side: usize,
     interpolation: InterpolationMode,
-) -> Result<(Dims, Dims), vrt::BoxError> {
+) -> Result<((usize, usize), f64), vrt::BoxError> {
     let img = read_netpbm_rgb8(src)?;
-    let (out, _, _) = resize_to_fit(&img, max_side, interpolation)?;
-    let dims = (out.cols(), out.rows());
-    write_image_png_rgb8(dst, &out)?;
-    Ok(((img.cols(), img.rows()), dims))
+    let scaled = resize_to_fit(&img, max_side, interpolation)?;
+    write_image_png_rgb8(dst, &scaled.image)?;
+    Ok(((img.cols(), img.rows()), scaled.scale))
 }
 
 fn luma(img: &Image<u8, 3>, x: usize, y: usize) -> f64 {
@@ -213,16 +209,19 @@ fn main() -> Result<(), vrt::BoxError> {
                 );
             }
         }
-        let Some(&(orig1, new1)) = sizes.get(&1) else {
+        let Some(&(orig1, scale1)) = sizes.get(&1) else {
             println!("{seq}: no img1, skipped");
             continue;
         };
-        println!("{seq}: {} images, {orig1:?} -> {new1:?}", sizes.len());
+        println!(
+            "{seq}: {} images, {orig1:?} scaled by {scale1:.4}",
+            sizes.len()
+        );
 
         let img1 = read_image_any_rgb8(od.join("img1.png"))?;
         for i in 2..=6 {
             let hp = sd.join(format!("H1to{i}p"));
-            let Some(&(orig_i, new_i)) = sizes.get(&i) else {
+            let Some(&(_orig_i, scale_i)) = sizes.get(&i) else {
                 continue;
             };
             if !hp.exists() {
@@ -234,16 +233,8 @@ fn main() -> Result<(), vrt::BoxError> {
             }
             let h = mat3_from_row_major(&v[..9]);
 
-            let s1 = Mat3F64::from_diagonal(Vec3F64::new(
-                new1.0 as f64 / orig1.0 as f64,
-                new1.1 as f64 / orig1.1 as f64,
-                1.0,
-            ));
-            let s2 = Mat3F64::from_diagonal(Vec3F64::new(
-                new_i.0 as f64 / orig_i.0 as f64,
-                new_i.1 as f64 / orig_i.1 as f64,
-                1.0,
-            ));
+            // Uniform scale plus the half-pixel offset kornia's resize actually applies.
+            let (s1, s2) = (resize_matrix(scale1), resize_matrix(scale_i));
             if s1.determinant().abs() < 1e-12 {
                 return Err("degenerate image scale".into());
             }
@@ -268,34 +259,44 @@ fn main() -> Result<(), vrt::BoxError> {
             )?;
 
             let img_i = read_image_any_rgb8(od.join(format!("img{i}.png")))?;
+            // A pair whose ground truth fails the check must not reach the manifest: an
+            // operator who scrolls past the error would otherwise run eval_oxford against
+            // homographies this tool just declared unusable and read the low inlier rate
+            // as a matcher result.
             match photometric_check(&img1, &img_i, &hs) {
                 Some((overlap, corr)) if corr >= MIN_CORRELATION => {
-                    println!("  img{i}: overlap {overlap:5.1}%  corr {corr:+.3}")
+                    println!("  img{i}: overlap {overlap:5.1}%  corr {corr:+.3}");
+                    manifest.push(format!("{seq} img1.png img{i}.png {name} {scale_i:.10}"));
                 }
                 Some((overlap, corr)) => {
                     suspect += 1;
-                    println!("  img{i}: overlap {overlap:5.1}%  corr {corr:+.3}  <-- SUSPECT");
+                    println!(
+                        "  img{i}: overlap {overlap:5.1}%  corr {corr:+.3}  <-- SUSPECT, excluded"
+                    );
                 }
                 None => {
                     suspect += 1;
-                    println!("  img{i}: singular homography  <-- SUSPECT");
+                    println!("  img{i}: singular homography  <-- SUSPECT, excluded");
                 }
             }
-            manifest.push(format!("{seq} img1.png img{i}.png {name}"));
         }
     }
 
+    // Refuse to leave a manifest behind at all if any pair failed: a partial manifest
+    // silently shrinks the benchmark, and eval_oxford has no way to notice.
+    if suspect > 0 {
+        let _ = std::fs::remove_file(out_root.join("manifest.txt"));
+        return Err(format!(
+            "{suspect} pairs failed the photometric check; ground truth is not usable \
+             and no manifest was written"
+        )
+        .into());
+    }
     std::fs::write(out_root.join("manifest.txt"), manifest.join("\n") + "\n")?;
     println!(
         "\n{} evaluation pairs -> {}/manifest.txt",
         manifest.len(),
         out_root.display()
     );
-    if suspect > 0 {
-        return Err(format!(
-            "{suspect} pairs failed the photometric check; ground truth is not usable"
-        )
-        .into());
-    }
     Ok(())
 }

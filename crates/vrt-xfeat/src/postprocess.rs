@@ -55,6 +55,22 @@ pub enum XFeatError {
         got: usize,
         dim: usize,
     },
+    #[error(
+        "{which} holds {buf_dim}-D descriptors but this matcher was compiled for \
+         {kernel_dim}-D; the kernel would stride the buffer wrongly and return \
+         plausible-looking nonsense"
+    )]
+    DescriptorWidth {
+        which: &'static str,
+        buf_dim: usize,
+        kernel_dim: usize,
+    },
+    #[error("{which} holds {count} descriptors but the match output has capacity {cap}")]
+    MatchCapacity {
+        which: &'static str,
+        count: usize,
+        cap: usize,
+    },
 }
 
 // ── Kernel source ─────────────────────────────────────────────────────────────

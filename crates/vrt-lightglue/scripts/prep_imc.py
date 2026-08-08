@@ -17,13 +17,14 @@ Writes, under each scene's `set_100/`:
 and at the dataset root:
   imc_manifest.txt        `scene band image1 image2` per line
 
-Usage: python3 prep_imc.py [phototourism_dir] [pairs_per_band]
+Usage: python3 prep_imc.py [phototourism_dir] [pairs_per_band] [seed]
 Requires: h5py, numpy (metadata only).
 """
 
 from __future__ import annotations
 
 import pathlib
+import random
 import sys
 
 import h5py
@@ -33,6 +34,7 @@ ROOT = pathlib.Path(
     sys.argv[1] if len(sys.argv) > 1 else "/mnt/data/vision-rt/models/datasets/imc2021/phototourism"
 )
 PER_BAND = int(sys.argv[2]) if len(sys.argv) > 2 else 6
+SEED = int(sys.argv[3]) if len(sys.argv) > 3 else 0
 BANDS = ["0.1", "0.2", "0.3", "0.4", "0.5"]
 
 
@@ -68,8 +70,13 @@ def main() -> None:
 
         wanted = set()
         for band in BANDS:
-            # sorted() keeps the selection deterministic across runs and machines
-            picked = sorted(by_band[band])[:PER_BAND]
+            # Sample rather than take a prefix. Keys are "<img1>-<img2>", so a sorted
+            # prefix clusters on a handful of left images: measured over the real dataset
+            # it touches 38 of 274 images, with reichstag's 30 pairs drawn from 10 left
+            # images. A seeded sample over the same bands and the same budget reaches 135
+            # — the determinism the prefix was there for costs nothing to keep.
+            pool = sorted(by_band[band])
+            picked = sorted(random.Random(SEED).sample(pool, min(PER_BAND, len(pool))))
             for key in picked:
                 a, b = key.split("-")
                 manifest.append(f"{scene} {band} {a} {b}")

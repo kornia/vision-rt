@@ -7,8 +7,10 @@
 //! (rotation + zoom) and `graf` (viewpoint), scoring each match against the sequence's
 //! ground-truth homography.
 //!
-//! A match `(i, j)` is an **inlier** iff `H · left[i]` lands within `INLIER_PX` of
-//! `right[j]`, the standard protocol for this benchmark. Reported per pair:
+//! A match `(i, j)` is an **inlier** iff `H · left[i]` lands within `inlier_px` of
+//! `right[j]`, the standard protocol for this benchmark. The threshold is expressed at
+//! **original image resolution** and converted per pair using the scale `prep_oxford`
+//! recorded, so every sequence is scored under one common criterion. Reported per pair:
 //!
 //! * **matches** — how many correspondences survived the matcher's own filtering
 //! * **inlier %** — of those, how many are geometrically correct
@@ -16,9 +18,10 @@
 //!
 //! Usage:
 //!   cargo run --release -p vrt-lightglue --example eval_oxford -- \
-//!       <dataset_dir> <raco.engine> <lightglue.engine> [inlier_px]
+//!       <dataset_dir> <raco.engine> <lightglue.engine> \
+//!       [inlier_px] [nn_cossim] [xfeat.engine] [xfeat_cossim]
 //!
-//! `dataset_dir` holds `manifest.txt` with `seq left right homography` per line; produce
+//! `dataset_dir` holds `manifest.txt` with `seq left right homography scale` per line; produce
 //! it with `scripts/get_oxford.sh` followed by `examples/prep_oxford`, which also
 //! photometrically verifies the rescaled ground truth before you trust any number here.
 
@@ -28,16 +31,20 @@ use kornia_algebra::{Mat3F64, Vec3F64};
 use kornia_io::functional::read_image_any_rgb8;
 use vrt_lightglue::LightGlue;
 use vrt_raco_aliked::{RaCoAliked, DESC_DIM};
-use vrt_xfeat::Matcher;
+use vrt_xfeat::{Descriptors, Matcher};
 
 #[path = "common/mod.rs"]
 mod common;
-use common::{mat3_from_row_major, read_floats, XFeatBaseline};
+use common::{arg_or, mat3_from_row_major, read_floats, XFeatBaseline};
 
-/// Mutual-NN similarity gate. Tuned for XFeat's 64-D descriptors; ALIKED's 128-D live on
-/// a different scale, so this is a CLI argument — a gate set for the wrong descriptor
-/// family silently returns zero matches rather than erroring.
-const DEFAULT_MIN_COSSIM: f32 = 0.82;
+/// Mutual-NN similarity gates, one per descriptor family.
+///
+/// The gate is descriptor-specific and unforgiving: XFeat's tuned 0.82 applied to ALIKED's
+/// 128-D descriptors returns **zero** matches on 10 of these 15 pairs. Both default to
+/// ungated so the two mutual-NN columns measure the descriptors rather than a threshold
+/// picked for one of them, and both are separately overridable.
+const DEFAULT_NN_COSSIM: f32 = 0.0;
+const DEFAULT_XF_COSSIM: f32 = 0.0;
 
 fn warp(h: &Mat3F64, x: f32, y: f32) -> (f32, f32) {
     let p = *h * Vec3F64::new(x as f64, y as f64, 1.0);
@@ -76,15 +83,16 @@ fn score(
 fn main() -> Result<(), vrt::BoxError> {
     let a: Vec<String> = std::env::args().collect();
     if a.len() < 4 {
-        eprintln!("Usage: eval_oxford <dataset_dir> <raco.engine> <lightglue.engine> [inlier_px] [min_cossim] [xfeat.engine]");
+        eprintln!(
+            "Usage: eval_oxford <dataset_dir> <raco.engine> <lightglue.engine> \
+             [inlier_px] [nn_cossim] [xfeat.engine] [xfeat_cossim]"
+        );
         std::process::exit(1);
     }
     let root = Path::new(&a[1]);
-    let thresh: f32 = a.get(4).and_then(|s| s.parse().ok()).unwrap_or(3.0);
-    let min_cossim: f32 = a
-        .get(5)
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(DEFAULT_MIN_COSSIM);
+    let thresh: f32 = arg_or(&a, 4, "inlier_px", 3.0)?;
+    let nn_cossim: f32 = arg_or(&a, 5, "nn_cossim", DEFAULT_NN_COSSIM)?;
+    let xf_cossim: f32 = arg_or(&a, 7, "xfeat_cossim", DEFAULT_XF_COSSIM)?;
 
     let stream = vrt::Stream::new_standalone()?.cuda_stream().clone();
     let mut raco = RaCoAliked::from_engine_file(&a[2], stream.clone())?;
@@ -92,20 +100,27 @@ fn main() -> Result<(), vrt::BoxError> {
     let mnn = Matcher::with_dim(stream.clone(), DESC_DIM)?;
     // XFeat + its native 64-D mutual-NN, as the baseline the crate READMEs compare to.
     // Optional so the eval still runs without an XFeat engine on hand.
+    let k = raco.num_keypoints();
+    // Same keypoint budget as RaCo, so the columns are comparable.
     let mut xf = a
         .get(6)
-        .map(|p| XFeatBaseline::load(p, &stream))
+        .map(|p| XFeatBaseline::load(p, &stream, k))
         .transpose()?;
 
-    let k = raco.num_keypoints();
     let (mut l, mut r) = (raco.alloc_result()?, raco.alloc_result()?);
     let mut lg_out = glue.alloc_result()?;
     let mut mnn_out = mnn.alloc_result(k)?;
 
     println!(
-        "Oxford/VGG affine — RaCo k{k}, LightGlue k{}, mutual-NN {DESC_DIM}-D (cossim>={min_cossim}), inlier <= {thresh}px",
-        glue.num_keypoints()
+        "Oxford/VGG affine — RaCo k{k}, LightGlue k{}, {DESC_DIM}-D mutual-NN \
+         (cossim>={nn_cossim}), XFeat {}, 64-D mutual-NN (cossim>={xf_cossim})",
+        glue.num_keypoints(),
+        match &xf {
+            Some(x) => format!("k{}", x.capacity()),
+            None => "absent — column reports 0".to_string(),
+        }
     );
+    println!("inlier <= {thresh}px measured at ORIGINAL image resolution");
     println!(
         "{:<14} {:>24} {:>24} {:>24}",
         "", "LightGlue+ m/inl/%", "RaCo mutual-NN m/inl/%", "XFeat mutual-NN m/inl/%"
@@ -116,6 +131,14 @@ fn main() -> Result<(), vrt::BoxError> {
     for line in manifest.lines().filter(|l| !l.trim().is_empty()) {
         let f: Vec<&str> = line.split_whitespace().collect();
         let (seq, left_n, right_n, hf) = (f[0], f[1], f[2], f[3]);
+        // prep_oxford records the uniform scale it applied to the right image. Scoring in
+        // the resized frame with a fixed pixel threshold would make the criterion 11%
+        // looser on boat than on bark; converting it here keeps one common criterion.
+        let scale_r: f32 = f
+            .get(4)
+            .ok_or("manifest is missing the scale column — regenerate it with prep_oxford")?
+            .parse()?;
+        let thresh_resized = thresh * scale_r;
         let dir = root.join(seq);
 
         let hv = read_floats(&dir.join(hf))?;
@@ -136,26 +159,24 @@ fn main() -> Result<(), vrt::BoxError> {
             x.submit(&left, &right)?;
         }
         mnn.submit(
-            l.descs_slice(),
-            k,
-            r.descs_slice(),
-            k,
-            min_cossim,
+            Descriptors::new(l.descs_slice(), k, DESC_DIM),
+            Descriptors::new(r.descs_slice(), k, DESC_DIM),
+            nn_cossim,
             &mut mnn_out,
         )?;
         stream.synchronize()?;
 
         let (lk, rk) = (l.keypoints_host()?, r.keypoints_host()?);
-        let (lm, li, lp) = score(&lg_out.pairs(0.0)?, &lk, &rk, &h, thresh);
-        let (mm, mi, mp) = score(&mnn_out.pairs(), &lk, &rk, &h, thresh);
+        let (lm, li, lp) = score(&lg_out.pairs(0.0)?, &lk, &rk, &h, thresh_resized);
+        let (mm, mi, mp) = score(&mnn_out.pairs(), &lk, &rk, &h, thresh_resized);
         lg_tot += li;
         mnn_tot += mi;
 
         // XFeat on the same pair, its own keypoints and its own 64-D matcher.
         let (xm, xi, xp) = match &mut xf {
             Some(x) => {
-                let (pairs, xlk, xrk) = x.finish(&stream, min_cossim)?;
-                score(&pairs, &xlk, &xrk, &h, thresh)
+                let (pairs, xlk, xrk) = x.finish(&stream, xf_cossim)?;
+                score(&pairs, &xlk, &xrk, &h, thresh_resized)
             }
             None => (0, 0, 0.0),
         };

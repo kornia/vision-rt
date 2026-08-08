@@ -39,23 +39,27 @@ use kornia_imgproc::interpolation::InterpolationMode;
 use kornia_io::functional::read_image_any_rgb8;
 use vrt_lightglue::LightGlue;
 use vrt_raco_aliked::{RaCoAliked, DESC_DIM};
-use vrt_xfeat::Matcher;
+use vrt_xfeat::{Descriptors, Matcher};
 
-/// Mutual-NN similarity gate. Tuned for XFeat's 64-D descriptors; ALIKED's 128-D live on
-/// a different scale, so this is a CLI argument — a gate set for the wrong descriptor
-/// family silently returns zero matches rather than erroring.
-const DEFAULT_MIN_COSSIM: f32 = 0.0;
+/// Mutual-NN similarity gates, one per descriptor family. The gate is descriptor-specific
+/// and unforgiving, so the two families get separate knobs rather than sharing one that is
+/// necessarily wrong for at least one of them. Both default to ungated.
+const DEFAULT_NN_COSSIM: f32 = 0.0;
+const DEFAULT_XF_COSSIM: f32 = 0.0;
 
 /// Long side the images are resized to. The published engines' shape profile tops out at
 /// 640, and RaCo needs both sides to be multiples of 32.
 const MAX_SIDE: usize = 640;
 
-use kornia_3d::pose::{essential_from_fundamental, sampson_distance, Pose3d};
+use kornia_3d::pose::{sampson_distance, Pose3d};
 use kornia_algebra::{Mat3F64, Vec2F64, Vec3F64};
 
 #[path = "common/mod.rs"]
 mod common;
-use common::{mat3_from_row_major, parse_interpolation, read_floats, resize_to_fit, XFeatBaseline};
+use common::{
+    arg_or, mat3_from_row_major, parse_interpolation, read_floats, resize_matrix, resize_to_fit,
+    XFeatBaseline,
+};
 
 /// Camera calibration as written by `scripts/prep_imc.py`: K (9), R (9), T (3).
 ///
@@ -84,8 +88,8 @@ impl Calib {
 
     /// Resizing the image rescales the intrinsics with it. Skipping this is silent: the
     /// epipolar geometry stays self-consistent and simply describes the wrong camera.
-    fn scaled_k(&self, sx: f64, sy: f64) -> Mat3F64 {
-        Mat3F64::from_diagonal(Vec3F64::new(sx, sy, 1.0)) * self.k
+    fn scaled_k(&self, scale: f64) -> Mat3F64 {
+        resize_matrix(scale) * self.k
     }
 }
 
@@ -106,18 +110,14 @@ fn fundamental(a: &Calib, ka: &Mat3F64, b: &Calib, kb: &Mat3F64) -> Option<Mat3F
         Vec3F64::new(-t.z, 0.0, t.x),
         Vec3F64::new(t.y, -t.x, 0.0),
     );
-    let e = skew * r;
     // Inverse of kornia's `essential_from_fundamental` (E = K2^T F K1).
-    let f = kb.inverse().transpose() * e * ka.inverse();
-    debug_assert!(
-        essential_from_fundamental(&f, ka, kb)
-            .to_cols_array()
-            .iter()
-            .zip(e.to_cols_array())
-            .all(|(a, b)| (a - b).abs() < 1e-6),
-        "F must round-trip through kornia's E<->F conversion"
-    );
-    Some(f)
+    //
+    // There was a `debug_assert` here round-tripping F back through that function. It was
+    // an algebraic tautology — it reduces to K^T K^-T = I — so it passed for three
+    // deliberately wrong conventions (factors swapped, images flipped, skew transposed)
+    // while reading like a verified invariant, and `--release` compiled it out anyway.
+    // The convention is pinned by the benchmark numbers, not by an assert.
+    Some(kb.inverse().transpose() * (skew * r) * ka.inverse())
 }
 
 fn score(
@@ -147,9 +147,10 @@ fn score(
 fn load_scaled(
     path: &Path,
     interpolation: InterpolationMode,
-) -> Result<(Image<u8, 3>, f64, f64), vrt::BoxError> {
+) -> Result<(Image<u8, 3>, f64), vrt::BoxError> {
     let src = read_image_any_rgb8(path)?;
-    resize_to_fit(src.as_ref(), MAX_SIDE, interpolation)
+    let scaled = resize_to_fit(src.as_ref(), MAX_SIDE, interpolation)?;
+    Ok((scaled.image, scaled.scale))
 }
 
 #[derive(Default, Clone, Copy)]
@@ -179,36 +180,46 @@ fn main() -> Result<(), vrt::BoxError> {
     if a.len() < 4 {
         eprintln!(
             "Usage: eval_imc <phototourism_dir> <raco.engine> <lightglue.engine> \
-             [inlier_px] [min_cossim] [xfeat.engine] [nearest|bilinear|bicubic|lanczos]"
+             [inlier_px] [nn_cossim] [xfeat.engine] [nearest|bilinear|bicubic|lanczos] \
+             [xfeat_cossim]"
         );
         std::process::exit(1);
     }
     let root = Path::new(&a[1]);
-    let thresh: f64 = a.get(4).and_then(|s| s.parse().ok()).unwrap_or(3.0);
-    let min_cossim: f32 = a
-        .get(5)
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(DEFAULT_MIN_COSSIM);
+    // Default matches the headline table in the READMEs; 3 px is the sensitivity check.
+    let thresh: f64 = arg_or(&a, 4, "inlier_px", 1.0)?;
+    let nn_cossim: f32 = arg_or(&a, 5, "nn_cossim", DEFAULT_NN_COSSIM)?;
     let interpolation = parse_interpolation(a.get(7).map(String::as_str).unwrap_or("bilinear"))?;
+    let xf_cossim: f32 = arg_or(&a, 8, "xfeat_cossim", DEFAULT_XF_COSSIM)?;
 
     let stream = vrt::Stream::new_standalone()?.cuda_stream().clone();
     let mut raco = RaCoAliked::from_engine_file(&a[2], stream.clone())?;
     let mut glue = LightGlue::from_engine_file(&a[3], stream.clone())?;
     let mnn = Matcher::with_dim(stream.clone(), DESC_DIM)?;
+    let k = raco.num_keypoints();
+    // Same keypoint budget as RaCo, so the columns are comparable.
     let mut xf = a
         .get(6)
-        .map(|p| XFeatBaseline::load(p, &stream))
+        .map(|p| XFeatBaseline::load(p, &stream, k))
         .transpose()?;
 
-    let k = raco.num_keypoints();
     let (mut l, mut r) = (raco.alloc_result()?, raco.alloc_result()?);
     let mut lg_out = glue.alloc_result()?;
     let mut mnn_out = mnn.alloc_result(k)?;
 
     println!(
-        "IMC2021 phototourism val — RaCo k{k}, LightGlue k{}, mutual-NN {DESC_DIM}-D \
-         (cossim>={min_cossim}), Sampson <= {thresh}px, long side {MAX_SIDE}",
-        glue.num_keypoints()
+        "IMC2021 phototourism val — RaCo k{k}, LightGlue k{}, {DESC_DIM}-D mutual-NN \
+         (cossim>={nn_cossim}), XFeat {}, 64-D mutual-NN (cossim>={xf_cossim})",
+        glue.num_keypoints(),
+        match &xf {
+            Some(x) => format!("k{}", x.capacity()),
+            None => "absent — column reports 0".to_string(),
+        }
+    );
+    println!(
+        "Sampson <= {thresh}px, measured in the resized frame (long side {MAX_SIDE}). \
+         Unlike Oxford this is not converted to original resolution: Sampson mixes both \
+         images' frames, so no single scale converts it."
     );
 
     let manifest = std::fs::read_to_string(root.join("imc_manifest.txt"))?;
@@ -221,11 +232,11 @@ fn main() -> Result<(), vrt::BoxError> {
         let base = root.join(scene).join("set_100");
 
         let img_dir = base.join("images");
-        let (im1, sx1, sy1) = load_scaled(&img_dir.join(format!("{i1}.jpg")), interpolation)?;
-        let (im2, sx2, sy2) = load_scaled(&img_dir.join(format!("{i2}.jpg")), interpolation)?;
+        let (im1, s1) = load_scaled(&img_dir.join(format!("{i1}.jpg")), interpolation)?;
+        let (im2, s2) = load_scaled(&img_dir.join(format!("{i2}.jpg")), interpolation)?;
         let c1 = Calib::load(&base.join("calib_txt").join(format!("{i1}.txt")))?;
         let c2 = Calib::load(&base.join("calib_txt").join(format!("{i2}.txt")))?;
-        let (k1, k2) = (c1.scaled_k(sx1, sy1), c2.scaled_k(sx2, sy2));
+        let (k1, k2) = (c1.scaled_k(s1), c2.scaled_k(s2));
         let Some(fmat) = fundamental(&c1, &k1, &c2, &k2) else {
             // Coincident centres give a degenerate F; every match would "pass".
             skipped += 1;
@@ -237,11 +248,9 @@ fn main() -> Result<(), vrt::BoxError> {
         raco.submit(&dr, &mut r)?;
         glue.submit(&l, &r, &mut lg_out)?;
         mnn.submit(
-            l.descs_slice(),
-            k,
-            r.descs_slice(),
-            k,
-            min_cossim,
+            Descriptors::new(l.descs_slice(), k, DESC_DIM),
+            Descriptors::new(r.descs_slice(), k, DESC_DIM),
+            nn_cossim,
             &mut mnn_out,
         )?;
         // XFeat depends only on the uploaded images, so enqueue it here rather than after
@@ -257,7 +266,7 @@ fn main() -> Result<(), vrt::BoxError> {
         e.1.add(score(&mnn_out.pairs(), &lk, &rk, &fmat, thresh));
 
         if let Some(x) = &mut xf {
-            let (pairs, xlk, xrk) = x.finish(&stream, min_cossim)?;
+            let (pairs, xlk, xrk) = x.finish(&stream, xf_cossim)?;
             e.2.add(score(&pairs, &xlk, &xrk, &fmat, thresh));
         }
     }

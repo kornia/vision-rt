@@ -16,7 +16,7 @@ use std::time::Instant;
 
 use kornia_io::functional::read_image_any_rgb8;
 use vrt_raco_aliked::{RaCoAliked, DESC_DIM};
-use vrt_xfeat::Matcher;
+use vrt_xfeat::{Descriptors, Matcher};
 
 fn main() -> Result<(), vrt::BoxError> {
     let a: Vec<String> = std::env::args().collect();
@@ -24,7 +24,7 @@ fn main() -> Result<(), vrt::BoxError> {
         eprintln!("Usage: raco_mutualnn <raco.engine> <left.png> <right.png> [min_cossim] [iters]");
         std::process::exit(1);
     }
-    let min_cossim: f32 = a.get(4).and_then(|s| s.parse().ok()).unwrap_or(0.82);
+    let min_cossim: f32 = a.get(4).and_then(|s| s.parse().ok()).unwrap_or(0.0);
     let iters: usize = a.get(5).and_then(|s| s.parse().ok()).unwrap_or(20);
 
     // One shared stream: extraction and matching are a single continuous queue, and one
@@ -43,7 +43,12 @@ fn main() -> Result<(), vrt::BoxError> {
     let mut once = |l: &mut _, r: &mut _, m: &mut _| -> Result<(), vrt::BoxError> {
         raco.submit(&left, l)?;
         raco.submit(&right, r)?;
-        matcher.submit(l.descs_slice(), k, r.descs_slice(), k, min_cossim, m)?;
+        matcher.submit(
+            Descriptors::new(l.descs_slice(), k, DESC_DIM),
+            Descriptors::new(r.descs_slice(), k, DESC_DIM),
+            min_cossim,
+            m,
+        )?;
         stream.synchronize()?;
         Ok(())
     };

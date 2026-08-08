@@ -99,24 +99,23 @@ known ground-truth affine, within 2 px.
 | `vrt-raco-aliked` + `vrt-lightglue`, k512 | 98.2 ms | 7.9 ms | **106.0 ms** | 100.0% / 99.1% / 98.0% |
 | …k3072 (extractor default) | **57.0 ms** | 126.5 ms | 183.5 ms | 99.8% / 94.3% / 92.8% |
 
-**XFeat stays the right default** — ~14× faster and, on translation, as accurate. RaCo buys
-rotation robustness, and that holds on **real** data at large angles: on the Oxford/VGG
-affine benchmark (ground-truth homographies, 3 px threshold), decomposing the homographies
-gives in-plane rotations of **150°**, **120°** and **80°** for `bark/3`, `bark/4` and
-`boat/4`. XFeat + mutual-NN scores **0.0%** on all three — and on every pair beyond ~79°,
-while staying nonzero below it — where RaCo-ALIKED + LightGlue+ holds
-**88.8 / 90.1 / 94.2%**. Giving XFeat the same keypoint budget does not rescue it.
+**XFeat stays the right default** for throughput — ~14x faster and, on translation, as
+accurate. What it does not survive is rotation. On the Oxford/VGG affine benchmark
+(ground-truth homographies, 3 px at original resolution, all methods at k3072), the
+in-plane rotations recovered by polar decomposition of the homographies are **+150°**,
+**-120°** and **-80°** for `bark/3`, `bark/4` and `boat/4`; XFeat + mutual-NN scores
+**0.0%** on all three — and on every pair past ~79°, while staying nonzero below it —
+where RaCo-ALIKED + LightGlue+ holds **82.8 / 89.0 / 90.0%**.
 
-The matcher matters as much as the features: on *identical* RaCo keypoints and ALIKED
-descriptors, mutual-NN finds about as many true correspondences as LightGlue (5073 vs
-5166) but buries them in outliers — LightGlue is buying precision, not recall.
+At an equal keypoint budget LightGlue+ also returns the most correct correspondences
+outright (4928, against 4695 for mutual-NN on the same descriptors and 3882 for XFeat), so
+the matcher buys precision without giving up recall.
 
 Difficulty is what separates them. On **IMC 2021 phototourism** (90 pairs, real 3D scenes,
-ground-truth poses, scored by Sampson error) precision across co-visibility bands from 0.5
-down to 0.1 goes **91.5% → 88.1%** for LightGlue+, **66.1% → 37.8%** for mutual-NN on the
-same descriptors, and **51.5% → 17.1%** for XFeat. The 90.3% overall sits inside the
-0.686–0.945 matching score the IMC2021 leaderboard reports for its own ALIKED+LightGlue
-entry. Both benchmarks ship as examples in `vrt-lightglue`.
+ground-truth poses, Sampson error <= 1 px) precision across co-visibility bands from 0.5
+down to 0.1 goes **92.1% -> 86.0%** for LightGlue+, **72.2% -> 40.1%** for mutual-NN on the
+same descriptors, and **58.5% -> 21.8%** for XFeat. Both benchmarks ship as examples in
+`vrt-lightglue`.
 
 `K` picks a structurally different graph — at K≥3072 RaCo's ranker is bypassed, halving
 extraction, while the O(K²) matcher grows. Extraction and matching therefore want opposite

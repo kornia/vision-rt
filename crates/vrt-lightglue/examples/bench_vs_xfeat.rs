@@ -35,7 +35,7 @@ use kornia_io::functional::read_image_any_rgb8;
 use vrt::CudaStream;
 use vrt_lightglue::LightGlue;
 use vrt_raco_aliked::RaCoAliked;
-use vrt_xfeat::{Matcher, XFeat, XFeatParams};
+use vrt_xfeat::{Descriptors, Matcher, XFeat, XFeatParams};
 
 const XFEAT_THRESHOLD: f32 = 0.05;
 const MIN_COSSIM: f32 = 0.82;
@@ -292,7 +292,12 @@ fn bench_xfeat(
         xf.submit(left, &mut l)?;
         xf.submit(right, &mut r)?;
         stream.synchronize()?;
-        matcher.submit(&l.descs, l.count(), &r.descs, r.count(), MIN_COSSIM, &mut m)?;
+        matcher.submit(
+            Descriptors::new(&l.descs, l.count(), matcher.dim()),
+            Descriptors::new(&r.descs, r.count(), matcher.dim()),
+            MIN_COSSIM,
+            &mut m,
+        )?;
         stream.synchronize()?;
     }
 
@@ -305,7 +310,12 @@ fn bench_xfeat(
         ext.push(t.elapsed().as_secs_f64() * 1e3);
 
         let t = Instant::now();
-        matcher.submit(&l.descs, l.count(), &r.descs, r.count(), MIN_COSSIM, &mut m)?;
+        matcher.submit(
+            Descriptors::new(&l.descs, l.count(), matcher.dim()),
+            Descriptors::new(&r.descs, r.count(), matcher.dim()),
+            MIN_COSSIM,
+            &mut m,
+        )?;
         stream.synchronize()?;
         mat.push(t.elapsed().as_secs_f64() * 1e3);
 
@@ -313,7 +323,12 @@ fn bench_xfeat(
         xf.submit(left, &mut l)?;
         xf.submit(right, &mut r)?;
         stream.synchronize()?;
-        matcher.submit(&l.descs, l.count(), &r.descs, r.count(), MIN_COSSIM, &mut m)?;
+        matcher.submit(
+            Descriptors::new(&l.descs, l.count(), matcher.dim()),
+            Descriptors::new(&r.descs, r.count(), matcher.dim()),
+            MIN_COSSIM,
+            &mut m,
+        )?;
         stream.synchronize()?;
         tot.push(t.elapsed().as_secs_f64() * 1e3);
     }

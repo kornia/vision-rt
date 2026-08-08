@@ -72,7 +72,11 @@ extern "C" __global__ void xfeat_match_argmax(
         int jt = min(MATCH_TILE, Nr - j0);
 
         /* Cooperative, coalesced tile load (rows of R are contiguous). */
-        for (int idx = threadIdx.x; idx < jt * DESC_D; idx += MATCH_BLOCK) {
+        /* `idx` is unsigned deliberately. Signed division by a non-power-of-two must
+           emit the round-toward-zero correction (8x SHF.R.S32.HI in the SASS vs 1),
+           costing ~18 extra instructions per 4 elements in this loop; unsigned also
+           lands at 90 registers against 93-95 for the signed forms. */
+        for (unsigned idx = threadIdx.x; idx < (unsigned)(jt * DESC_D); idx += MATCH_BLOCK) {
             tile[idx / DESC_D][idx % DESC_D] = __ldg(&R[j0 * DESC_D + idx]);
         }
         __syncthreads();
@@ -161,9 +165,30 @@ impl MatchResult {
 pub struct Matcher {
     fn_match_argmax: CudaKernel,
     /// Descriptor width this matcher was compiled for; `submit` rejects
-    /// buffers that do not divide by it.
+    /// [`Descriptors`] declaring any other width.
     dim: usize,
     stream: Arc<CudaStream>,
+}
+
+/// A device descriptor set handed to [`Matcher::submit`]: the buffer, how many
+/// descriptors are live in it, and how wide they are.
+///
+/// The width is carried explicitly because it cannot be recovered from the buffer —
+/// `XFeatResult::descs` is allocated for `top_k` descriptors and `RaCoAlikedResult::descs`
+/// for `k`, so both are longer than `count * dim` in normal use and no length arithmetic
+/// distinguishes a 64-D set from a 128-D one.
+#[derive(Clone, Copy)]
+pub struct Descriptors<'a> {
+    buf: &'a CudaSlice<f32>,
+    count: usize,
+    dim: usize,
+}
+
+impl<'a> Descriptors<'a> {
+    /// `buf` holds at least `count * dim` L2-normalised floats, row-major per descriptor.
+    pub fn new(buf: &'a CudaSlice<f32>, count: usize, dim: usize) -> Self {
+        Self { buf, count, dim }
+    }
 }
 
 impl Matcher {
@@ -216,42 +241,60 @@ impl Matcher {
     }
 
     /// Enqueue mutual-NN matching of two device descriptor sets into `out` —
-    /// **async, no sync**. `descs*` are `[n* × dim]` L2-normalised device buffers
-    /// (e.g. `XFeatResult::descs` with `count`); `out.cap` must be ≥ `n0` and
-    /// `n1`. Sync the stream, then read [`MatchResult::pairs`].
+    /// **async, no sync**. Sync the stream, then read [`MatchResult::pairs`].
+    ///
+    /// Both sets must carry the width this matcher was compiled for. The width travels
+    /// with the buffer in [`Descriptors`] rather than being inferred from its length,
+    /// because every real descriptor buffer is over-allocated to a capacity: a length
+    /// check cannot tell `k x 128` floats handed to a 64-D kernel from `2k x 64`, and
+    /// would accept the mismatch that silently matches half-descriptors.
     pub fn submit(
         &self,
-        descs0: &CudaSlice<f32>,
-        n0: usize,
-        descs1: &CudaSlice<f32>,
-        n1: usize,
+        descs0: Descriptors<'_>,
+        descs1: Descriptors<'_>,
         min_cossim: f32,
         out: &mut MatchResult,
     ) -> Result<(), XFeatError> {
-        debug_assert!(
-            n0 <= out.cap && n1 <= out.cap,
-            "match output capacity too small"
-        );
-        out.n0 = n0;
-        out.min_cossim = min_cossim;
-        if n0 == 0 || n1 == 0 {
-            return Ok(());
-        }
-        // A width mismatch is not a crash — the kernel would stride the buffers wrongly
-        // and return plausible-looking nonsense — so check it rather than trust it.
-        for (label, buf, n) in [("descs0", descs0, n0), ("descs1", descs1, n1)] {
-            if buf.len() < n * self.dim {
+        let (n0, n1) = (descs0.count, descs1.count);
+
+        // Validate before touching `out`. A half-updated result whose `n0` claims N
+        // matches while the kernels never ran leaves `pairs()` reading zero-filled
+        // pinned memory, which reports a fabricated match at index 0.
+        for (which, d) in [("descs0", &descs0), ("descs1", &descs1)] {
+            if d.dim != self.dim {
+                return Err(XFeatError::DescriptorWidth {
+                    which,
+                    buf_dim: d.dim,
+                    kernel_dim: self.dim,
+                });
+            }
+            if d.buf.len() < d.count * d.dim {
                 return Err(XFeatError::DescriptorDim {
-                    which: label,
-                    expected: n * self.dim,
-                    got: buf.len(),
-                    dim: self.dim,
+                    which,
+                    expected: d.count * d.dim,
+                    got: d.buf.len(),
+                    dim: d.dim,
+                });
+            }
+            if d.count > out.cap {
+                return Err(XFeatError::MatchCapacity {
+                    which,
+                    count: d.count,
+                    cap: out.cap,
                 });
             }
         }
 
-        let d0_raw = descs0.device_ptr(self.stream.as_ref()).0;
-        let d1_raw = descs1.device_ptr(self.stream.as_ref()).0;
+        out.min_cossim = min_cossim;
+        // Either side empty means no match is possible. Leaving `n0` at the requested
+        // count would have `pairs()` read buffers the kernels never wrote.
+        out.n0 = if n0 == 0 || n1 == 0 { 0 } else { n0 };
+        if out.n0 == 0 {
+            return Ok(());
+        }
+
+        let d0_raw = descs0.buf.device_ptr(self.stream.as_ref()).0;
+        let d1_raw = descs1.buf.device_ptr(self.stream.as_ref()).0;
         let m12_raw = out.m12_dev.device_ptr(self.stream.as_ref()).0;
         let m21_raw = out.m21_dev.device_ptr(self.stream.as_ref()).0;
         let s12_raw = out.s12_dev.device_ptr(self.stream.as_ref()).0;
@@ -408,7 +451,14 @@ mod tests {
             let mut out = matcher.alloc_result(n0.max(n1)).unwrap();
 
             let run = |out: &mut MatchResult| {
-                matcher.submit(&d0, n0, &d1, n1, -1.0, out).unwrap();
+                matcher
+                    .submit(
+                        Descriptors::new(&d0, n0, Matcher::XFEAT_DIM),
+                        Descriptors::new(&d1, n1, Matcher::XFEAT_DIM),
+                        -1.0,
+                        out,
+                    )
+                    .unwrap();
                 stream.synchronize().unwrap();
                 out.pairs()
             };
@@ -453,7 +503,14 @@ mod tests {
             let d1 = stream.clone_htod(&h1).unwrap();
             let mut out = matcher.alloc_result(n0.max(n1)).unwrap();
 
-            matcher.submit(&d0, n0, &d1, n1, -1.0, &mut out).unwrap();
+            matcher
+                .submit(
+                    Descriptors::new(&d0, n0, D),
+                    Descriptors::new(&d1, n1, D),
+                    -1.0,
+                    &mut out,
+                )
+                .unwrap();
             stream.synchronize().unwrap();
             let gpu: std::collections::HashSet<_> = out.pairs().into_iter().collect();
             let cpu: std::collections::HashSet<_> =
@@ -462,14 +519,71 @@ mod tests {
             eprintln!("128-D match n0={n0:5} n1={n1:5}: {} pairs", gpu.len());
         }
 
-        // A 64-D buffer handed to the 128-D kernel must be refused, not strided.
-        let short = stream.clone_htod(&random_descs_dim(64, 1, 64)).unwrap();
-        let mut out = matcher.alloc_result(64).unwrap();
+        // Guard rejections. Each of these is a silent-wrong-answer case, not a crash:
+        // the kernel would stride the buffer and return plausible matches.
+        let mut out = matcher.alloc_result(4096).unwrap();
+
+        // (a) The case a length check CANNOT catch, and the reason `Descriptors` carries
+        // the width: a 64-D set long enough to look like a valid 128-D set.
+        let wide = stream.clone_htod(&random_descs_dim(2048, 1, 64)).unwrap();
         assert!(
             matcher
-                .submit(&short, 64, &short, 64, -1.0, &mut out)
+                .submit(
+                    Descriptors::new(&wide, 2048, 64),
+                    Descriptors::new(&wide, 2048, 64),
+                    -1.0,
+                    &mut out,
+                )
+                .is_err(),
+            "64-D descriptors must be refused by a 128-D matcher even when the buffer is \
+             long enough for the length check to pass"
+        );
+
+        // (b) Genuinely too short for its claimed count.
+        let short = stream.clone_htod(&random_descs_dim(4, 1, D)).unwrap();
+        assert!(
+            matcher
+                .submit(
+                    Descriptors::new(&short, 64, D),
+                    Descriptors::new(&short, 64, D),
+                    -1.0,
+                    &mut out,
+                )
                 .is_err(),
             "a buffer too short for its claimed count must be rejected"
+        );
+
+        // (c) Over capacity is an error, not a debug-only assert compiled out in release.
+        let big = stream.clone_htod(&random_descs_dim(64, 1, D)).unwrap();
+        let mut tiny = matcher.alloc_result(8).unwrap();
+        assert!(
+            matcher
+                .submit(
+                    Descriptors::new(&big, 64, D),
+                    Descriptors::new(&big, 64, D),
+                    -1.0,
+                    &mut tiny,
+                )
+                .is_err(),
+            "a count exceeding the output capacity must be rejected"
+        );
+
+        // (d) An empty side must report no matches, not read buffers the kernels never
+        // wrote. `pairs()` on zero-filled pinned memory otherwise fabricates (0, 0).
+        let some = stream.clone_htod(&random_descs_dim(32, 3, D)).unwrap();
+        let empty = stream.clone_htod(&random_descs_dim(1, 4, D)).unwrap();
+        matcher
+            .submit(
+                Descriptors::new(&some, 32, D),
+                Descriptors::new(&empty, 0, D),
+                -1.0,
+                &mut out,
+            )
+            .unwrap();
+        stream.synchronize().unwrap();
+        assert!(
+            out.pairs().is_empty(),
+            "matching against an empty set must yield no pairs, not a fabricated (0, 0)"
         );
     }
 
