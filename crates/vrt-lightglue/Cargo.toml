@@ -33,7 +33,6 @@ kornia-image = { workspace = true }
 kornia-io = { workspace = true }
 # examples/eval_imc downscales phototourism images to the engines' shape profile.
 kornia-imgproc = { workspace = true }
-# Mat3/Vec3 and Sampson epipolar error for the benchmark examples.
+# Mat3/Vec3 for the benchmark examples.
 kornia-algebra = { workspace = true }
-kornia-3d = { workspace = true }
 env_logger = "0.11"

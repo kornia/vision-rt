@@ -303,8 +303,8 @@ fn bench_xfeat(
         xf.submit(right, &mut r)?;
         stream.synchronize()?;
         matcher.submit(
-            Descriptors::new(&l.descs, l.count(), l.desc_dim()),
-            Descriptors::new(&r.descs, r.count(), r.desc_dim()),
+            Descriptors::from_xfeat(&l),
+            Descriptors::from_xfeat(&r),
             MIN_COSSIM,
             &mut m,
         )?;
@@ -321,8 +321,8 @@ fn bench_xfeat(
 
         let t = Instant::now();
         matcher.submit(
-            Descriptors::new(&l.descs, l.count(), l.desc_dim()),
-            Descriptors::new(&r.descs, r.count(), r.desc_dim()),
+            Descriptors::from_xfeat(&l),
+            Descriptors::from_xfeat(&r),
             MIN_COSSIM,
             &mut m,
         )?;
@@ -334,8 +334,8 @@ fn bench_xfeat(
         xf.submit(right, &mut r)?;
         stream.synchronize()?;
         matcher.submit(
-            Descriptors::new(&l.descs, l.count(), l.desc_dim()),
-            Descriptors::new(&r.descs, r.count(), r.desc_dim()),
+            Descriptors::from_xfeat(&l),
+            Descriptors::from_xfeat(&r),
             MIN_COSSIM,
             &mut m,
         )?;

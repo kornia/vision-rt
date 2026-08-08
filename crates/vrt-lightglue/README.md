@@ -296,7 +296,14 @@ cargo run --release -p vrt-lightglue --example eval_imc -- \
     <lightglue-k3072-or-k1024>.engine 1.0 -1.0 xfeat-backbone-...engine -1.0 lanczos
 ```
 
-Arguments 1–7 mean the same thing in both harnesses, so a command line transfers between
+```bash
+# Controlled rotation and scale sweep (no dataset needed — one image against copies of itself)
+cargo run --release -p vrt-lightglue --example eval_rotation -- \
+    /data/oxford_prepared/graf/img1.png raco-aliked-extractor-k3072-...fp16.engine \
+    lightglue-matcher-k1024-...fp16.engine xfeat-backbone-...engine 15 3.0 -1.0 -1.0
+```
+
+Arguments 1–7 mean the same thing in both dataset harnesses, so a command line transfers between
 them; `eval_imc` takes the interpolation kernel as an eighth. Both print the configuration
 they ran with — including each column's keypoint budget — so a pasted run is
 self-describing.

@@ -185,19 +185,21 @@ extern "C" __global__ void xfeat_l2_norm(
     int c = threadIdx.x;
     if (k >= K) return;
 
-    __shared__ float shmem[2];
+    /* Sized and looped from XFEAT_D rather than hardcoded to two warps: the previous
+       form's shmem[2] / `if (c == 32)` silently divided by a half-norm at any other
+       width, which is the failure the width constant is supposed to make impossible. */
+    __shared__ float shmem[XFEAT_D / 32];
 
     float v = descs[k * XFEAT_D + c];
     float s = v * v;
-    s += __shfl_down_sync(0xFFFFFFFF, s, 16);
-    s += __shfl_down_sync(0xFFFFFFFF, s,  8);
-    s += __shfl_down_sync(0xFFFFFFFF, s,  4);
-    s += __shfl_down_sync(0xFFFFFFFF, s,  2);
-    s += __shfl_down_sync(0xFFFFFFFF, s,  1);
-    if (c ==  0) shmem[0] = s;
-    if (c == 32) shmem[1] = s;
+    #pragma unroll
+    for (int off = 16; off > 0; off >>= 1) s += __shfl_down_sync(0xFFFFFFFF, s, off);
+    if ((c & 31) == 0) shmem[c >> 5] = s;
     __syncthreads();
-    float norm = sqrtf(shmem[0] + shmem[1]);
+    float total = 0.0f;
+    #pragma unroll
+    for (int w = 0; w < XFEAT_D / 32; w++) total += shmem[w];
+    float norm = sqrtf(total);
     if (norm < 1e-8f) norm = 1e-8f;
     descs[k * XFEAT_D + c] = v / norm;
 }

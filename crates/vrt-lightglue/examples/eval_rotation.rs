@@ -18,7 +18,8 @@
 //!
 //! Usage:
 //!   cargo run --release -p vrt-lightglue --example eval_rotation -- \
-//!       <image> <raco.engine> <lightglue.engine> [xfeat.engine] [step_deg] [inlier_px]
+//!       <image> <raco.engine> <lightglue.engine> \
+//!       [xfeat.engine] [step_deg] [inlier_px] [nn_cossim] [xfeat_cossim]
 
 use kornia_algebra::{Mat3F64, Vec3F64};
 use kornia_image::{Image, ImageSize};
@@ -164,7 +165,7 @@ fn main() -> Result<(), vrt::BoxError> {
     if a.len() < 4 {
         eprintln!(
             "Usage: eval_rotation <image> <raco.engine> <lightglue.engine> \
-             [xfeat.engine] [step_deg] [inlier_px]"
+             [xfeat.engine] [step_deg] [inlier_px] [nn_cossim] [xfeat_cossim]"
         );
         std::process::exit(1);
     }
@@ -173,6 +174,11 @@ fn main() -> Result<(), vrt::BoxError> {
         return Err(format!("step_deg must be positive and finite, got {step}").into());
     }
     let thresh: f32 = arg_or(&a, 6, "inlier_px", 3.0)?;
+    // Exposed for the same reason the other two harnesses expose them: this table backs
+    // "the invariance is the matcher's, not the descriptors'", and a claim resting on an
+    // ungated baseline that cannot be re-run with a tuned one is not checkable.
+    let nn_cossim: f32 = arg_or(&a, 7, "nn_cossim", -1.0)?;
+    let xf_cossim: f32 = arg_or(&a, 8, "xfeat_cossim", -1.0)?;
     assert_eq!(CANVAS % DIM_DIVISOR, 0, "canvas must sit on the model grid");
 
     let stream = vrt::Stream::new_standalone()?.cuda_stream().clone();
@@ -204,7 +210,8 @@ fn main() -> Result<(), vrt::BoxError> {
         glue.num_keypoints()
     );
     println!(
-        "{:>6} {:>22} {:>22} {:>22}",
+        // 23 = the `{:>8} {:>6} {:>6.1}%` group each column prints below.
+        "{:>6} {:>23} {:>23} {:>23}",
         "deg", "LightGlue+ m/inl/%", "RaCo-ALIKED NN m/inl/%", "XFeat NN m/inl/%"
     );
 
@@ -232,11 +239,11 @@ fn main() -> Result<(), vrt::BoxError> {
         mnn.submit(
             Descriptors::new(l.descs_slice(), l.count(), l.desc_dim()),
             Descriptors::new(r.descs_slice(), r.count(), r.desc_dim()),
-            -1.0,
+            nn_cossim,
             &mut mnn_out,
         )?;
         if let Some(x) = &mut xf {
-            x.submit(&dev_ref, &dev_rot, None)?;
+            x.submit(&dev_ref, &dev_rot)?;
         }
         stream.synchronize()?;
 
@@ -245,7 +252,7 @@ fn main() -> Result<(), vrt::BoxError> {
         let nn = score(&mnn_out.pairs(), &lk, &rk, &h, thresh);
         let xs = match &mut xf {
             Some(x) => {
-                let (pairs, xlk, xrk) = x.finish(&stream, -1.0)?;
+                let (pairs, xlk, xrk) = x.finish(&stream, xf_cossim)?;
                 score(&pairs, &xlk, &xrk, &h, thresh)
             }
             None => (0, 0),
@@ -269,7 +276,7 @@ fn main() -> Result<(), vrt::BoxError> {
     // Scale, swept over the same range bark spans (up to 4.09x), so the two nuisances can
     // be compared on one image instead of inferred from pairs that mix them.
     println!(
-        "\n{:>6} {:>22} {:>22} {:>22}",
+        "\n{:>6} {:>23} {:>23} {:>23}",
         "zoom", "LightGlue+ m/inl/%", "RaCo-ALIKED NN m/inl/%", "XFeat NN m/inl/%"
     );
     for zoom in [1.0f64, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0] {
@@ -294,11 +301,11 @@ fn main() -> Result<(), vrt::BoxError> {
         mnn.submit(
             Descriptors::new(l.descs_slice(), l.count(), l.desc_dim()),
             Descriptors::new(r.descs_slice(), r.count(), r.desc_dim()),
-            -1.0,
+            nn_cossim,
             &mut mnn_out,
         )?;
         if let Some(x) = &mut xf {
-            x.submit(&dev_ref, &dev, None)?;
+            x.submit(&dev_ref, &dev)?;
         }
         stream.synchronize()?;
 
@@ -307,7 +314,7 @@ fn main() -> Result<(), vrt::BoxError> {
         let nn = score(&mnn_out.pairs(), &lk, &rk, &h, thresh);
         let xs = match &mut xf {
             Some(x) => {
-                let (pairs, xlk, xrk) = x.finish(&stream, -1.0)?;
+                let (pairs, xlk, xrk) = x.finish(&stream, xf_cossim)?;
                 score(&pairs, &xlk, &xrk, &h, thresh)
             }
             None => (0, 0),

@@ -127,7 +127,9 @@ fn main() -> Result<(), vrt::BoxError> {
     );
     println!("inlier <= {thresh}px measured at ORIGINAL image resolution");
     println!(
-        "{:<14} {:>24} {:>24} {:>24}",
+        // 22 = the `{:>7} {:>6} {:>6.1}%` group each column prints below. Measure it
+        // against the data row, never eyeball it.
+        "{:<14} {:>22} {:>22} {:>22}",
         "", "LightGlue+ m/inl/%", "RaCo mutual-NN m/inl/%", "XFeat mutual-NN m/inl/%"
     );
 
@@ -168,12 +170,7 @@ fn main() -> Result<(), vrt::BoxError> {
         // XFeat depends only on the uploaded images, so enqueue it before the readback:
         // one synchronise for every model instead of two.
         if let Some(x) = &mut xf {
-            // Oxford sequences are uniform within a sequence, so no sync is needed here.
-            x.submit(
-                &left,
-                &right,
-                (left.size() != right.size()).then_some(&stream),
-            )?;
+            x.submit(&left, &right)?;
         }
         mnn.submit(
             Descriptors::new(l.descs_slice(), l.count(), l.desc_dim()),

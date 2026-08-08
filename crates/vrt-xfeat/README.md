@@ -44,7 +44,10 @@ the descriptor width from, so a shim would have to assume the matcher's own — 
 exactly the tautology that let a 64-D buffer reach a 128-D kernel and return
 plausible-looking nonsense. A compile error is the better outcome.
 
-Known caller to update: `sensor-rt`, `crates/sensor-oak/examples/oakd_xfeat_stereo`.
+Known caller to update: `sensor-rt`, `crates/sensor-oak/examples/oakd_xfeat_stereo`
+(line 232). That repo pins vision-rt by revision, so it keeps building until someone
+repins it — **the repin and this rename must land together**, and nothing in this PR does
+the sensor-rt half.
 
 ```rust
 // before

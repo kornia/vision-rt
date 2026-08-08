@@ -89,8 +89,8 @@ fn main() -> Result<(), vrt::BoxError> {
     let matcher = Matcher::new(stream.clone())?;
     let mut m = matcher.alloc_result(map_res.capacity().max(query_res.capacity()))?;
     matcher.submit(
-        Descriptors::new(&map_res.descs, map_res.count(), map_res.desc_dim()),
-        Descriptors::new(&query_res.descs, query_res.count(), query_res.desc_dim()),
+        Descriptors::from_xfeat(&map_res),
+        Descriptors::from_xfeat(&query_res),
         MIN_COSSIM,
         &mut m,
     )?;

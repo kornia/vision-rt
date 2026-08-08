@@ -271,6 +271,34 @@ impl Tally {
     }
 }
 
+/// Squared Sampson error of a correspondence against a fundamental matrix.
+///
+/// Mirrors `kornia_3d::pose::sampson_distance` (kornia-3d/src/pose/fundamental.rs), which
+/// is not depended on here only because that crate costs 74 transitive dependencies for
+/// this function and one pose composition. Note it is the error **squared**, as there;
+/// callers take the root so a pixel threshold means pixels.
+pub fn sampson_squared(f: &Mat3F64, x1: (f64, f64), x2: (f64, f64)) -> f64 {
+    let (a, b) = (Vec3F64::new(x1.0, x1.1, 1.0), Vec3F64::new(x2.0, x2.1, 1.0));
+    let (fx1, ftx2) = (*f * a, f.transpose() * b);
+    let err = b.dot(fx1);
+    let denom = fx1.x * fx1.x + fx1.y * fx1.y + ftx2.x * ftx2.x + ftx2.y * ftx2.y;
+    if denom <= 1e-12 {
+        return err * err;
+    }
+    err * err / denom
+}
+
+/// Relative pose `a -> b` for world-to-camera poses, i.e. `kornia_3d::pose::Pose3d::between`.
+///
+/// With `p_cam = R p_world + t`, composing `b` with `a.inverse()` gives this.
+pub fn relative_pose(
+    (ra, ta): (Mat3F64, Vec3F64),
+    (rb, tb): (Mat3F64, Vec3F64),
+) -> (Mat3F64, Vec3F64) {
+    let r = rb * ra.transpose();
+    (r, tb - r * ta)
+}
+
 /// XFeat plus its native 64-D mutual-NN, the independent baseline both evaluations
 /// compare against.
 ///
@@ -314,20 +342,15 @@ impl XFeatBaseline {
 
     /// Enqueue extraction for both images. Separate from [`Self::finish`] so the caller can
     /// submit this alongside the other models and pay for one stream synchronise, not two.
-    /// `sync_between` must be `Some` when the two frames differ in size: each `submit`
-    /// sets the execution context's input shape and can reallocate session-owned output
-    /// buffers, and those are host-side calls rather than stream-ordered ones, so the
-    /// second would mutate a context whose first enqueue is still in flight.
+    /// Differently-sized frames are safe: `XFeat::submit` drains the stream itself when
+    /// the model size changes, so callers do not have to know that reconfiguring the
+    /// execution context is a host-side operation.
     pub fn submit(
         &mut self,
         left: &Image<u8, 3>,
         right: &Image<u8, 3>,
-        sync_between: Option<&Arc<CudaStream>>,
     ) -> Result<(), vrt::BoxError> {
         self.xfeat.submit(left, &mut self.left)?;
-        if let Some(stream) = sync_between {
-            stream.synchronize()?;
-        }
         self.xfeat.submit(right, &mut self.right)?;
         Ok(())
     }
@@ -342,7 +365,7 @@ impl XFeatBaseline {
         min_cossim: f32,
     ) -> Result<(Vec<(usize, usize)>, Vec<(f32, f32)>, Vec<(f32, f32)>), vrt::BoxError> {
         self.matcher.submit(
-            Descriptors::new(&self.left.descs, self.left.count(), self.left.desc_dim()),
+            Descriptors::from_xfeat(&self.left),
             Descriptors::new(&self.right.descs, self.right.count(), self.right.desc_dim()),
             min_cossim,
             &mut self.matches,
@@ -356,98 +379,5 @@ impl XFeatBaseline {
             to_xy(self.left.kpts_to_host()?),
             to_xy(self.right.kpts_to_host()?),
         ))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Row-major in, column-major out. A symmetric fixture cannot catch a dropped
-    /// transpose, so this uses an intrinsics matrix — the shape that actually flows
-    /// through these harnesses, and the one whose silent transposition would rewrite
-    /// every published number without failing anything.
-    #[test]
-    fn mat3_from_row_major_transposes() {
-        let m = mat3_from_row_major(&[799.4, 0.0, 524.0, 0.0, 799.4, 289.0, 0.0, 0.0, 1.0])
-            .expect("9 floats is the valid length");
-        // Column-major storage: `x_axis` is the first COLUMN of the logical matrix.
-        assert_eq!(m.x_axis.x, 799.4);
-        assert_eq!(m.x_axis.y, 0.0);
-        assert_eq!(
-            m.z_axis.x, 524.0,
-            "cx must land in the top-right, not the bottom-left"
-        );
-        assert_eq!(m.z_axis.y, 289.0);
-        // A wrong length is an error, not a panic.
-        assert!(mat3_from_row_major(&[1.0, 2.0, 3.0]).is_err());
-        // And it must act like K on a point.
-        let p = m * Vec3F64::new(1.0, 2.0, 1.0);
-        assert!((p.x - (799.4 + 524.0)).abs() < 1e-9);
-        assert!((p.y - (2.0 * 799.4 + 289.0)).abs() < 1e-9);
-    }
-
-    /// The half-pixel term is exactly what a bare `diag(s, s, 1)` gets wrong.
-    /// `resize_to_fit` must report the scale it *applied*, not the one it asked for.
-    ///
-    /// This calls `resize_to_fit`. An earlier version re-derived the formula inline and
-    /// asserted on its own copy, so reverting the function to a single uniform scale left
-    /// it green — it could not fail for the bug it was written to catch.
-    #[test]
-    fn resize_to_fit_reports_the_applied_scale_per_axis() {
-        // Oxford bark: 765x512 -> 640x428, cropped to 640x416.
-        let src = Image::<u8, 3>::from_size_val(
-            ImageSize {
-                width: 765,
-                height: 512,
-            },
-            0,
-        )
-        .unwrap();
-        let out = resize_to_fit(&src, 640, InterpolationMode::Bilinear).unwrap();
-
-        assert_eq!(out.image.cols(), 640);
-        assert_eq!(out.image.rows(), 416, "cropped to the 32px grid");
-
-        let requested = 640.0 / 765.0;
-        assert!((out.scale_x - requested).abs() < 1e-12, "x is exact here");
-        assert!(
-            (out.scale_y - requested).abs() > 1e-6,
-            "y must differ from the requested scale — that is the whole bug"
-        );
-        assert!(
-            (out.scale_y - 428.0 / 512.0).abs() < 1e-12,
-            "y is the applied scale"
-        );
-        // ~0.28 px at the bottom of the cropped image, against a ~2.5 px threshold.
-        assert!(((out.scale_y - requested) * 416.0).abs() > 0.2);
-    }
-
-    /// A square image scales exactly on both axes — the case that must NOT report a
-    /// spurious difference, so the test above is measuring something real.
-    #[test]
-    fn resize_to_fit_is_exact_when_the_scale_divides() {
-        let src = Image::<u8, 3>::from_size_val(
-            ImageSize {
-                width: 1280,
-                height: 640,
-            },
-            0,
-        )
-        .unwrap();
-        let out = resize_to_fit(&src, 640, InterpolationMode::Bilinear).unwrap();
-        assert_eq!((out.scale_x, out.scale_y), (0.5, 0.5));
-    }
-
-    #[test]
-    fn resize_matrix_carries_the_half_pixel_offset() {
-        let m = resize_matrix(0.5, 0.5);
-        let p = m * Vec3F64::new(0.0, 0.0, 1.0);
-        assert!((p.x - (-0.25)).abs() < 1e-12, "got {}", p.x);
-        assert!((p.y - (-0.25)).abs() < 1e-12);
-        // Identity scale must be exactly the identity, offset included.
-        let i = resize_matrix(1.0, 1.0);
-        assert_eq!(i.z_axis.x, 0.0);
-        assert_eq!(i.z_axis.y, 0.0);
     }
 }

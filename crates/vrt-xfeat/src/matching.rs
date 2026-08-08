@@ -241,7 +241,25 @@ fn check_descriptors(
 }
 
 impl<'a> Descriptors<'a> {
+    /// Take the width from the extractor result that produced the descriptors.
+    ///
+    /// Prefer this to [`new`](Self::new) wherever the type is available: it removes the
+    /// caller's opportunity to supply a width at all, and supplying the *matcher's* width
+    /// is the mistake that makes the check compare a value against itself.
+    pub fn from_xfeat(res: &'a crate::postprocess::XFeatResult) -> Self {
+        Self {
+            buf: &res.descs,
+            count: res.count(),
+            dim: res.desc_dim(),
+        }
+    }
+
     /// `buf` holds at least `count * dim` L2-normalised floats, row-major per descriptor.
+    ///
+    /// `dim` must be the width of the **data**, taken from whatever produced it — e.g.
+    /// `RaCoAlikedResult::desc_dim()`. Passing a `Matcher`'s own `dim()` makes the width
+    /// check tautological, which is the silent-stride bug this type exists to prevent;
+    /// use [`from_xfeat`](Self::from_xfeat) where the result type is reachable.
     pub fn new(buf: &'a CudaSlice<f32>, count: usize, dim: usize) -> Self {
         Self { buf, count, dim }
     }

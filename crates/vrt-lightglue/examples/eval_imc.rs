@@ -61,14 +61,13 @@ const DEFAULT_XF_COSSIM: f32 = -1.0;
 /// 640, and RaCo needs both sides to be multiples of 32.
 const MAX_SIDE: usize = 640;
 
-use kornia_3d::pose::{sampson_distance, Pose3d};
-use kornia_algebra::{Mat3F64, Vec2F64, Vec3F64};
+use kornia_algebra::{Mat3F64, Vec3F64};
 
 #[path = "common/mod.rs"]
 mod common;
 use common::{
-    arg_or, mat3_from_row_major, parse_interpolation, read_floats, resize_matrix, resize_to_fit,
-    Tally, XFeatBaseline,
+    arg_or, mat3_from_row_major, parse_interpolation, read_floats, relative_pose, resize_matrix,
+    resize_to_fit, sampson_squared, Tally, XFeatBaseline,
 };
 
 /// Camera calibration as written by `scripts/prep_imc.py`: K (9), R (9), T (3).
@@ -78,7 +77,8 @@ use common::{
 /// hand-rolled matrix algebra.
 struct Calib {
     k: Mat3F64,
-    pose: Pose3d,
+    /// World-to-camera rotation and translation: `p_cam = R p_world + t`.
+    pose: (Mat3F64, Vec3F64),
 }
 
 impl Calib {
@@ -89,7 +89,7 @@ impl Calib {
         }
         Ok(Self {
             k: mat3_from_row_major(&v[0..9])?,
-            pose: Pose3d::new(
+            pose: (
                 mat3_from_row_major(&v[9..18])?,
                 Vec3F64::new(v[18], v[19], v[20]),
             ),
@@ -109,23 +109,24 @@ impl Calib {
 /// resizing its two JPEGs — and, more importantly, so `fundamental` takes one image's
 /// pose and its own K together rather than four loose arguments two of which could be
 /// swapped without the types noticing.
-fn relative_pose(a: &Calib, b: &Calib) -> Option<(Mat3F64, Vec3F64)> {
-    let (r, t) = Pose3d::between(&a.pose, &b.pose).to_rt();
+fn pair_pose(a: &Calib, b: &Calib, scene_spread: f64) -> Option<(Mat3F64, Vec3F64)> {
+    let (r, t) = relative_pose(a.pose, b.pose);
     // A near-zero baseline is a pure rotation: F degenerates and every match would pass
     // the epipolar test vacuously, so report it rather than scoring the pair.
     //
-    // The threshold is relative to the cameras' own translation magnitudes, because
-    // phototourism poses are in arbitrary SfM units: a fixed 1e-9 is meaningless against a
-    // scene whose coordinates happen to be large, and vacuous against one where they are
-    // small. This scales with the reconstruction instead.
+    // Compared against the scene's camera-centre spread, which is what "small baseline"
+    // has to mean in an SfM reconstruction with arbitrary units.
+    //
+    // An earlier version divided by `|t|`, the camera's distance from the world ORIGIN
+    // (the centre is -R^T t) — a gauge choice, not a scale: a reconstruction whose origin
+    // sits far from the cameras would have inflated it and silently dropped usable pairs.
     //
     // MEASURED on the current 90-pair set: the smallest baseline is 1.2% of its scene's
-    // mean camera-centre spread (sacre_coeur, 0.047 against 4.06), so nothing here is
-    // near-degenerate and this guard does not fire. It exists for the pair that would be.
-    // A tighter gate — rejecting weak-but-usable baselines — would need the scene's depth
-    // range, which this metadata does not carry.
-    let scale = a.pose.translation.length() + b.pose.translation.length();
-    if t.length() <= 1e-6 * scale.max(f64::MIN_POSITIVE) {
+    // spread (sacre_coeur, 0.047 against 4.06), so nothing here is near-degenerate and
+    // this guard does not fire. It exists for the pair that would be. A tighter gate —
+    // rejecting weak-but-usable baselines — needs the scene's depth range, which this
+    // metadata does not carry.
+    if t.length() <= 1e-4 * scene_spread {
         return None;
     }
     Some((r, t))
@@ -164,12 +165,7 @@ fn score(
         .iter()
         .filter(|(i, j)| {
             let (p1, p2) = (lk[*i], rk[*j]);
-            // sampson_distance returns the SQUARED error despite the name.
-            let d2 = sampson_distance(
-                f,
-                &Vec2F64::new(p1.0 as f64, p1.1 as f64),
-                &Vec2F64::new(p2.0 as f64, p2.1 as f64),
-            );
+            let d2 = sampson_squared(f, (p1.0 as f64, p1.1 as f64), (p2.0 as f64, p2.1 as f64));
             d2.sqrt() <= thresh
         })
         .count();
@@ -236,6 +232,29 @@ fn main() -> Result<(), vrt::BoxError> {
 
     let mut cache: HashMap<std::path::PathBuf, (Image<u8, 3>, (f64, f64))> = HashMap::new();
     let manifest = std::fs::read_to_string(root.join("imc_manifest.txt"))?;
+
+    // Per-scene camera-centre spread, the scale the degenerate-baseline guard needs. One
+    // pass over the manifest's calibrations; the centre of a world-to-camera pose is
+    // `-R^T t`, so this is a property of the reconstruction rather than of its origin.
+    let mut centres: HashMap<&str, Vec<Vec3F64>> = HashMap::new();
+    for line in manifest.lines().filter(|l| !l.trim().is_empty()) {
+        let f: Vec<&str> = line.split_whitespace().collect();
+        let [scene, _, i1, i2] = f[..] else { continue };
+        let dir = root.join(scene).join("set_100").join("calib_txt");
+        for id in [i1, i2] {
+            let c = Calib::load(&dir.join(format!("{id}.txt")))?;
+            let (r, t) = c.pose;
+            centres.entry(scene).or_default().push(-(r.transpose() * t));
+        }
+    }
+    let spread: HashMap<&str, f64> = centres
+        .iter()
+        .map(|(scene, cs)| {
+            let mean = cs.iter().fold(Vec3F64::ZERO, |a, b| a + *b) / cs.len() as f64;
+            let d = cs.iter().map(|c| (*c - mean).length()).sum::<f64>() / cs.len() as f64;
+            (*scene, d.max(f64::MIN_POSITIVE))
+        })
+        .collect();
     let mut bands: BTreeMap<String, (Tally, Tally, Tally)> = BTreeMap::new();
     let mut skipped = 0usize;
 
@@ -255,7 +274,7 @@ fn main() -> Result<(), vrt::BoxError> {
         let c2 = Calib::load(&base.join("calib_txt").join(format!("{i2}.txt")))?;
         // Poses first: a degenerate pair is rejected before its two JPEGs are decoded and
         // resized, which is the expensive half of the loop.
-        let Some((rmat, tvec)) = relative_pose(&c1, &c2) else {
+        let Some((rmat, tvec)) = pair_pose(&c1, &c2, spread[scene]) else {
             // Coincident centres give a degenerate F; every match would "pass".
             skipped += 1;
             continue;
@@ -264,27 +283,24 @@ fn main() -> Result<(), vrt::BoxError> {
         let img_dir = base.join("images");
         // The 90 pairs are drawn from ~135 distinct images, so decoding and resampling per
         // pair repeats roughly a quarter of the work. Cache by path.
-        for id in [i1, i2] {
-            let path = img_dir.join(format!("{id}.jpg"));
-            if !cache.contains_key(&path) {
-                cache.insert(path.clone(), load_scaled(&path, interpolation)?);
+        let (p1, p2) = (
+            img_dir.join(format!("{i1}.jpg")),
+            img_dir.join(format!("{i2}.jpg")),
+        );
+        for path in [&p1, &p2] {
+            if !cache.contains_key(path) {
+                cache.insert(path.clone(), load_scaled(path, interpolation)?);
             }
         }
-        let (im1, s1) = cache[&img_dir.join(format!("{i1}.jpg"))].clone();
-        let (im2, s2) = cache[&img_dir.join(format!("{i2}.jpg"))].clone();
+        // Borrow: cloning here would copy ~0.9 MB twice per pair for no reason.
+        let (im1, s1) = (&cache[&p1].0, cache[&p1].1);
+        let (im2, s2) = (&cache[&p2].0, cache[&p2].1);
         let fmat = fundamental(&rmat, &tvec, &c1.scaled_k(s1), &c2.scaled_k(s2));
 
         let (dl, dr) = (im1.to_cuda(&stream)?, im2.to_cuda(&stream)?);
-        // Phototourism aspect ratios vary, so the two frames usually differ in size. Each
-        // `submit` sets the context's input shape and may reallocate the session's output
-        // buffers — host-side calls that are NOT stream-ordered, so issuing the second
-        // while the first enqueue is still in flight mutates a live context. Every other
-        // caller in the repo feeds same-sized frames; this is the one that does not.
-        let differing = im1.size() != im2.size();
+        // Phototourism aspect ratios vary, so the two frames usually differ in size.
+        // `submit` handles the reconfiguration hazard itself.
         raco.submit(&dl, &mut l)?;
-        if differing {
-            stream.synchronize()?;
-        }
         raco.submit(&dr, &mut r)?;
         glue.submit(&l, &r, &mut lg_out)?;
         mnn.submit(
@@ -296,7 +312,7 @@ fn main() -> Result<(), vrt::BoxError> {
         // XFeat depends only on the uploaded images, so enqueue it here rather than after
         // the readback: one synchronise for every model instead of two.
         if let Some(x) = &mut xf {
-            x.submit(&dl, &dr, differing.then_some(&stream))?;
+            x.submit(&dl, &dr)?;
         }
         stream.synchronize()?;
 

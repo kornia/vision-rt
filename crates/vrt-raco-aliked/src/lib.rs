@@ -414,6 +414,18 @@ impl RaCoAliked {
         }
         let (rw, rh) = (sw as f32 / mw as f32, sh as f32 / mh as f32);
 
+        // A model-size change reconfigures the execution context: `set_input_shape` and
+        // the output-buffer reallocation are host-side calls, not stream-ordered, so
+        // performing them while a previous `enqueue_v3` is still in flight mutates a live
+        // context and frees buffers it is reading. Draining here makes every caller safe
+        // by construction — the alternative is a rule every call site must remember, and
+        // three of this repo's own harnesses forgot it.
+        //
+        // Costs one sync only when the size actually changes, which for a video stream is
+        // the first frame and nothing else.
+        if self.cur != (mh, mw) {
+            self.stream.synchronize()?;
+        }
         // (Re)allocate the reused input on the shared stream when the frame's model size
         // changes — stream-ordered so it is valid in submit order.
         if self.cur != (mh, mw) {
