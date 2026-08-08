@@ -28,6 +28,20 @@ use std::sync::Arc;
 
 use vrt::cuda::{cfg_1d, cfg_2d, cfg_per_item};
 
+/// The descriptor kernels with the width substituted in, so `XFEAT_DESC_DIM` is the one
+/// place it is written rather than a constant that happens to agree with three literals.
+fn kernels_src() -> String {
+    KERNELS_SRC.replace("{XFEAT_D}", &XFEAT_DESC_DIM.to_string())
+}
+
+/// XFeat's descriptor width, owned by the post-processing that produces the descriptors.
+///
+/// It lives here, not on `Matcher`, because it describes the *data*: the sampling and
+/// L2-norm kernels below emit exactly this many floats per keypoint. Sourcing it from the
+/// matcher would make `check_descriptors` compare the matcher's constant against itself,
+/// which is the tautology the width check exists to avoid.
+pub const XFEAT_DESC_DIM: usize = 64;
+
 /// Errors from XFeat post-processing and matching.
 #[derive(Debug, thiserror::Error)]
 pub enum XFeatError {
@@ -43,11 +57,44 @@ pub enum XFeatError {
     Preproc(#[from] kornia_imgproc::preprocess::PreprocessError),
     #[error("input image {0}x{1} too small — each side must be ≥ 32px")]
     InputTooSmall(usize, usize),
+    #[error(
+        "descriptor width {0} is not supported — it must be a non-zero multiple of 32 and \
+         at most 128 (the query array is held in registers, and 256 floats exceeds CUDA's \
+         255-register limit per thread)"
+    )]
+    UnsupportedDim(usize),
+    #[error(
+        "{which} holds {got} floats but {expected} are needed for {dim}-D descriptors; \
+         matching them with a {dim}-D kernel would stride the buffer wrongly"
+    )]
+    DescriptorDim {
+        which: &'static str,
+        expected: usize,
+        got: usize,
+        dim: usize,
+    },
+    #[error(
+        "{which} holds {buf_dim}-D descriptors but this matcher was compiled for \
+         {kernel_dim}-D; the kernel would stride the buffer wrongly and return \
+         plausible-looking nonsense"
+    )]
+    DescriptorWidth {
+        which: &'static str,
+        buf_dim: usize,
+        kernel_dim: usize,
+    },
+    #[error("{which} holds {count} descriptors but the match output has capacity {cap}")]
+    MatchCapacity {
+        which: &'static str,
+        count: usize,
+        cap: usize,
+    },
 }
 
 // ── Kernel source ─────────────────────────────────────────────────────────────
 
 const KERNELS_SRC: &str = r#"
+#define XFEAT_D {XFEAT_D}
 /* xfeat_score_nms — fused NMS + score map.
    For each pixel (x,y): if heatmap[y,x] > threshold AND no neighbour in the
    5×5 window has a strictly greater value, write heatmap[y,x]*reliability[y,x]
@@ -125,7 +172,7 @@ extern "C" __global__ void xfeat_sample_descs(
               + (1.0f - wx) *           wy * __ldg(&desc_map[base + y1 * Wd + x0])
               +           wx *           wy * __ldg(&desc_map[base + y1 * Wd + x1]);
 
-    descs_out[k * 64 + c] = val;
+    descs_out[k * XFEAT_D + c] = val;
 }
 
 /* xfeat_l2_norm — in-place L2-normalise each 64-D descriptor row.
@@ -138,21 +185,23 @@ extern "C" __global__ void xfeat_l2_norm(
     int c = threadIdx.x;
     if (k >= K) return;
 
-    __shared__ float shmem[2];
+    /* Sized and looped from XFEAT_D rather than hardcoded to two warps: the previous
+       form's shmem[2] / `if (c == 32)` silently divided by a half-norm at any other
+       width, which is the failure the width constant is supposed to make impossible. */
+    __shared__ float shmem[XFEAT_D / 32];
 
-    float v = descs[k * 64 + c];
+    float v = descs[k * XFEAT_D + c];
     float s = v * v;
-    s += __shfl_down_sync(0xFFFFFFFF, s, 16);
-    s += __shfl_down_sync(0xFFFFFFFF, s,  8);
-    s += __shfl_down_sync(0xFFFFFFFF, s,  4);
-    s += __shfl_down_sync(0xFFFFFFFF, s,  2);
-    s += __shfl_down_sync(0xFFFFFFFF, s,  1);
-    if (c ==  0) shmem[0] = s;
-    if (c == 32) shmem[1] = s;
+    #pragma unroll
+    for (int off = 16; off > 0; off >>= 1) s += __shfl_down_sync(0xFFFFFFFF, s, off);
+    if ((c & 31) == 0) shmem[c >> 5] = s;
     __syncthreads();
-    float norm = sqrtf(shmem[0] + shmem[1]);
+    float total = 0.0f;
+    #pragma unroll
+    for (int w = 0; w < XFEAT_D / 32; w++) total += shmem[w];
+    float norm = sqrtf(total);
     if (norm < 1e-8f) norm = 1e-8f;
-    descs[k * 64 + c] = v / norm;
+    descs[k * XFEAT_D + c] = v / norm;
 }
 
 /* xfeat_compact_scores — stream-compact NMS survivors.
@@ -233,6 +282,7 @@ pub struct XFeatResult {
     /// [`kpts_to_host`](Self::kpts_to_host) applies [`scale`](Self::scale) → original px.
     pub kpts: CudaSlice<f32>,
     /// L2-normalised 64-D descriptors on device, capacity `top_k×64`.
+    /// Ask [`desc_dim`](Self::desc_dim) for the width rather than assuming it.
     pub descs: CudaSlice<f32>,
     /// Combined NMS scores on device, capacity `top_k`.
     pub scores: CudaSlice<f32>,
@@ -250,7 +300,7 @@ impl XFeatResult {
     pub fn alloc(stream: &Arc<CudaStream>, top_k: usize) -> Result<Self, XFeatError> {
         Ok(Self {
             kpts: stream.alloc_zeros::<f32>(top_k * 2)?,
-            descs: unsafe { stream.alloc::<f32>(top_k * 64)? },
+            descs: unsafe { stream.alloc::<f32>(top_k * XFEAT_DESC_DIM)? },
             scores: stream.alloc_zeros::<f32>(top_k)?,
             count_pin: vrt::PinnedBuffer::<i32>::alloc(1)?,
             stream: stream.clone(),
@@ -262,6 +312,15 @@ impl XFeatResult {
     /// Capacity (max keypoints) this result was allocated for.
     pub fn capacity(&self) -> usize {
         self.top_k
+    }
+
+    /// Descriptor width of [`descs`](Self::descs).
+    ///
+    /// Sourced from the extractor that produced them, so a `Descriptors` built from this
+    /// carries the *data's* width. Passing a matcher's own `dim()` instead compares a
+    /// value against itself and passes unconditionally.
+    pub fn desc_dim(&self) -> usize {
+        XFEAT_DESC_DIM
     }
 
     /// Valid keypoint count — reads the pinned scalar, so call **after** the
@@ -338,7 +397,7 @@ impl XFeatPostproc {
             "xfeat_topk_select",
         ];
         let [fn_score_nms, fn_sample_descs, fn_l2_norm, fn_histogram, fn_cutoff, fn_select]: [CudaKernel; 6] =
-            CudaKernel::compile_many(stream.context(), KERNELS_SRC, &names)?
+            CudaKernel::compile_many(stream.context(), &kernels_src(), &names)?
                 .try_into().unwrap_or_else(|_| unreachable!("compile_many returns names.len() kernels"));
 
         Ok(Self {
@@ -429,7 +488,7 @@ impl XFeatPostproc {
         let total = n_pixels as i32;
         let (k_i, h_i, w_i) = (k as i32, h as i32, w as i32);
         let (hd_i, wd_i) = (hd as i32, wd as i32);
-        let cfg64 = cfg_per_item(k, 64);
+        let cfg64 = cfg_per_item(k, XFEAT_DESC_DIM as u32);
 
         // 1. histogram → 2. cutoff → 3. select survivors into out.kpts/out.scores
         self.fn_histogram

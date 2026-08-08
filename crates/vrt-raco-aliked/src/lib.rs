@@ -73,7 +73,10 @@ use vrt::{BoxError, Engine, ModelSession};
 pub const DESC_DIM: usize = 128;
 
 /// RaCo's `input_dim_divisor`: model H and W must be multiples of this.
-const DIM_DIVISOR: usize = 32;
+///
+/// Public so callers sizing images for this model reference the constant instead of
+/// hardcoding 32 and silently drifting if the export ever changes.
+pub const DIM_DIVISOR: usize = 32;
 
 /// Minimum model dimension the reused buffers are seeded with in [`RaCoAliked::new`];
 /// the first frame reallocates them to its real floor-32 size.
@@ -184,6 +187,14 @@ impl RaCoAlikedResult {
     /// LightGlue matcher consumes. Do not use these for geometry; see the module docs.
     pub fn normalized_kpts_slice(&self) -> &CudaSlice<f32> {
         &self.norm_kpts
+    }
+
+    /// Descriptor width of [`descs_slice`](Self::descs_slice).
+    ///
+    /// Sourced from the extractor that produced them: a matcher's own `dim()` passed in
+    /// its place would compare a value against itself and pass unconditionally.
+    pub fn desc_dim(&self) -> usize {
+        DESC_DIM
     }
 
     /// GPU-resident L2-normalised descriptors `[K*128]`. Valid after the stream sync.
@@ -403,6 +414,18 @@ impl RaCoAliked {
         }
         let (rw, rh) = (sw as f32 / mw as f32, sh as f32 / mh as f32);
 
+        // A model-size change reconfigures the execution context: `set_input_shape` and
+        // the output-buffer reallocation are host-side calls, not stream-ordered, so
+        // performing them while a previous `enqueue_v3` is still in flight mutates a live
+        // context and frees buffers it is reading. Draining here makes every caller safe
+        // by construction — the alternative is a rule every call site must remember, and
+        // three of this repo's own harnesses forgot it.
+        //
+        // Costs one sync only when the size actually changes, which for a video stream is
+        // the first frame and nothing else.
+        if self.cur != (mh, mw) {
+            self.stream.synchronize()?;
+        }
         // (Re)allocate the reused input on the shared stream when the frame's model size
         // changes — stream-ordered so it is valid in submit order.
         if self.cur != (mh, mw) {

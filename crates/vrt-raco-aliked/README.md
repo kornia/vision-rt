@@ -104,6 +104,30 @@ same input — measure on an idle box. Full harness: `vrt-lightglue`,
 `examples/bench_vs_xfeat`. Single synthetic pair, so read the ordering rather than the exact
 percentages.
 
+## Accuracy on real data
+
+Measured on **Oxford/VGG affine** and **IMC 2021 phototourism**, both shipping as examples
+in `vrt-lightglue`. At a matched k3072 budget for every column:
+
+| | Oxford inliers | Oxford macro | IMC inliers | IMC macro |
+|---|---|---|---|---|
+| RaCo-ALIKED + LightGlue+ | **12412** | **71.0%** | **66946** | **88.5%** |
+| RaCo-ALIKED + mutual-NN | 4821 | 24.3% | 56509 | 56.1% |
+| XFeat + mutual-NN | 3837 | 20.1% | 37812 | 40.6% |
+
+Rotation robustness is the reason to reach for this crate over `vrt-xfeat`. Swept in
+isolation (`examples/eval_rotation`, one image against rotated copies of itself, exact
+ground truth), RaCo-ALIKED + LightGlue+ holds **98.5–100% precision from 0° to 180°** and
+**99.3–100% from 1× to 5× zoom**, while XFeat + mutual-NN falls to 26.6% by 45° and 0% by
+120°. Note the invariance is the *matcher's*: the same ALIKED descriptors under raw
+mutual-NN also collapse at 45°.
+
+Full tables, both matcher configurations, the mutual-NN gate sweep and the commands that
+produce all of it live in
+**[`crates/vrt-lightglue/README.md`](../vrt-lightglue/README.md#accuracy-on-real-data)**.
+They are kept in one place deliberately: these numbers get re-measured, and two copies
+drift.
+
 ## Licences
 
 Ships no weights. The ONNX combines three separately licensed upstreams, and **ALIKED is

@@ -55,7 +55,7 @@ fn main() -> Result<(), vrt::BoxError> {
     // All async — nothing has executed yet when these return.
     raco.submit(&left_dev, &mut left_out)?;
     raco.submit(&right_dev, &mut right_out)?;
-    glue.submit_match(&left_out, &right_out, &mut matches)?;
+    glue.submit(&left_out, &right_out, &mut matches)?;
     stream.synchronize()?; // the caller owns the one sync
 
     let pairs = matches.pairs(MIN_SCORE)?;

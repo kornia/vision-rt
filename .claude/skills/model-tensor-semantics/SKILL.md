@@ -56,6 +56,8 @@ space doesn't affect it.
 | `heatmap`     | (1, 1, H, W)      | keypoint confidence |
 | `reliability` | (1, 1, H, W)      | per-pixel reliability weight |
 
+64 is XFeat's own width. The matcher is separate and compiles for others — see below.
+
 Engine MUST expose exactly those three output names (`model.rs` errors with
 `MissingOutput` otherwise).
 
@@ -81,15 +83,36 @@ Matching lives in a **separate** `matching::Matcher` (module `crates/vrt-xfeat/s
 decoupled from postproc but sharing the stream. Cosine similarity (descriptors
 are L2-normalized, so dot = cosine), mutual nearest-neighbor via two calls of one
 tiled argmax kernel (`xfeat_match_argmax`, one thread per query, candidates tiled
-through shared memory), min-similarity cutoff. VPI-style: `submit_match(descs0,
-n0, descs1, n1, cossim, &mut MatchResult)` (async) → sync → `MatchResult::pairs()`,
-or sync one-shot `match_mutual_nn_gpu`.
+through shared memory), min-similarity cutoff. VPI-style:
+`submit(Descriptors, Descriptors, cossim, &mut MatchResult)` (async) → sync →
+`MatchResult::pairs()`.
+
+**The matcher is not XFeat-only.** `Matcher::new` compiles for XFeat's 64-D descriptors;
+`Matcher::with_dim(stream, dim)` compiles for 128-D as well, which is what matches
+`vrt-raco-aliked`'s ALIKED descriptors without LightGlue. The width is an NVRTC
+compile-time constant, not a runtime argument, so a `Matcher` only ever handles the one
+width it was built for.
+
+That is why descriptors are passed as `Descriptors::new(buf, count, dim)` rather than a
+bare slice and a count. The width **cannot** be recovered from the buffer — `XFeatResult`
+allocates for `top_k` and `RaCoAlikedResult` for `k`, so both are longer than
+`count * dim` in normal use, and no length arithmetic separates 3072x128 floats from
+6144x64. Handing a 128-D set to a 64-D matcher does not crash; it strides the buffer and
+returns plausible-looking matches. `submit` rejects a width that is not the compiled one,
+along with a buffer too short for its count and a count over the output capacity — all
+three as typed `XFeatError`s, not debug assertions.
 
 ## When validating XFeat changes
 
 - Sanity: static scene ≈ stable keypoint count frame-to-frame; kpts cluster on
   corners/texture, empty sky/walls ≈ none.
 - GPU vs CPU: `cargo test -p vrt-xfeat --release -- --ignored` runs
-  `gpu_match_agrees_with_cpu_reference` + `gpu_topk_selects_correct_keypoints`.
+  `gpu_match_agrees_with_cpu_reference` (64-D), `gpu_match_128d_agrees_with_cpu_reference`
+  (128-D, plus the width/capacity/empty-side rejections) and
+  `gpu_topk_selects_correct_keypoints`. `gpu_match_kernel_only_timing` fails on JetPack 6
+  with `Missing symbol cuEventElapsedTime_v2` — the driver exports only
+  `cuEventElapsedTime`, so cudarc's lookup cannot resolve; environmental, not a regression.
+- An independent CPU oracle is the only thing that catches a stride bug in this kernel:
+  a wrong width or a wrong index type yields plausible matches, never a crash.
 - Wrong-normalization symptom: keypoints "almost work" with low scores — check
   `/255` happened exactly once (not zero, not twice).

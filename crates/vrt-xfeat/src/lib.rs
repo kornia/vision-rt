@@ -10,6 +10,6 @@ pub mod model;
 pub mod postprocess;
 
 pub use kornia_imgproc::preprocess::Preprocessor;
-pub use matching::{MatchResult, Matcher};
+pub use matching::{Descriptors, MatchResult, Matcher};
 pub use model::{XFeat, XFeatParams};
 pub use postprocess::{XFeatError, XFeatPostproc, XFeatResult};

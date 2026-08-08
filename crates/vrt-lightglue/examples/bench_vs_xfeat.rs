@@ -35,7 +35,11 @@ use kornia_io::functional::read_image_any_rgb8;
 use vrt::CudaStream;
 use vrt_lightglue::LightGlue;
 use vrt_raco_aliked::RaCoAliked;
-use vrt_xfeat::{Matcher, XFeat, XFeatParams};
+use vrt_xfeat::{Descriptors, Matcher, XFeat, XFeatParams};
+
+#[path = "common/mod.rs"]
+mod common;
+use common::read_floats;
 
 const XFEAT_THRESHOLD: f32 = 0.05;
 const MIN_COSSIM: f32 = 0.82;
@@ -53,7 +57,9 @@ fn main() -> Result<(), vrt::BoxError> {
         std::process::exit(1);
     }
     let iters: usize = a.get(6).and_then(|s| s.parse().ok()).unwrap_or(20);
-    let gt = a.get(7).and_then(|p| load_affine(p));
+    // `.and_then` would turn a mistyped path into a silent fallback to the
+    // median-displacement proxy, which only rewards a matcher for agreeing with itself.
+    let gt = a.get(7).map(|p| load_affine(p)).transpose()?;
     match &gt {
         Some(m) => println!("ground-truth affine: [{:?}]", m),
         None => println!("no ground truth — scoring against median displacement"),
@@ -148,13 +154,17 @@ fn minimum(v: &[f64]) -> f64 {
 /// Ground-truth affine mapping left pixels to right pixels, if one was supplied.
 type Affine = [f32; 6];
 
-fn load_affine(path: &str) -> Option<Affine> {
-    let txt = std::fs::read_to_string(path).ok()?;
-    let v: Vec<f32> = txt
-        .split_whitespace()
-        .filter_map(|t| t.parse().ok())
-        .collect();
-    (v.len() >= 6).then(|| [v[0], v[1], v[2], v[3], v[4], v[5]])
+/// Load a 2x3 affine, failing on anything it cannot parse.
+///
+/// Dropping unparseable tokens and checking only the count is the trap `read_floats`
+/// exists to close: one typo shifts the remaining values into the wrong slots and still
+/// satisfies `len() >= 6`, producing a wrong-but-plausible inlier percentage.
+fn load_affine(path: &str) -> Result<Affine, vrt::BoxError> {
+    let v = read_floats(std::path::Path::new(path))?;
+    if v.len() < 6 {
+        return Err(format!("{path}: expected 6 affine values, got {}", v.len()).into());
+    }
+    Ok(std::array::from_fn(|i| v[i] as f32))
 }
 
 /// Fraction of matches landing within `INLIER_PX` of where `gt` says they should.
@@ -215,7 +225,7 @@ fn bench_raco(
     for _ in 0..WARMUP {
         raco.submit(left, &mut l)?;
         raco.submit(right, &mut r)?;
-        glue.submit_match(&l, &r, &mut m)?;
+        glue.submit(&l, &r, &mut m)?;
         stream.synchronize()?;
     }
 
@@ -230,14 +240,14 @@ fn bench_raco(
         ext.push(t.elapsed().as_secs_f64() * 1e3);
 
         let t = Instant::now();
-        glue.submit_match(&l, &r, &mut m)?;
+        glue.submit(&l, &r, &mut m)?;
         stream.synchronize()?;
         mat.push(t.elapsed().as_secs_f64() * 1e3);
 
         let t = Instant::now();
         raco.submit(left, &mut l)?;
         raco.submit(right, &mut r)?;
-        glue.submit_match(&l, &r, &mut m)?;
+        glue.submit(&l, &r, &mut m)?;
         stream.synchronize()?;
         tot.push(t.elapsed().as_secs_f64() * 1e3);
     }
@@ -292,7 +302,12 @@ fn bench_xfeat(
         xf.submit(left, &mut l)?;
         xf.submit(right, &mut r)?;
         stream.synchronize()?;
-        matcher.submit_match(&l.descs, l.count(), &r.descs, r.count(), MIN_COSSIM, &mut m)?;
+        matcher.submit(
+            Descriptors::from_xfeat(&l),
+            Descriptors::from_xfeat(&r),
+            MIN_COSSIM,
+            &mut m,
+        )?;
         stream.synchronize()?;
     }
 
@@ -305,7 +320,12 @@ fn bench_xfeat(
         ext.push(t.elapsed().as_secs_f64() * 1e3);
 
         let t = Instant::now();
-        matcher.submit_match(&l.descs, l.count(), &r.descs, r.count(), MIN_COSSIM, &mut m)?;
+        matcher.submit(
+            Descriptors::from_xfeat(&l),
+            Descriptors::from_xfeat(&r),
+            MIN_COSSIM,
+            &mut m,
+        )?;
         stream.synchronize()?;
         mat.push(t.elapsed().as_secs_f64() * 1e3);
 
@@ -313,7 +333,12 @@ fn bench_xfeat(
         xf.submit(left, &mut l)?;
         xf.submit(right, &mut r)?;
         stream.synchronize()?;
-        matcher.submit_match(&l.descs, l.count(), &r.descs, r.count(), MIN_COSSIM, &mut m)?;
+        matcher.submit(
+            Descriptors::from_xfeat(&l),
+            Descriptors::from_xfeat(&r),
+            MIN_COSSIM,
+            &mut m,
+        )?;
         stream.synchronize()?;
         tot.push(t.elapsed().as_secs_f64() * 1e3);
     }

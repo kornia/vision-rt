@@ -99,9 +99,26 @@ known ground-truth affine, within 2 px.
 | `vrt-raco-aliked` + `vrt-lightglue`, k512 | 98.2 ms | 7.9 ms | **106.0 ms** | 100.0% / 99.1% / 98.0% |
 | …k3072 (extractor default) | **57.0 ms** | 126.5 ms | 183.5 ms | 99.8% / 94.3% / 92.8% |
 
-**XFeat stays the right default** — ~14× faster and, on translation, as accurate. RaCo buys
-rotation robustness: XFeat degrades past ~15° and fails outright at 90°, and giving it the
-same keypoint budget does not rescue it.
+**XFeat stays the right default** for throughput — ~14x faster and, on translation, as
+accurate. What it does not survive is rotation. On the Oxford/VGG affine benchmark
+(ground-truth homographies, 3 px at original resolution, every column at k3072), the
+in-plane rotations recovered from the homographies are **+150°**, **-120°** and **-80°**
+for `bark/3`, `bark/4` and `boat/4`; XFeat + mutual-NN scores **0.0%** on all three — and
+on every pair past ~79°, while staying nonzero below it. Swept in isolation on synthetic
+rotations with exact ground truth, RaCo-ALIKED + LightGlue+ holds **98.5–100% precision
+from 0° to 180°** and **99.3–100% from 1× to 5× zoom**; XFeat is at 26.6% by 45° and 0% by
+120°.
+
+At a matched keypoint budget LightGlue+ dominates on both axes: **12412** Oxford inliers
+against 4821 for mutual-NN on the same descriptors and 3837 for XFeat, at roughly three
+times the precision. That holds against a *tuned* mutual-NN, not just an ungated one —
+sweeping the similarity gate moves the baseline along a precision/recall curve that never
+reaches LightGlue's operating point. The sweep is published alongside the tables.
+
+On **IMC 2021 phototourism** (90 pairs, real 3D scenes, ground-truth poses, Sampson error
+<= 1 px) macro precision across co-visibility bands from 0.5 down to 0.1 goes **92.3% ->
+86.7%** for LightGlue+, **70.2% -> 39.7%** for mutual-NN on the same descriptors, and
+**55.6% -> 21.3%** for XFeat. Both benchmarks ship as examples in `vrt-lightglue`.
 
 `K` picks a structurally different graph — at K≥3072 RaCo's ranker is bypassed, halving
 extraction, while the O(K²) matcher grows. Extraction and matching therefore want opposite

@@ -2865,7 +2865,9 @@ version = "0.1.0"
 dependencies = [
  "cudarc",
  "env_logger",
+ "kornia-algebra",
  "kornia-image",
+ "kornia-imgproc",
  "kornia-io",
  "kornia-tensor",
  "thiserror 2.0.18",

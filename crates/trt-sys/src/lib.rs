@@ -32,6 +32,11 @@ include!(concat!(env!("OUT_DIR"), "/bridge_bindings.rs"));
 #[cfg(trt_stub)]
 include!("pregenerated_bindings.rs");
 
+// Stub builds must LINK too, so the workspace's GPU-free tests can gate in
+// hosted CI rather than only on the (disabled) Jetson runner.
+#[cfg(trt_stub)]
+mod stub_symbols;
+
 // In-process ONNX -> engine builder (feature = "builder", links nvonnxparser).
 #[cfg(all(feature = "builder", not(trt_stub)))]
 include!(concat!(env!("OUT_DIR"), "/builder_bindings.rs"));

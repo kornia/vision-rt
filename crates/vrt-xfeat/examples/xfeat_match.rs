@@ -25,7 +25,7 @@ use kornia_io::functional::read_image_any_rgb8;
 use kornia_io::png::write_image_png_rgb8;
 use vrt::logger::Severity;
 use vrt::{CudaStream, Engine, Logger, Runtime};
-use vrt_xfeat::{Matcher, XFeat, XFeatParams};
+use vrt_xfeat::{Descriptors, Matcher, XFeat, XFeatParams};
 
 const TOP_K: usize = 2048;
 const THRESHOLD: f32 = 0.05;
@@ -88,11 +88,9 @@ fn main() -> Result<(), vrt::BoxError> {
     // Match on the same stream (decoupled Matcher): submit → one sync → read pairs.
     let matcher = Matcher::new(stream.clone())?;
     let mut m = matcher.alloc_result(map_res.capacity().max(query_res.capacity()))?;
-    matcher.submit_match(
-        &map_res.descs,
-        map_res.count(),
-        &query_res.descs,
-        query_res.count(),
+    matcher.submit(
+        Descriptors::from_xfeat(&map_res),
+        Descriptors::from_xfeat(&query_res),
         MIN_COSSIM,
         &mut m,
     )?;
