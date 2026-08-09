@@ -120,12 +120,12 @@ On **IMC 2021 phototourism** (90 pairs, real 3D scenes, ground-truth poses, Samp
 86.7%** for LightGlue+, **70.2% -> 39.7%** for mutual-NN on the same descriptors, and
 **55.6% -> 21.3%** for XFeat. Both benchmarks ship as examples in `vrt-lightglue`.
 
-Measured on an idle, clock-locked Orin Nano: RaCo extraction is **79.4 ms** per pair,
-LightGlue adds 22.5 ms (k1024) or 132.4 ms (k3072), and the 128-D mutual-NN kernel adds
-~7.4 ms. Since extraction dominates, mutual-NN buys ~14% end-to-end over the k1024 default
-while giving up most of the precision — it earns its place only where many pairs share one
-extraction. XFeat's whole pipeline is 10.8 ms, which is why it stays the throughput
-default.
+On an idle, clock-locked Orin Nano, XFeat's whole pipeline costs roughly what RaCo spends
+on *extraction alone* — which is what makes it the throughput default. RaCo's extraction
+also dominates its own pipeline, so swapping LightGlue for the cheaper 128-D mutual-NN
+kernel buys little end-to-end while giving up most of the precision; it earns its place
+only where many pairs share one extraction. Measurements and conditions:
+[`vrt-lightglue`](crates/vrt-lightglue/README.md#latency-and-when-the-128-d-mutual-nn-kernel-is-worth-using).
 
 `K` picks a structurally different graph — at K≥3072 RaCo's ranker is bypassed, halving
 extraction, while the O(K²) matcher grows. Extraction and matching therefore want opposite

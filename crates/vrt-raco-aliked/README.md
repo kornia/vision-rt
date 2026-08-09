@@ -122,11 +122,9 @@ ground truth), RaCo-ALIKED + LightGlue+ holds **98.5–100% precision from 0° t
 120°. Note the invariance is the *matcher's*: the same ALIKED descriptors under raw
 mutual-NN also collapse at 45°.
 
-On an idle, clock-locked Orin Nano this pipeline costs **79.4 ms** of extraction per pair
-plus 22.5 ms (LightGlue k1024) or 132.4 ms (k3072) of matching; XFeat's entire pipeline is
-10.8 ms. Extraction dominates, so replacing LightGlue with the 128-D mutual-NN kernel saves
-only ~14% end-to-end for a 56-point precision loss — it is worth it only when many pairs
-share one extraction.
+Extraction dominates this pipeline's latency, so replacing LightGlue with the cheaper
+128-D mutual-NN kernel saves little end-to-end and costs most of the precision — it is
+worth it only when many pairs share one extraction.
 
 Full tables, both matcher configurations, the mutual-NN gate sweep and the commands that
 produce all of it live in
