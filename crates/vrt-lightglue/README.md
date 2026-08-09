@@ -67,6 +67,12 @@ exactly RaCo's ranker, and the top-1024 by raw detector confidence turns out to 
 ranker's pick in quality here. All three rows measured in one run, so the comparison is on
 equal footing; absolute values carry that run's load.
 
+> The tables in this section were taken on a **loaded** box and at a different resolution,
+> so read them for their *ratios* only — they are internally consistent because each table
+> is one run, but they are not comparable with each other or with the idle-box figures
+> under [Latency](#latency-and-when-the-128-d-mutual-nn-kernel-is-worth-using) below.
+> Where the two disagree on an absolute number, the idle-box one is the measurement.
+
 Use plain k512 only if you cannot extract at k3072 for memory reasons. Both halves must
 still come from the same export family.
 
@@ -112,6 +118,52 @@ min alongside median so that shows up.
 
 **Not comparable to the upstream blog post**, which reports a *speedup ratio* (2.67×) vs an
 fp16 `torch.compile` baseline on an RTX 4080 Laptop, for the RaCo detector alone.
+
+## Latency, and when the 128-D mutual-NN kernel is worth using
+
+The reason to have a mutual-NN kernel at all is speed: LightGlue's attention is O(K²) and
+dominates at large K. This measures whether that pays off.
+
+> Measured 2026-08-09 on a Jetson Orin Nano, **clocks locked at 1020 MHz**
+> (`jetson_clocks`), MAXN_SUPER, with nothing else on the GPU — the camera nodes and the
+> SfM build were stopped first. Min of 50 iterations after 5 warmups, one 640×512 pair,
+> the same k3072 extractor throughout. Earlier revisions of this crate quoted no latency
+> at all because every capture until now was taken under load.
+
+| stage | time |
+|---|---|
+| RaCo-ALIKED extraction (×2) | **79.4 ms** |
+| LightGlue+ k3072 — match | 132.4 ms |
+| LightGlue+ k1024 — match | 22.5 ms |
+| 128-D mutual-NN — match | **~7.4 ms** |
+
+End-to-end (extract ×2 + match): mutual-NN **86.8 ms**, LightGlue k1024 **100.4 ms**,
+LightGlue k3072 **207.3 ms**.
+
+The mutual-NN figure is derived — `raco_mutualnn` reports only end-to-end (86.8 ms), and
+79.4 ms of that is the extraction the other configurations also pay. Both are min-of-N on
+the same engine and image, so the subtraction is sound, but it is a subtraction.
+
+### The kernel is fast. It is still usually the wrong choice.
+
+As a *matcher stage* it is ~18× faster than LightGlue at k3072 and ~3× faster at k1024, so
+the speed claim holds. **Extraction is what dominates.** Against the k1024 default,
+swapping LightGlue for mutual-NN saves 13.6 ms end-to-end — about **14%** — and costs
+macro precision on Oxford falling from **80.5% to 24.3%**. That is a bad trade in a
+one-pair-at-a-time pipeline, which is most of them.
+
+**Where it does pay: many pairs per extraction.** Retrieval, one-to-many matching, or
+re-matching against a cached descriptor bank — anywhere the 79 ms extraction amortises
+across many matches and the 7.4 ms vs 22.5 ms difference is the entire marginal cost. That
+is the case the kernel was worth adding for, and it is the case to use it in.
+
+### And XFeat really is the throughput default
+
+The same run puts XFeat's *entire* pipeline at **10.8 ms** end-to-end against RaCo's
+79.4 ms of extraction alone — 8× faster than RaCo + mutual-NN and 19× faster than RaCo +
+LightGlue k3072. The trade is the one the accuracy tables describe: XFeat scores 0.0% past
+~79° of in-plane rotation, where this pipeline holds 98%+ to 180°. Reach for RaCo when
+rotation is real; reach for XFeat when frame rate is.
 
 ## Accuracy on real data
 
