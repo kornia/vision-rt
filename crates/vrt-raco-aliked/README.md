@@ -122,6 +122,10 @@ ground truth), RaCo-ALIKED + LightGlue+ holds **98.5–100% precision from 0° t
 120°. Note the invariance is the *matcher's*: the same ALIKED descriptors under raw
 mutual-NN also collapse at 45°.
 
+Extraction dominates this pipeline's latency, so replacing LightGlue with the cheaper
+128-D mutual-NN kernel saves little end-to-end and costs most of the precision — it is
+worth it only when many pairs share one extraction.
+
 Full tables, both matcher configurations, the mutual-NN gate sweep and the commands that
 produce all of it live in
 **[`crates/vrt-lightglue/README.md`](../vrt-lightglue/README.md#accuracy-on-real-data)**.
