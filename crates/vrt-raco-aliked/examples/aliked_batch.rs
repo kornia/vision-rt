@@ -125,11 +125,16 @@ fn main() -> Result<(), vrt::BoxError> {
         // engine actually rejects it. `ShapeRejected` is a distinct typed variant, so this asks the
         // ENGINE what it accepts instead of assuming a profile it may not have.
         let mut fitted_pair = None;
-        for (attempt, cap) in [src.cols().max(src.rows()), FALLBACK_MAX_SIDE].into_iter().enumerate() {
+        for (attempt, cap) in [src.cols().max(src.rows()), FALLBACK_MAX_SIDE]
+            .into_iter()
+            .enumerate()
+        {
             let scaled = match fit_to_engine(&src, cap, InterpolationMode::Bilinear) {
                 Ok(v) => v,
                 Err(e) => {
-                    if attempt == 1 { eprintln!("  skip {}: {e}", p.display()); }
+                    if attempt == 1 {
+                        eprintln!("  skip {}: {e}", p.display());
+                    }
                     continue;
                 }
             };
@@ -150,7 +155,9 @@ fn main() -> Result<(), vrt::BoxError> {
                 }
             }
         }
-        let Some((out, scaled)) = fitted_pair else { continue };
+        let Some((out, scaled)) = fitted_pair else {
+            continue;
+        };
 
         // `keypoints_host` already returns pixels in the image THIS tool handed the extractor — it
         // applies its own internal 32 px fit on the way out — but it knows nothing about the
@@ -177,7 +184,13 @@ fn main() -> Result<(), vrt::BoxError> {
             )
             .into());
         }
-        write_vrtk(&out_dir.join(format!("{stem}.vrtk")), &kpts, &descs, dim, fp)?;
+        write_vrtk(
+            &out_dir.join(format!("{stem}.vrtk")),
+            &kpts,
+            &descs,
+            dim,
+            fp,
+        )?;
         done += 1;
         if done.is_multiple_of(50) {
             eprintln!("  {done}/{}", names.len());

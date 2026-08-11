@@ -177,102 +177,127 @@ fn main() -> Result<(), vrt::BoxError> {
     // propagate straight out and discard the whole run's GPU work; the `?`s below now unwind only
     // as far as this closure.
     let mut run = || -> Result<(), vrt::BoxError> {
-    for (n, &(a, b)) in pairs.iter().enumerate() {
-        for idx in [a, b] {
-            if dead.contains(&idx) {
+        for (n, &(a, b)) in pairs.iter().enumerate() {
+            for idx in [a, b] {
+                if dead.contains(&idx) {
+                    continue;
+                }
+                if cache.contains_key(&idx) {
+                    // Refresh recency. Without this `order` is insertion order and the eviction is
+                    // FIFO despite its name — harmless at CACHE=24 against a ~13-frame window, but it
+                    // silently stops being harmless the moment either number moves.
+                    if let Some(pos) = order.iter().position(|&k| k == idx) {
+                        let k = order.remove(pos);
+                        order.push(k);
+                    }
+                    continue;
+                }
+                let p = path_for(idx);
+                let Ok(src) = read_image_any_rgb8(&p) else {
+                    dead.insert(idx);
+                    continue;
+                };
+                // Natural size first, 640 only if the engine rejects it — the SAME `fit_to_engine` and
+                // the same fallback constant `aliked_batch` uses, because the two must see the same
+                // pixels to detect the same keypoints in the same order.
+                let mut got = None;
+                for (attempt, cap) in [src.cols().max(src.rows()), FALLBACK_MAX_SIDE]
+                    .into_iter()
+                    .enumerate()
+                {
+                    let Ok(scaled) = fit_to_engine(&src, cap, InterpolationMode::Bilinear) else {
+                        continue;
+                    };
+                    let Ok(dev) = scaled.image.to_cuda(&stream) else {
+                        continue;
+                    };
+                    let Ok(mut r) = raco.alloc_result() else {
+                        continue;
+                    };
+                    match raco.submit(&dev, &mut r) {
+                        // Counted, not propagated: a sync failure here costs this frame, and the pairs
+                        // that need it, but the pairs already matched are still worth writing out.
+                        Ok(()) => match stream.synchronize() {
+                            Ok(()) => {
+                                got = Some(r);
+                                break;
+                            }
+                            Err(e) => {
+                                eprintln!("  frame {idx}: sync failed: {e}");
+                                break;
+                            }
+                        },
+                        Err(vrt_raco_aliked::RaCoAlikedError::ShapeRejected { .. })
+                            if attempt == 0 => {}
+                        Err(_) => break,
+                    }
+                }
+                let Some(r) = got else {
+                    dead.insert(idx);
+                    continue;
+                };
+                cache.insert(idx, r);
+                order.push(idx);
+                // Evict the least recently inserted that is not one of the two in flight.
+                while order.len() > CACHE {
+                    if let Some(pos) = order.iter().position(|&k| k != a && k != b) {
+                        let k = order.remove(pos);
+                        cache.remove(&k);
+                    } else {
+                        break;
+                    }
+                }
+            }
+            let (Some(ra), Some(rb)) = (cache.get(&a), cache.get(&b)) else {
                 continue;
-            }
-            if cache.contains_key(&idx) {
-                // Refresh recency. Without this `order` is insertion order and the eviction is
-                // FIFO despite its name — harmless at CACHE=24 against a ~13-frame window, but it
-                // silently stops being harmless the moment either number moves.
-                if let Some(pos) = order.iter().position(|&k| k == idx) {
-                    let k = order.remove(pos);
-                    order.push(k);
-                }
-                continue;
-            }
-            let p = path_for(idx);
-            let Ok(src) = read_image_any_rgb8(&p) else { dead.insert(idx); continue };
-            // Natural size first, 640 only if the engine rejects it — the SAME `fit_to_engine` and
-            // the same fallback constant `aliked_batch` uses, because the two must see the same
-            // pixels to detect the same keypoints in the same order.
-            let mut got = None;
-            for (attempt, cap) in [src.cols().max(src.rows()), FALLBACK_MAX_SIDE].into_iter().enumerate() {
-                let Ok(scaled) = fit_to_engine(&src, cap, InterpolationMode::Bilinear) else { continue };
-                let Ok(dev) = scaled.image.to_cuda(&stream) else { continue };
-                let Ok(mut r) = raco.alloc_result() else { continue };
-                match raco.submit(&dev, &mut r) {
-                    // Counted, not propagated: a sync failure here costs this frame, and the pairs
-                    // that need it, but the pairs already matched are still worth writing out.
-                    Ok(()) => match stream.synchronize() {
-                        Ok(()) => { got = Some(r); break; }
-                        Err(e) => { eprintln!("  frame {idx}: sync failed: {e}"); break; }
-                    },
-                    Err(vrt_raco_aliked::RaCoAlikedError::ShapeRejected { .. }) if attempt == 0 => {}
-                    Err(_) => break,
-                }
-            }
-            let Some(r) = got else { dead.insert(idx); continue };
-            cache.insert(idx, r);
-            order.push(idx);
-            // Evict the least recently inserted that is not one of the two in flight.
-            while order.len() > CACHE {
-                if let Some(pos) = order.iter().position(|&k| k != a && k != b) {
-                    let k = order.remove(pos);
-                    cache.remove(&k);
-                } else {
-                    break;
-                }
-            }
-        }
-        let (Some(ra), Some(rb)) = (cache.get(&a), cache.get(&b)) else {
-            continue;
-        };
-        if let Err(e) = glue.submit(ra, rb, &mut matches) {
-            if failed_pairs == 0 {
-                eprintln!("  pair {a}-{b} failed to match: {e}");
-            }
-            failed_pairs += 1;
-            continue;
-        }
-        // Every readback below is counted rather than propagated, for the same reason as above: a
-        // pair that cannot be read back is one lost edge, not grounds to discard the run.
-        let readback = stream
-            .synchronize()
-            .map_err(|e| -> vrt::BoxError { e.into() })
-            .and_then(|()| Ok((matches.pairs(0.0)?, matches.scores_host()?)));
-        let (m, scores) = match readback {
-            Ok(v) => v,
-            Err(e) => {
+            };
+            if let Err(e) = glue.submit(ra, rb, &mut matches) {
                 if failed_pairs == 0 {
-                    eprintln!("  pair {a}-{b} failed to read back: {e}");
+                    eprintln!("  pair {a}-{b} failed to match: {e}");
                 }
                 failed_pairs += 1;
                 continue;
             }
-        };
-        // `pairs(min_score)` returns (index in A, index in B) into the extractor's own ordering,
-        // which is exactly the ordering `aliked_batch` wrote — so these indices are directly usable
-        // by the consumer without any remapping.
-        //
-        // The `?`s here are output-file writes. Those DO abort: if the destination is unwritable
-        // there is nothing left to salvage, and the closure still lets the header be patched.
-        w.write_all(&(a as u32).to_le_bytes())?;
-        w.write_all(&(b as u32).to_le_bytes())?;
-        w.write_all(&(m.len() as u32).to_le_bytes())?;
-        for (ia, ib) in &m {
-            w.write_all(&(*ia as u32).to_le_bytes())?;
-            w.write_all(&(*ib as u32).to_le_bytes())?;
-            let s = scores.get(*ia).copied().unwrap_or(0.0);
-            w.write_all(&s.to_le_bytes())?;
+            // Every readback below is counted rather than propagated, for the same reason as above: a
+            // pair that cannot be read back is one lost edge, not grounds to discard the run.
+            let readback = stream
+                .synchronize()
+                .map_err(|e| -> vrt::BoxError { e.into() })
+                .and_then(|()| Ok((matches.pairs(0.0)?, matches.scores_host()?)));
+            let (m, scores) = match readback {
+                Ok(v) => v,
+                Err(e) => {
+                    if failed_pairs == 0 {
+                        eprintln!("  pair {a}-{b} failed to read back: {e}");
+                    }
+                    failed_pairs += 1;
+                    continue;
+                }
+            };
+            // `pairs(min_score)` returns (index in A, index in B) into the extractor's own ordering,
+            // which is exactly the ordering `aliked_batch` wrote — so these indices are directly usable
+            // by the consumer without any remapping.
+            //
+            // The `?`s here are output-file writes. Those DO abort: if the destination is unwritable
+            // there is nothing left to salvage, and the closure still lets the header be patched.
+            w.write_all(&(a as u32).to_le_bytes())?;
+            w.write_all(&(b as u32).to_le_bytes())?;
+            w.write_all(&(m.len() as u32).to_le_bytes())?;
+            for (ia, ib) in &m {
+                w.write_all(&(*ia as u32).to_le_bytes())?;
+                w.write_all(&(*ib as u32).to_le_bytes())?;
+                let s = scores.get(*ia).copied().unwrap_or(0.0);
+                w.write_all(&s.to_le_bytes())?;
+            }
+            written += 1;
+            total_matches += m.len();
+            if n.is_multiple_of(200) {
+                eprintln!(
+                    "  {n}/{} pairs, {total_matches} matches so far",
+                    pairs.len()
+                );
+            }
         }
-        written += 1;
-        total_matches += m.len();
-        if n.is_multiple_of(200) {
-            eprintln!("  {n}/{} pairs, {total_matches} matches so far", pairs.len());
-        }
-    }
         Ok(())
     };
     let loop_result = run();
