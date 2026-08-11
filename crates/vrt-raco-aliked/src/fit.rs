@@ -75,6 +75,45 @@ pub enum FitError {
         rw: usize,
         rh: usize,
     },
+    /// A host image reached [`fit_to_engine_cuda`]. Reported rather than silently uploaded: an
+    /// implicit transfer per frame is exactly the cost this path exists to remove, so it should
+    /// fail loudly instead of quietly performing it.
+    #[error("{0} image is not device-resident; upload it with `to_cuda` first")]
+    NotDeviceResident(&'static str),
+    #[error("CUDA: {0}")]
+    Cuda(String),
+}
+
+/// The geometry of one fit: resize to `rw x rh`, then crop to `cw x ch`.
+///
+/// Split out as its own type because the host and device paths MUST agree on it exactly. They
+/// exchange nothing at runtime, so if the arithmetic were written twice the two could drift and a
+/// build that mixed them would place keypoints from one geometry into coordinates computed for the
+/// other — well-formed, and wrong. Everything below is integer arithmetic on dimensions, so both
+/// paths reach identical numbers by construction rather than by review.
+struct Plan {
+    rw: usize,
+    rh: usize,
+    cw: usize,
+    ch: usize,
+}
+
+impl Plan {
+    fn new(w: usize, h: usize, max_side: usize) -> Result<Self, FitError> {
+        let scale = (max_side as f64 / w.max(h) as f64).min(1.0);
+        let (rw, rh) = (
+            ((w as f64 * scale).round() as usize).max(1),
+            ((h as f64 * scale).round() as usize).max(1),
+        );
+        let (cw, ch) = (
+            rw / DIM_DIVISOR * DIM_DIVISOR,
+            rh / DIM_DIVISOR * DIM_DIVISOR,
+        );
+        if cw == 0 || ch == 0 {
+            return Err(FitError::TooSmall { w, h, rw, rh });
+        }
+        Ok(Self { rw, rh, cw, ch })
+    }
 }
 
 /// Downscale to fit `max_side` with a **uniform** scale, then crop to a multiple of
@@ -98,18 +137,7 @@ pub fn fit_to_engine(
     interpolation: InterpolationMode,
 ) -> Result<Scaled, FitError> {
     let (w, h) = (src.cols(), src.rows());
-    let scale = (max_side as f64 / w.max(h) as f64).min(1.0);
-    let (rw, rh) = (
-        ((w as f64 * scale).round() as usize).max(1),
-        ((h as f64 * scale).round() as usize).max(1),
-    );
-    let (cw, ch) = (
-        rw / DIM_DIVISOR * DIM_DIVISOR,
-        rh / DIM_DIVISOR * DIM_DIVISOR,
-    );
-    if cw == 0 || ch == 0 {
-        return Err(FitError::TooSmall { w, h, rw, rh });
-    }
+    let Plan { rw, rh, cw, ch } = Plan::new(w, h, max_side)?;
 
     // Skip the resample entirely when the natural size already fits — the full-resolution path is
     // now the common one, and a 1080x1920 frame is 6 MB of pointless copy per call on a 7.4 GB
@@ -162,6 +190,140 @@ pub fn fit_to_engine(
         scale_x: rw as f64 / w as f64,
         scale_y: rh as f64 / h as f64,
     })
+}
+
+/// [`fit_to_engine`] with the resize and the crop run **on the GPU**.
+///
+/// `src` must already be device-resident (`Image::to_cuda`), and the returned image is too — so it
+/// goes straight into [`RaCoAliked::submit`](crate::RaCoAliked::submit) with no round trip.
+///
+/// ## When this is the faster path, and when it is not
+///
+/// Use it when the frame is **already on the device** — a camera surface, or any pipeline whose
+/// previous stage left its output in device memory. There it is a clear win: measured on an Orin
+/// Nano at 1080x1920 -> 640, the fit itself costs 0.53 ms against the host's 1.13 ms, because a
+/// >2x antialiased downscale is exactly the work a GPU is for.
+///
+/// Do NOT reach for it when the frame starts on the host, as a JPEG-fed batch tool's does. The
+/// host path uploads the FITTED image; this one has to upload the RAW frame, and at the 640 cap
+/// that is 6.2 MB against 0.68 MB. Measured end to end on the same board:
+///
+/// ```text
+///                                     host fit + upload   device fit + upload
+///   1080x1920 natural (crop only)          1.95 ms          3.33 ms (2.24 + 1.10)
+///   1080x1920 -> 640 (resize + crop)       1.13 ms          1.62 ms (0.53 + 1.09)
+/// ```
+///
+/// The upload is the whole difference, and it is not avoidable: the extractor needs device memory
+/// either way, so the only question is whether the bytes crossing the bus are the big ones or the
+/// small ones. Both numbers are a few percent of the ~79 ms the extractor itself takes, so this is
+/// a choice about which resource to spend rather than a bottleneck in either direction.
+///
+/// ## Why this cannot drift from the host path
+///
+/// (Which matters more than the timing: the two paths write coordinates into files that are
+/// compared against each other.)
+///
+/// The resize is the SAME `resize_fast_u8_aa` call. kornia routes a device/device pair to its CUDA
+/// u8 kernels and documents the result as bit-identical — "the coordinate/weight tables come from
+/// the same host builders the CPU uses" — with `resize_u8_path` as a single shared routing
+/// decision, so a device pair always runs the GPU twin of the kernel a host pair would run. A
+/// mixed host/device pair is a typed error, never a silent transfer. The geometry comes from the
+/// same [`Plan`]. That leaves the crop as the only genuinely separate implementation, and a
+/// top-left crop is a row-wise copy in both worlds.
+pub fn fit_to_engine_cuda(
+    src: &Image<u8, 3>,
+    max_side: usize,
+    interpolation: InterpolationMode,
+    stream: &std::sync::Arc<cudarc::driver::CudaStream>,
+) -> Result<Scaled, FitError> {
+    let (w, h) = (src.cols(), src.rows());
+    let Plan { rw, rh, cw, ch } = Plan::new(w, h, max_side)?;
+    let (scale_x, scale_y) = (rw as f64 / w as f64, rh as f64 / h as f64);
+
+    // Same skip as the host path: at natural size there is nothing to resample, only to crop.
+    let resized;
+    let fitted = if (rw, rh) == (w, h) {
+        src
+    } else {
+        let mut dst = Image::<u8, 3>::zeros_cuda(
+            ImageSize {
+                width: rw,
+                height: rh,
+            },
+            stream,
+        )?;
+        // Device in, device out — this dispatches to the CUDA kernels. If `src` were host-resident
+        // kornia would return a residency error rather than quietly falling back, which is what
+        // makes "did this actually run on the GPU?" a question the types answer.
+        resize_fast_u8_aa::<3>(src, &mut dst, interpolation, true)?;
+        resized = dst;
+        &resized
+    };
+
+    // Always through the crop, even when `(cw, ch) == (rw, rh)` and it degenerates to a straight
+    // copy. The host path can return the resized buffer by move there; here the borrow may point at
+    // `src`, which the caller owns and may reuse, so a copy is needed either way — and one path is
+    // worth more than saving a D2D memcpy the resize already dwarfs.
+    let mut out = Image::<u8, 3>::zeros_cuda(
+        ImageSize {
+            width: cw,
+            height: ch,
+        },
+        stream,
+    )?;
+    copy_rows_dtod(fitted, &mut out, rw, cw, ch, stream)?;
+    Ok(Scaled {
+        image: out,
+        scale_x,
+        scale_y,
+    })
+}
+
+/// Top-left crop on the device: `ch` stream-ordered D2D row copies.
+///
+/// Row-wise rather than one copy because the destination rows are contiguous while the source rows
+/// are strided by the pre-crop width. Stream-ordered, so it needs no sync of its own — it lands in
+/// order with the resize before it and the extractor after it.
+fn copy_rows_dtod(
+    src: &Image<u8, 3>,
+    dst: &mut Image<u8, 3>,
+    src_w: usize,
+    cw: usize,
+    ch: usize,
+    stream: &std::sync::Arc<cudarc::driver::CudaStream>,
+) -> Result<(), FitError> {
+    // When the width is unchanged the kept region is a contiguous PREFIX of the buffer, so the
+    // whole crop is one copy. This is not a rare special case: it is every frame whose width
+    // already sits on the 32 px grid, which includes the 480-wide previews and every 640 fallback.
+    if cw == src_w {
+        let s = src
+            .0
+            .as_cudaslice()
+            .ok_or(FitError::NotDeviceResident("source"))?;
+        let d = dst
+            .0
+            .as_cudaslice_mut()
+            .ok_or(FitError::NotDeviceResident("destination"))?;
+        let n = cw * ch * 3;
+        let sv = s.slice(0..n);
+        let mut dv = d.slice_mut(0..n);
+        return stream
+            .memcpy_dtod(&sv, &mut dv)
+            .map_err(|e| FitError::Cuda(e.to_string()));
+    }
+
+    // Strided crop, in ONE launch. The obvious form — one `memcpy_dtod` per row — was measured at
+    // 11.6 ms for a 1920-row frame against 2.1 ms for the entire host path: at ~5 us of launch
+    // overhead apiece, 1920 launches are the whole cost, and the copy itself is free by comparison.
+    //
+    // An identity affine is a pure copy: every destination pixel samples its own integer source
+    // coordinate, where the bilinear weights collapse to the top-left tap exactly. `warp_affine_u8`
+    // is used rather than a hand-rolled kernel for the same reason as the resize — it carries
+    // kornia's residency dispatch and its host/device bit-identity guarantee, so the device crop
+    // cannot drift from the host one. `gpu_fit.rs` asserts that byte-for-byte.
+    let m = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+    kornia_imgproc::warp::warp_affine_u8::<3>(src, dst, &m).map_err(FitError::Image)
 }
 
 #[cfg(test)]

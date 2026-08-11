@@ -124,6 +124,11 @@ fn main() -> Result<(), vrt::BoxError> {
         // Natural size first (floored to the model grid), and only fall back to the 640 cap if the
         // engine actually rejects it. `ShapeRejected` is a distinct typed variant, so this asks the
         // ENGINE what it accepts instead of assuming a profile it may not have.
+        // HOST fit, deliberately, even though `fit_to_engine_cuda` exists and is byte-for-byte
+        // identical. The frame arrives as a JPEG on the host, so the device path would have to
+        // upload the RAW 6.2 MB frame where this uploads the fitted 0.68 MB one — measured 1.13 ms
+        // against 1.62 ms at the 640 cap on this board. The CUDA fit is for callers whose frame is
+        // ALREADY device-resident, where that upload does not exist.
         let mut fitted_pair = None;
         for (attempt, cap) in [src.cols().max(src.rows()), FALLBACK_MAX_SIDE]
             .into_iter()

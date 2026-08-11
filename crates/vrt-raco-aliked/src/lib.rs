@@ -69,7 +69,7 @@ use kornia_tensor::{zeros_cuda, Tensor};
 use vrt::{BoxError, Engine, ModelSession};
 
 mod fit;
-pub use fit::{fit_to_engine, FitError, Scaled, FALLBACK_MAX_SIDE};
+pub use fit::{fit_to_engine, fit_to_engine_cuda, FitError, Scaled, FALLBACK_MAX_SIDE};
 
 mod identity;
 pub use identity::engine_fingerprint;

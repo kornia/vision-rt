@@ -197,9 +197,11 @@ fn main() -> Result<(), vrt::BoxError> {
                     dead.insert(idx);
                     continue;
                 };
-                // Natural size first, 640 only if the engine rejects it — the SAME `fit_to_engine` and
-                // the same fallback constant `aliked_batch` uses, because the two must see the same
-                // pixels to detect the same keypoints in the same order.
+                // Natural size first, 640 only if the engine rejects it — the SAME `fit_to_engine`
+                // and the same fallback constant `aliked_batch` uses, because the two must see the
+                // same pixels to detect the same keypoints in the same order. Host fit for the same
+                // reason `aliked_batch` uses one: the frame starts as a JPEG, so uploading the
+                // fitted image beats uploading the raw one.
                 let mut got = None;
                 for (attempt, cap) in [src.cols().max(src.rows()), FALLBACK_MAX_SIDE]
                     .into_iter()
