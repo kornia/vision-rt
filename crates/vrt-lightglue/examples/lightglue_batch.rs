@@ -50,7 +50,7 @@ use kornia_imgproc::interpolation::InterpolationMode;
 use kornia_io::functional::read_image_any_rgb8;
 use vrt_lightglue::LightGlue;
 use vrt_raco_aliked::{
-    engine_fingerprint, fit_to_engine, RaCoAliked, RaCoAlikedResult, FALLBACK_MAX_SIDE,
+    engine_fingerprint, fit_to_engine, RaCoAliked, RaCoAlikedResult, FALLBACK_MAX_SIDE, FRAME_EXTS,
 };
 
 /// Extraction results kept on device. 24 covers a 12-wide window on both sides of the cursor.
@@ -143,13 +143,15 @@ fn main() -> Result<(), vrt::BoxError> {
     // valid 0-pair `.vrtm` and exit 0.
     let path_for = |i: usize| -> PathBuf {
         let stem = format!("kf{i:04}");
-        for ext in ["jpg", "jpeg", "png", "JPG", "JPEG", "PNG"] {
-            let p = img_dir.join(format!("{stem}.{ext}"));
-            if p.exists() {
-                return p;
+        for ext in FRAME_EXTS {
+            for cand in [ext.to_string(), ext.to_ascii_uppercase()] {
+                let p = img_dir.join(format!("{stem}.{cand}"));
+                if p.exists() {
+                    return p;
+                }
             }
         }
-        img_dir.join(format!("{stem}.jpg"))
+        img_dir.join(format!("{stem}.{}", FRAME_EXTS[0]))
     };
     let mut cache: HashMap<usize, RaCoAlikedResult> = HashMap::new();
     // Frames that failed once. Without this a bad frame is re-decoded, re-resized and re-uploaded on

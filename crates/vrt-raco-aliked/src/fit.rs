@@ -36,6 +36,15 @@ use crate::DIM_DIVISOR;
 /// [`ShapeRejected`]: crate::RaCoAlikedError::ShapeRejected
 pub const FALLBACK_MAX_SIDE: usize = 640;
 
+/// The image extensions the bridge tools accept, compared case-insensitively.
+///
+/// Shared for the same reason the sizing is: `aliked_batch` scans a directory while
+/// `lightglue_batch` builds filenames from frame indices, so two different lists let one tool see a
+/// frame set the other cannot. That is not a cosmetic disagreement — it is the dead-frame failure
+/// the matcher exits non-zero on, reached by writing `.jpg` in one place and `jpg|jpeg|png` in the
+/// other.
+pub const FRAME_EXTS: [&str; 3] = ["jpg", "jpeg", "png"];
+
 /// An image sized for the engine, with the geometry needed to map coordinates back.
 pub struct Scaled {
     pub image: Image<u8, 3>,
@@ -78,8 +87,8 @@ pub enum FitError {
     /// A host image reached [`fit_to_engine_cuda`]. Reported rather than silently uploaded: an
     /// implicit transfer per frame is exactly the cost this path exists to remove, so it should
     /// fail loudly instead of quietly performing it.
-    #[error("{0} image is not device-resident; upload it with `to_cuda` first")]
-    NotDeviceResident(&'static str),
+    #[error("fit_to_engine_cuda needs device-resident images; upload the source with `to_cuda`")]
+    NotDeviceResident,
     #[error("CUDA: {0}")]
     Cuda(String),
 }
@@ -138,6 +147,7 @@ pub fn fit_to_engine(
 ) -> Result<Scaled, FitError> {
     let (w, h) = (src.cols(), src.rows());
     let Plan { rw, rh, cw, ch } = Plan::new(w, h, max_side)?;
+    let (scale_x, scale_y) = (rw as f64 / w as f64, rh as f64 / h as f64);
 
     // Skip the resample entirely when the natural size already fits — the full-resolution path is
     // now the common one, and a 1080x1920 frame is 6 MB of pointless copy per call on a 7.4 GB
@@ -166,29 +176,28 @@ pub fn fit_to_engine(
     if (cw, ch) == (rw, rh) {
         return Ok(Scaled {
             image: fitted.clone(),
-            scale_x: rw as f64 / w as f64,
-            scale_y: rh as f64 / h as f64,
+            scale_x,
+            scale_y,
         });
     }
 
-    // Crop top-left anchored, so pixel coordinates are unchanged by the crop.
-    let f = fitted.as_slice();
-    let mut cropped = Vec::with_capacity(cw * ch * 3);
-    for y in 0..ch {
-        let row = y * rw * 3;
-        cropped.extend_from_slice(&f[row..row + cw * 3]);
-    }
+    // Crop top-left anchored, so pixel coordinates are unchanged by the crop. `crop_image` rather
+    // than a row loop: it is the same operation, and kornia's carries the NEON strided-row copy and
+    // the rayon split that a scalar loop here would not — on the crop-only path this copy IS the
+    // cost of the fit.
+    let mut cropped = Image::<u8, 3>::from_size_val(
+        ImageSize {
+            width: cw,
+            height: ch,
+        },
+        0,
+    )?;
+    kornia_imgproc::crop::crop_image(fitted, &mut cropped, 0, 0)?;
     Ok(Scaled {
-        image: Image::<u8, 3>::new(
-            ImageSize {
-                width: cw,
-                height: ch,
-            },
-            cropped,
-        )?,
+        image: cropped,
         // The scale from the resize step — cropping does not change it.
-        scale_x: rw as f64 / w as f64,
-        scale_y: rh as f64 / h as f64,
+        scale_x,
+        scale_y,
     })
 }
 
@@ -229,8 +238,9 @@ pub fn fit_to_engine(
 /// the same host builders the CPU uses" — with `resize_u8_path` as a single shared routing
 /// decision, so a device pair always runs the GPU twin of the kernel a host pair would run. A
 /// mixed host/device pair is a typed error, never a silent transfer. The geometry comes from the
-/// same [`Plan`]. That leaves the crop as the only genuinely separate implementation, and a
-/// top-left crop is a row-wise copy in both worlds.
+/// same [`Plan`]. That leaves the crop as the only genuinely separate implementation — `crop_image`
+/// on the host, an identity affine warp on the device — and `gpu_fit.rs` pins those two together
+/// byte-for-byte precisely because they are not the same code.
 pub fn fit_to_engine_cuda(
     src: &Image<u8, 3>,
     max_side: usize,
@@ -272,7 +282,7 @@ pub fn fit_to_engine_cuda(
         },
         stream,
     )?;
-    copy_rows_dtod(fitted, &mut out, rw, cw, ch, stream)?;
+    crop_top_left_device(fitted, &mut out, stream)?;
     Ok(Scaled {
         image: out,
         scale_x,
@@ -280,31 +290,32 @@ pub fn fit_to_engine_cuda(
     })
 }
 
-/// Top-left crop on the device: `ch` stream-ordered D2D row copies.
+/// Top-left crop on the device, in ONE launch, by one of two routes.
 ///
-/// Row-wise rather than one copy because the destination rows are contiguous while the source rows
-/// are strided by the pre-crop width. Stream-ordered, so it needs no sync of its own — it lands in
-/// order with the resize before it and the extractor after it.
-fn copy_rows_dtod(
+/// When the width is unchanged the kept region is a contiguous prefix, so the whole crop is a
+/// single `memcpy_dtod`. Otherwise the rows are strided and it goes through an identity affine
+/// warp. Both are stream-ordered, so this needs no sync of its own — it lands in order with the
+/// resize before it and the extractor after it.
+///
+/// Geometry is read from the buffers rather than passed in: this is the one function whose entire
+/// purpose is that host and device geometry cannot diverge, so it should not be possible to hand it
+/// dimensions that disagree with the images it is also handed.
+fn crop_top_left_device(
     src: &Image<u8, 3>,
     dst: &mut Image<u8, 3>,
-    src_w: usize,
-    cw: usize,
-    ch: usize,
     stream: &std::sync::Arc<cudarc::driver::CudaStream>,
 ) -> Result<(), FitError> {
+    let src_w = src.cols();
+    let (cw, ch) = (dst.cols(), dst.rows());
     // When the width is unchanged the kept region is a contiguous PREFIX of the buffer, so the
     // whole crop is one copy. This is not a rare special case: it is every frame whose width
     // already sits on the 32 px grid, which includes the 480-wide previews and every 640 fallback.
     if cw == src_w {
-        let s = src
-            .0
-            .as_cudaslice()
-            .ok_or(FitError::NotDeviceResident("source"))?;
+        let s = src.0.as_cudaslice().ok_or(FitError::NotDeviceResident)?;
         let d = dst
             .0
             .as_cudaslice_mut()
-            .ok_or(FitError::NotDeviceResident("destination"))?;
+            .ok_or(FitError::NotDeviceResident)?;
         let n = cw * ch * 3;
         let sv = s.slice(0..n);
         let mut dv = d.slice_mut(0..n);

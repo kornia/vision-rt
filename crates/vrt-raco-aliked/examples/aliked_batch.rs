@@ -43,7 +43,9 @@ use std::path::Path;
 
 use kornia_imgproc::interpolation::InterpolationMode;
 use kornia_io::functional::read_image_any_rgb8;
-use vrt_raco_aliked::{engine_fingerprint, fit_to_engine, RaCoAliked, FALLBACK_MAX_SIDE};
+use vrt_raco_aliked::{
+    engine_fingerprint, fit_to_engine, RaCoAliked, FALLBACK_MAX_SIDE, FRAME_EXTS,
+};
 
 fn write_vrtk(
     path: &Path,
@@ -94,7 +96,7 @@ fn main() -> Result<(), vrt::BoxError> {
             p.extension()
                 .and_then(|x| x.to_str())
                 .map(|x| x.to_ascii_lowercase())
-                .is_some_and(|x| matches!(x.as_str(), "jpg" | "jpeg" | "png"))
+                .is_some_and(|x| FRAME_EXTS.contains(&x.as_str()))
         })
         .collect();
     names.sort();
