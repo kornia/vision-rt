@@ -94,6 +94,9 @@ fn main() -> Result<(), vrt::BoxError> {
     out.extend_from_slice(&0u32.to_le_bytes()); // patched with the real count at the end
     let mut written = 0u32;
     let mut total_matches = 0usize;
+    // Pairs the MATCHER rejected, as distinct from pairs skipped for a dead frame. The two mean
+    // different things at exit and are counted apart for that reason.
+    let mut failed_pairs = 0usize;
 
     for (n, &(a, b)) in pairs.iter().enumerate() {
         for idx in [a, b] {
@@ -132,7 +135,11 @@ fn main() -> Result<(), vrt::BoxError> {
         let (Some(ra), Some(rb)) = (cache.get(&a), cache.get(&b)) else {
             continue;
         };
-        if glue.submit(ra, rb, &mut matches).is_err() {
+        if let Err(e) = glue.submit(ra, rb, &mut matches) {
+            if failed_pairs == 0 {
+                eprintln!("  pair {a}-{b} failed to match: {e}");
+            }
+            failed_pairs += 1;
             continue;
         }
         stream.synchronize()?;
@@ -161,12 +168,48 @@ fn main() -> Result<(), vrt::BoxError> {
     // used to propagate out of main and discard the whole run's GPU work.
     std::fs::File::create(out_p)?.write_all(&out)?;
     eprintln!(
-        "lightglue_batch: {written} of {} pairs matched, {total_matches} correspondences, {} bytes",
+        "lightglue_batch: {written} of {} pairs matched, {total_matches} correspondences, \
+         {} dead frames, {failed_pairs} failed pairs, {} bytes",
         pairs.len(),
+        dead.len(),
         out.len()
     );
-    if pairs.is_empty() || written == 0 {
-        return Err(format!("matched {written} of {} pairs", pairs.len()).into());
+    if pairs.is_empty() {
+        return Err("no pairs to match".into());
+    }
+    // A DEAD FRAME is not a degraded result, it is a disagreement. `aliked_batch` exits non-zero
+    // unless it wrote a `.vrtk` for every frame, so if the feature pass succeeded then every frame
+    // in this directory has keypoints — and a frame this tool could not extract means the two tools
+    // no longer share a frame set. The indices in this file address the OTHER tool's keypoint
+    // ordering, so there is no safe partial answer to give: report which frames and stop.
+    if !dead.is_empty() {
+        let mut d: Vec<_> = dead.iter().copied().collect();
+        d.sort_unstable();
+        d.truncate(20);
+        return Err(format!(
+            "{} frames could not be extracted here but have keypoints from the feature pass \
+             (first: {d:?}) — the two tools disagree on the frame set and the match indices \
+             would address the wrong keypoints",
+            dead.len()
+        )
+        .into());
+    }
+    // A FAILED PAIR is a degraded result: the map loses one graph edge and carries on. One transient
+    // failure should not discard a 40-minute build, so this tolerates a small fraction and fails on
+    // anything systemic. The file is already on disk either way, so a caller that disagrees with
+    // this threshold can still use what was produced.
+    const TOLERATED_PAIR_FAILURES: f64 = 0.01;
+    if failed_pairs as f64 > TOLERATED_PAIR_FAILURES * pairs.len() as f64 {
+        return Err(format!(
+            "{failed_pairs} of {} pairs failed to match, over the {:.0}% this tolerates — the \
+             matcher is failing systemically, not transiently",
+            pairs.len(),
+            TOLERATED_PAIR_FAILURES * 100.0
+        )
+        .into());
+    }
+    if failed_pairs > 0 {
+        eprintln!("lightglue_batch: WARNING — {failed_pairs} pairs lost, map loses those edges");
     }
     Ok(())
 }
