@@ -71,6 +71,9 @@ use vrt::{BoxError, Engine, ModelSession};
 mod fit;
 pub use fit::{fit_to_engine, FitError, Scaled, FALLBACK_MAX_SIDE};
 
+mod identity;
+pub use identity::engine_fingerprint;
+
 /// ALIKED descriptor dimensionality. Fixed by the `aliked-n16` weights the export
 /// wraps; the engine's `descriptors` output is validated against it at construction.
 pub const DESC_DIM: usize = 128;

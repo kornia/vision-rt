@@ -17,9 +17,14 @@
 //!   0  "VRTK"
 //!   4  u32  n     keypoints in this file
 //!   8  u32  dim   descriptor dimension (128 for ALIKED)
-//!  12  u32  0     reserved
+//!  12  u32  fp    extractor-engine fingerprint (0 = unknown)
 //!  16  n * (2 + dim) f32   x, y, then dim descriptor values, per keypoint
 //! ```
+//!
+//! Word 12 was a zero reserved field. It now carries [`engine_fingerprint`] of the engine that
+//! produced the keypoints, so the matcher's `.vrtm` can be checked against the file its indices
+//! address instead of the two being assumed to match. Readers that ignored the reserved word are
+//! unaffected; readers that checked it for zero were checking nothing.
 //!
 //! Keypoints are in SOURCE-image pixels, not model pixels. The extractor resizes to a multiple of
 //! 32 internally and reports its own scale factors; not undoing that would hand flux-map
@@ -38,15 +43,21 @@ use std::path::Path;
 
 use kornia_imgproc::interpolation::InterpolationMode;
 use kornia_io::functional::read_image_any_rgb8;
-use vrt_raco_aliked::{fit_to_engine, RaCoAliked, FALLBACK_MAX_SIDE};
+use vrt_raco_aliked::{engine_fingerprint, fit_to_engine, RaCoAliked, FALLBACK_MAX_SIDE};
 
-fn write_vrtk(path: &Path, kpts: &[(f32, f32)], descs: &[f32], dim: usize) -> std::io::Result<()> {
+fn write_vrtk(
+    path: &Path,
+    kpts: &[(f32, f32)],
+    descs: &[f32],
+    dim: usize,
+    fp: u32,
+) -> std::io::Result<()> {
     let n = kpts.len();
     let mut buf: Vec<u8> = Vec::with_capacity(16 + n * (2 + dim) * 4);
     buf.extend_from_slice(b"VRTK");
     buf.extend_from_slice(&(n as u32).to_le_bytes());
     buf.extend_from_slice(&(dim as u32).to_le_bytes());
-    buf.extend_from_slice(&0u32.to_le_bytes());
+    buf.extend_from_slice(&fp.to_le_bytes());
     for (i, (x, y)) in kpts.iter().enumerate() {
         buf.extend_from_slice(&x.to_le_bytes());
         buf.extend_from_slice(&y.to_le_bytes());
@@ -70,14 +81,28 @@ fn main() -> Result<(), vrt::BoxError> {
     let stream = vrt::Stream::new_standalone()?.cuda_stream().clone();
     let mut raco = RaCoAliked::from_engine_file(engine, stream.clone())?;
     let k = raco.num_keypoints();
+    // Stamped into every `.vrtk` so the matcher's indices can be checked against the keypoints they
+    // address rather than assumed to belong to them.
+    let fp = engine_fingerprint(engine);
 
     let mut names: Vec<_> = std::fs::read_dir(img_dir)?
         .filter_map(|e| e.ok())
         .map(|e| e.path())
-        .filter(|p| p.extension().is_some_and(|x| x == "jpg" || x == "jpeg" || x == "png"))
+        // Case-INSENSITIVE: a `.JPG` directory used to match nothing here, which produced zero
+        // files and, before this tool exited non-zero, a map built from empty feature sets.
+        .filter(|p| {
+            p.extension()
+                .and_then(|x| x.to_str())
+                .map(|x| x.to_ascii_lowercase())
+                .is_some_and(|x| matches!(x.as_str(), "jpg" | "jpeg" | "png"))
+        })
         .collect();
     names.sort();
-    eprintln!("aliked_batch: {} frames, K={k}, dim={}", names.len(), vrt_raco_aliked::DESC_DIM);
+    eprintln!(
+        "aliked_batch: {} frames, K={k}, dim={}, engine fp={fp:08x}",
+        names.len(),
+        vrt_raco_aliked::DESC_DIM
+    );
 
     let mut done = 0usize;
     for p in &names {
@@ -138,11 +163,21 @@ fn main() -> Result<(), vrt::BoxError> {
             .collect();
         let descs = out.descriptors_host()?;
         let dim = out.desc_dim();
+        // Unreachable by the library's contract — `keypoints_host` yields exactly K pairs and
+        // `descriptors_host` exactly K*dim. Kept as an ERROR rather than a skip because if it ever
+        // fires the contract has changed underneath this tool, and `write_vrtk` would then slice
+        // out of bounds and panic mid-directory, leaving a half-written feature set behind.
         if descs.len() < kpts.len() * dim {
-            eprintln!("  skip {}: descriptor buffer short", p.display());
-            continue;
+            return Err(format!(
+                "{}: extractor returned {} descriptor floats for {} keypoints at dim {dim} — \
+                 the library's buffer contract has changed",
+                p.display(),
+                descs.len(),
+                kpts.len()
+            )
+            .into());
         }
-        write_vrtk(&out_dir.join(format!("{stem}.vrtk")), &kpts, &descs, dim)?;
+        write_vrtk(&out_dir.join(format!("{stem}.vrtk")), &kpts, &descs, dim, fp)?;
         done += 1;
         if done.is_multiple_of(50) {
             eprintln!("  {done}/{}", names.len());
