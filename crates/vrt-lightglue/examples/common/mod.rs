@@ -14,10 +14,11 @@ use std::sync::Arc;
 
 use cudarc::driver::CudaStream;
 use kornia_algebra::{Mat3F64, Vec3F64};
-use kornia_image::{Image, ImageSize};
+use kornia_image::Image;
 use kornia_imgproc::interpolation::InterpolationMode;
-use kornia_imgproc::resize::resize_fast_u8_aa;
-use vrt_raco_aliked::DIM_DIVISOR;
+use vrt_raco_aliked::{fit_to_engine, DIM_DIVISOR};
+// Re-exported, not redefined: `eval_imc`/`prep_oxford` name it through this module.
+pub use vrt_raco_aliked::Scaled;
 use vrt_xfeat::{Descriptors, MatchResult, Matcher, XFeat, XFeatParams, XFeatResult};
 
 /// Read a whitespace-separated list of floats, naming the file on any failure.
@@ -113,27 +114,17 @@ pub fn resize_matrix(sx: f64, sy: f64) -> Mat3F64 {
     )
 }
 
-/// An image resized for the engines, with the geometry needed to follow it.
-pub struct Scaled {
-    pub image: Image<u8, 3>,
-    /// The scale actually applied, per axis — `resized_dim / original_dim`, **not** the
-    /// scale that was requested. Rounding the destination to whole pixels means the two
-    /// differ, and the difference lands directly in every rescaled intrinsic.
-    pub scale_x: f64,
-    pub scale_y: f64,
-}
-
 /// Downscale to fit `max_side` with a **uniform** scale, then crop to a multiple of
 /// [`DIM_DIVISOR`].
 ///
-/// Flooring each axis to a multiple of 32 independently — the obvious implementation —
-/// makes `sx != sy` by up to 2.9% on Oxford `bark`, turning an isotropic pixel threshold
-/// into an ellipse whose axes differ per sequence. Requesting one scale for both axes and
-/// cropping the remainder keeps them within a rounding step of each other, and cropping
-/// from the right/bottom leaves the coordinate origin untouched.
+/// A thin wrapper over [`vrt_raco_aliked::fit_to_engine`], which owns the policy and
+/// documents why the scale has to be uniform. The policy lives in the library rather than
+/// here because the batch bridge tools in `vrt-raco-aliked` and `vrt-lightglue` need
+/// byte-identical sizing: they exchange keypoint INDICES, so two implementations that
+/// agree today and drift tomorrow produce a well-formed file addressing the wrong points.
 ///
-/// The residual anisotropy is not swept under the rug: rounding the destination to whole
-/// pixels leaves `rw/w != rh/h`, so both are returned and every consumer uses both.
+/// What this wrapper adds is the one constraint the library cannot know about — that the
+/// benchmark harness feeds the same image to XFeat as well.
 pub fn resize_to_fit(
     src: &Image<u8, 3>,
     max_side: usize,
@@ -148,57 +139,7 @@ pub fn resize_to_fit(
         DIM_DIVISOR.is_multiple_of(XFEAT_GRID),
         "DIM_DIVISOR {DIM_DIVISOR} must stay a multiple of XFeat's {XFEAT_GRID}px grid"
     );
-    let (w, h) = (src.cols(), src.rows());
-    let scale = (max_side as f64 / w.max(h) as f64).min(1.0);
-    let (rw, rh) = (
-        ((w as f64 * scale).round() as usize).max(1),
-        ((h as f64 * scale).round() as usize).max(1),
-    );
-    let (cw, ch) = (
-        rw / DIM_DIVISOR * DIM_DIVISOR,
-        rh / DIM_DIVISOR * DIM_DIVISOR,
-    );
-    if cw == 0 || ch == 0 {
-        return Err(
-            format!("{w}x{h} scaled to {rw}x{rh} is under one {DIM_DIVISOR}px cell").into(),
-        );
-    }
-
-    let mut resized = Image::<u8, 3>::from_size_val(
-        ImageSize {
-            width: rw,
-            height: rh,
-        },
-        0,
-    )?;
-    // On u8 directly: the f32 `resize` needed two full-resolution f32 buffers, 12
-    // bytes/pixel, on a 7.4 GB box.
-    //
-    // `true` requests antialiasing but only the separable kernels honour it — see
-    // [`parse_interpolation`]. Under `bilinear` this is a fixed 2-tap
-    // sampler and a >2x reduction DOES alias; that is the state the published tables
-    // were measured in, so it is recorded rather than silently changed.
-    resize_fast_u8_aa::<3>(src, &mut resized, interpolation, true)?;
-
-    // Crop top-left anchored, so pixel coordinates are unchanged by the crop.
-    let f = resized.as_slice();
-    let mut cropped = Vec::with_capacity(cw * ch * 3);
-    for y in 0..ch {
-        let row = y * rw * 3;
-        cropped.extend_from_slice(&f[row..row + cw * 3]);
-    }
-    Ok(Scaled {
-        image: Image::<u8, 3>::new(
-            ImageSize {
-                width: cw,
-                height: ch,
-            },
-            cropped,
-        )?,
-        // The applied scale, from the resize step — cropping does not change it.
-        scale_x: rw as f64 / w as f64,
-        scale_y: rh as f64 / h as f64,
-    })
+    Ok(fit_to_engine(src, max_side, interpolation)?)
 }
 
 /// One pair's precision, from its `(matches, inliers)`.

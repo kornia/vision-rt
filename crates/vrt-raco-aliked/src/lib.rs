@@ -68,6 +68,12 @@ use kornia_imgproc::preprocess::Preprocessor;
 use kornia_tensor::{zeros_cuda, Tensor};
 use vrt::{BoxError, Engine, ModelSession};
 
+mod fit;
+pub use fit::{fit_to_engine, fit_to_engine_cuda, FitError, Scaled, FALLBACK_MAX_SIDE, FRAME_EXTS};
+
+mod identity;
+pub use identity::engine_fingerprint;
+
 /// ALIKED descriptor dimensionality. Fixed by the `aliked-n16` weights the export
 /// wraps; the engine's `descriptors` output is validated against it at construction.
 pub const DESC_DIM: usize = 128;
