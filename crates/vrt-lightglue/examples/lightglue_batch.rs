@@ -43,14 +43,21 @@ use kornia_io::functional::read_image_any_rgb8;
 use vrt_lightglue::LightGlue;
 use vrt_raco_aliked::{RaCoAliked, RaCoAlikedResult, DIM_DIVISOR};
 
-/// Largest side the extractor engines accept; see `aliked_batch`.
-const MAX_SIDE: usize = 640;
+/// Fallback cap, used ONLY after the engine rejects a frame's natural size — see `aliked_batch`,
+/// whose sizing policy this MUST match exactly.
+///
+/// The `.vrtm` indices this tool writes address the keypoints `aliked_batch` wrote, and the two
+/// extract independently. Same engine PLUS same resize is what makes those two orderings the same
+/// set; a divergence addresses the wrong keypoint while staying perfectly well-formed. The consumer
+/// measured that failure once already from a different cause: 4,062,208 correspondences fed, 62
+/// inliers per surviving pair, and a map with a quarter of the expected points.
+const FALLBACK_MAX_SIDE: usize = 640;
 /// Extraction results kept on device. 24 covers a 12-wide window on both sides of the cursor.
 const CACHE: usize = 24;
 
-fn fit(src: &Image<u8, 3>) -> Result<Image<u8, 3>, vrt::BoxError> {
+fn fit(src: &Image<u8, 3>, max_side: usize) -> Result<Image<u8, 3>, vrt::BoxError> {
     let (w, h) = (src.cols(), src.rows());
-    let scale = (MAX_SIDE as f64 / w.max(h) as f64).min(1.0);
+    let scale = (max_side as f64 / w.max(h) as f64).min(1.0);
     let rw = (((w as f64 * scale).round() as usize) / DIM_DIVISOR * DIM_DIVISOR).max(DIM_DIVISOR);
     let rh = (((h as f64 * scale).round() as usize) / DIM_DIVISOR * DIM_DIVISOR).max(DIM_DIVISOR);
     if rw == w && rh == h {
@@ -99,6 +106,9 @@ fn main() -> Result<(), vrt::BoxError> {
 
     let path_for = |i: usize| -> PathBuf { img_dir.join(format!("kf{i:04}.jpg")) };
     let mut cache: HashMap<usize, RaCoAlikedResult> = HashMap::new();
+    // Frames that failed once. Without this a bad frame is re-decoded, re-resized and re-uploaded on
+    // every one of its ~17 pairs, and at full resolution that is a 1080x1920 decode each time.
+    let mut dead: std::collections::HashSet<usize> = std::collections::HashSet::new();
     let mut order: Vec<usize> = Vec::new();
     let mut matches = glue.alloc_result()?;
 
@@ -110,17 +120,25 @@ fn main() -> Result<(), vrt::BoxError> {
 
     for (n, &(a, b)) in pairs.iter().enumerate() {
         for idx in [a, b] {
-            if cache.contains_key(&idx) {
+            if cache.contains_key(&idx) || dead.contains(&idx) {
                 continue;
             }
             let p = path_for(idx);
-            let Ok(src) = read_image_any_rgb8(&p) else { continue };
-            let dev = fit(&src)?.to_cuda(&stream)?;
-            let mut r = raco.alloc_result()?;
-            if raco.submit(&dev, &mut r).is_err() {
-                continue;
+            let Ok(src) = read_image_any_rgb8(&p) else { dead.insert(idx); continue };
+            // Natural size first, 640 only if the engine rejects it — identical policy to
+            // `aliked_batch`, because the two must see the same pixels to detect the same keypoints.
+            let mut got = None;
+            for (attempt, cap) in [src.cols().max(src.rows()), FALLBACK_MAX_SIDE].into_iter().enumerate() {
+                let Ok(fitted) = fit(&src, cap) else { continue };
+                let Ok(dev) = fitted.to_cuda(&stream) else { continue };
+                let Ok(mut r) = raco.alloc_result() else { continue };
+                match raco.submit(&dev, &mut r) {
+                    Ok(()) => { stream.synchronize()?; got = Some(r); break; }
+                    Err(vrt_raco_aliked::RaCoAlikedError::ShapeRejected { .. }) if attempt == 0 => {}
+                    Err(_) => break,
+                }
             }
-            stream.synchronize()?;
+            let Some(r) = got else { dead.insert(idx); continue };
             cache.insert(idx, r);
             order.push(idx);
             // Evict the least recently inserted that is not one of the two in flight.
@@ -161,10 +179,16 @@ fn main() -> Result<(), vrt::BoxError> {
         }
     }
     out[4..8].copy_from_slice(&written.to_le_bytes());
+    // Written UNCONDITIONALLY before any error return: a transient failure at pair 7000 of 7800
+    // used to propagate out of main and discard the whole run's GPU work.
     std::fs::File::create(out_p)?.write_all(&out)?;
     eprintln!(
-        "lightglue_batch: {written} pairs matched, {total_matches} correspondences, {} bytes",
+        "lightglue_batch: {written} of {} pairs matched, {total_matches} correspondences, {} bytes",
+        pairs.len(),
         out.len()
     );
+    if pairs.is_empty() || written == 0 {
+        return Err(format!("matched {written} of {} pairs", pairs.len()).into());
+    }
     Ok(())
 }

@@ -41,13 +41,19 @@ use kornia_imgproc::interpolation::InterpolationMode;
 use kornia_io::functional::read_image_any_rgb8;
 use vrt_raco_aliked::{RaCoAliked, DIM_DIVISOR};
 
-/// Largest side the shipped extractor engines accept.
+/// Fallback cap, used ONLY after the engine rejects the frame's natural size.
 ///
-/// Their shape profile is `images:1x3x256x256|2x3x512x512|2x3x640x640` (vrt-hub), so anything with
-/// a side over 640 is REJECTED by TensorRT rather than silently handled. flux-map's keyframe
-/// previews are 480x853 portrait, which fails on the long axis — the first thing this tool was
-/// pointed at, and it produced zero files.
-const MAX_SIDE: usize = 640;
+/// The shipped extractor engines carry `images:1x3x256x256|2x3x512x512|2x3x640x640`, so a side over
+/// 640 is rejected by TensorRT rather than handled — which is how the first run of this tool
+/// produced zero files on 480x853 previews.
+///
+/// But the engine is `argv[1]`, and a caller may pass one built with a larger profile. Capping at
+/// 640 unconditionally then throws away exactly the resolution that engine exists to provide:
+/// measured on the consumer, feeding 1080x1920 through a 640 cap reproduces the preview path's
+/// precision (keypoints found on a 352x640 image, multiplied by ~3 to reach source coordinates,
+/// which multiplies their localisation error by ~3 too) while looking like a full-resolution run.
+/// So the natural size is tried FIRST and this is the fallback.
+const FALLBACK_MAX_SIDE: usize = 640;
 
 /// Downscale so the long side fits `MAX_SIDE` and both sides land on the model's 32 px grid.
 ///
@@ -57,9 +63,9 @@ const MAX_SIDE: usize = 640;
 /// sent (to sample colours and build tracks), so a coordinate left in resized space is not a small
 /// error: every keypoint lands in the wrong place by the scale ratio, and nothing downstream can
 /// tell.
-fn fit_to_engine(src: &Image<u8, 3>) -> Result<(Image<u8, 3>, f64, f64), vrt::BoxError> {
+fn fit_to_engine(src: &Image<u8, 3>, max_side: usize) -> Result<(Image<u8, 3>, f64, f64), vrt::BoxError> {
     let (w, h) = (src.cols(), src.rows());
-    let scale = (MAX_SIDE as f64 / w.max(h) as f64).min(1.0);
+    let scale = (max_side as f64 / w.max(h) as f64).min(1.0);
     let rw = (((w as f64 * scale).round() as usize) / DIM_DIVISOR * DIM_DIVISOR).max(DIM_DIVISOR);
     let rh = (((h as f64 * scale).round() as usize) / DIM_DIVISOR * DIM_DIVISOR).max(DIM_DIVISOR);
     if rw == w && rh == h {
@@ -128,24 +134,49 @@ fn main() -> Result<(), vrt::BoxError> {
                 continue;
             }
         };
-        // Fit the engine's shape profile FIRST, on the host, then upload once.
-        let (fitted, sx, sy) = fit_to_engine(&src)?;
-        let dev = fitted.to_cuda(&stream)?;
-        let mut out = raco.alloc_result()?;
-        if let Err(e) = raco.submit(&dev, &mut out) {
-            eprintln!("  skip {}: {e}", p.display());
-            continue;
+        // Natural size first (floored to the model grid), and only fall back to the 640 cap if the
+        // engine actually rejects it. `ShapeRejected` is a distinct typed variant, so this asks the
+        // ENGINE what it accepts instead of assuming a profile it may not have.
+        let mut fitted_pair = None;
+        for (attempt, cap) in [src.cols().max(src.rows()), FALLBACK_MAX_SIDE].into_iter().enumerate() {
+            let (fitted, sx, sy) = match fit_to_engine(&src, cap) {
+                Ok(v) => v,
+                Err(e) => {
+                    if attempt == 1 { eprintln!("  skip {}: {e}", p.display()); }
+                    continue;
+                }
+            };
+            let dev = fitted.to_cuda(&stream)?;
+            let mut out = raco.alloc_result()?;
+            match raco.submit(&dev, &mut out) {
+                Ok(()) => {
+                    stream.synchronize()?;
+                    fitted_pair = Some((out, sx, sy));
+                    break;
+                }
+                Err(vrt_raco_aliked::RaCoAlikedError::ShapeRejected { .. }) if attempt == 0 => {
+                    // Engine has the smaller profile; retry under the cap.
+                }
+                Err(e) => {
+                    eprintln!("  skip {}: {e}", p.display());
+                    break;
+                }
+            }
         }
-        stream.synchronize()?;
+        let Some((out, sx, sy)) = fitted_pair else { continue };
 
         // `keypoints_host` already returns SOURCE-image pixels — the extractor applies its own
         // resize scale on the way out. Verified against `scale()`, which reports the ratio it used.
         // Back into the CALLER's frame: undo this tool's own downscale. `keypoints_host` already
         // undoes the extractor's internal 32 px fit, but it knows nothing about the resize above.
+        // Inverse of kornia's bilinear map, WITH the half-pixel term. The forward map is
+        // `dst = s*src + (s-1)/2` (see `resize/bilinear.rs`), so a bare `x / s` leaves a
+        // `(s-1)/(2s)` bias: -0.18 px on a preview-sized fit, but -1.03 px at 1080x1920 -> 352x640,
+        // which is a ~1 px principal-point shift landing straight in the map.
         let kpts: Vec<(f32, f32)> = out
             .keypoints_host()?
             .into_iter()
-            .map(|(x, y)| (x / sx as f32, y / sy as f32))
+            .map(|(x, y)| ((x + 0.5) / sx as f32 - 0.5, (y + 0.5) / sy as f32 - 0.5))
             .collect();
         let descs = out.descriptors_host()?;
         let dim = out.desc_dim();
@@ -160,5 +191,11 @@ fn main() -> Result<(), vrt::BoxError> {
         }
     }
     eprintln!("aliked_batch: wrote {done} of {} files", names.len());
+    // A silent zero-file success is read by the consumer as "every frame has no features", and it
+    // builds a map from empty feature sets. Exit non-zero so the caller's `status.success()` check
+    // is enough — it cannot see stderr.
+    if names.is_empty() || done != names.len() {
+        return Err(format!("wrote {done} of {} files", names.len()).into());
+    }
     Ok(())
 }
