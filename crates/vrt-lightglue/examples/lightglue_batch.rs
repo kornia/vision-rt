@@ -37,36 +37,13 @@ use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use kornia_image::{Image, ImageSize};
 use kornia_imgproc::interpolation::InterpolationMode;
 use kornia_io::functional::read_image_any_rgb8;
 use vrt_lightglue::LightGlue;
-use vrt_raco_aliked::{RaCoAliked, RaCoAlikedResult, DIM_DIVISOR};
+use vrt_raco_aliked::{fit_to_engine, RaCoAliked, RaCoAlikedResult, FALLBACK_MAX_SIDE};
 
-/// Fallback cap, used ONLY after the engine rejects a frame's natural size — see `aliked_batch`,
-/// whose sizing policy this MUST match exactly.
-///
-/// The `.vrtm` indices this tool writes address the keypoints `aliked_batch` wrote, and the two
-/// extract independently. Same engine PLUS same resize is what makes those two orderings the same
-/// set; a divergence addresses the wrong keypoint while staying perfectly well-formed. The consumer
-/// measured that failure once already from a different cause: 4,062,208 correspondences fed, 62
-/// inliers per surviving pair, and a map with a quarter of the expected points.
-const FALLBACK_MAX_SIDE: usize = 640;
 /// Extraction results kept on device. 24 covers a 12-wide window on both sides of the cursor.
 const CACHE: usize = 24;
-
-fn fit(src: &Image<u8, 3>, max_side: usize) -> Result<Image<u8, 3>, vrt::BoxError> {
-    let (w, h) = (src.cols(), src.rows());
-    let scale = (max_side as f64 / w.max(h) as f64).min(1.0);
-    let rw = (((w as f64 * scale).round() as usize) / DIM_DIVISOR * DIM_DIVISOR).max(DIM_DIVISOR);
-    let rh = (((h as f64 * scale).round() as usize) / DIM_DIVISOR * DIM_DIVISOR).max(DIM_DIVISOR);
-    if rw == w && rh == h {
-        return Ok(src.clone());
-    }
-    let mut dst = Image::<u8, 3>::from_size_val(ImageSize { width: rw, height: rh }, 0)?;
-    kornia_imgproc::resize::resize_fast_u8(src, &mut dst, InterpolationMode::Bilinear)?;
-    Ok(dst)
-}
 
 fn main() -> Result<(), vrt::BoxError> {
     let args: Vec<String> = std::env::args().collect();
@@ -125,12 +102,13 @@ fn main() -> Result<(), vrt::BoxError> {
             }
             let p = path_for(idx);
             let Ok(src) = read_image_any_rgb8(&p) else { dead.insert(idx); continue };
-            // Natural size first, 640 only if the engine rejects it — identical policy to
-            // `aliked_batch`, because the two must see the same pixels to detect the same keypoints.
+            // Natural size first, 640 only if the engine rejects it — the SAME `fit_to_engine` and
+            // the same fallback constant `aliked_batch` uses, because the two must see the same
+            // pixels to detect the same keypoints in the same order.
             let mut got = None;
             for (attempt, cap) in [src.cols().max(src.rows()), FALLBACK_MAX_SIDE].into_iter().enumerate() {
-                let Ok(fitted) = fit(&src, cap) else { continue };
-                let Ok(dev) = fitted.to_cuda(&stream) else { continue };
+                let Ok(scaled) = fit_to_engine(&src, cap, InterpolationMode::Bilinear) else { continue };
+                let Ok(dev) = scaled.image.to_cuda(&stream) else { continue };
                 let Ok(mut r) = raco.alloc_result() else { continue };
                 match raco.submit(&dev, &mut r) {
                     Ok(()) => { stream.synchronize()?; got = Some(r); break; }

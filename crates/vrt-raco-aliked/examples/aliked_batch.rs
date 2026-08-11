@@ -36,47 +36,9 @@
 use std::io::Write;
 use std::path::Path;
 
-use kornia_image::{Image, ImageSize};
 use kornia_imgproc::interpolation::InterpolationMode;
 use kornia_io::functional::read_image_any_rgb8;
-use vrt_raco_aliked::{RaCoAliked, DIM_DIVISOR};
-
-/// Fallback cap, used ONLY after the engine rejects the frame's natural size.
-///
-/// The shipped extractor engines carry `images:1x3x256x256|2x3x512x512|2x3x640x640`, so a side over
-/// 640 is rejected by TensorRT rather than handled — which is how the first run of this tool
-/// produced zero files on 480x853 previews.
-///
-/// But the engine is `argv[1]`, and a caller may pass one built with a larger profile. Capping at
-/// 640 unconditionally then throws away exactly the resolution that engine exists to provide:
-/// measured on the consumer, feeding 1080x1920 through a 640 cap reproduces the preview path's
-/// precision (keypoints found on a 352x640 image, multiplied by ~3 to reach source coordinates,
-/// which multiplies their localisation error by ~3 too) while looking like a full-resolution run.
-/// So the natural size is tried FIRST and this is the fallback.
-const FALLBACK_MAX_SIDE: usize = 640;
-
-/// Downscale so the long side fits `MAX_SIDE` and both sides land on the model's 32 px grid.
-///
-/// Returns the image and the ACTUAL per-axis scales, which differ from the requested one because
-/// the destination is rounded to whole pixels — and both are needed, because keypoints have to come
-/// back in the CALLER's coordinate frame. flux-map indexes the returned xy against the thumb it
-/// sent (to sample colours and build tracks), so a coordinate left in resized space is not a small
-/// error: every keypoint lands in the wrong place by the scale ratio, and nothing downstream can
-/// tell.
-fn fit_to_engine(src: &Image<u8, 3>, max_side: usize) -> Result<(Image<u8, 3>, f64, f64), vrt::BoxError> {
-    let (w, h) = (src.cols(), src.rows());
-    let scale = (max_side as f64 / w.max(h) as f64).min(1.0);
-    let rw = (((w as f64 * scale).round() as usize) / DIM_DIVISOR * DIM_DIVISOR).max(DIM_DIVISOR);
-    let rh = (((h as f64 * scale).round() as usize) / DIM_DIVISOR * DIM_DIVISOR).max(DIM_DIVISOR);
-    if rw == w && rh == h {
-        return Ok((src.clone(), 1.0, 1.0));
-    }
-    let mut dst = Image::<u8, 3>::from_size_val(ImageSize { width: rw, height: rh }, 0)?;
-    // On u8 directly: the f32 path needs two full-resolution f32 buffers, 12 bytes/pixel, on a
-    // 7.4 GB board that is usually also holding a reconstruction.
-    kornia_imgproc::resize::resize_fast_u8(src, &mut dst, InterpolationMode::Bilinear)?;
-    Ok((dst, rw as f64 / w as f64, rh as f64 / h as f64))
-}
+use vrt_raco_aliked::{fit_to_engine, RaCoAliked, FALLBACK_MAX_SIDE};
 
 fn write_vrtk(path: &Path, kpts: &[(f32, f32)], descs: &[f32], dim: usize) -> std::io::Result<()> {
     let n = kpts.len();
@@ -139,19 +101,19 @@ fn main() -> Result<(), vrt::BoxError> {
         // ENGINE what it accepts instead of assuming a profile it may not have.
         let mut fitted_pair = None;
         for (attempt, cap) in [src.cols().max(src.rows()), FALLBACK_MAX_SIDE].into_iter().enumerate() {
-            let (fitted, sx, sy) = match fit_to_engine(&src, cap) {
+            let scaled = match fit_to_engine(&src, cap, InterpolationMode::Bilinear) {
                 Ok(v) => v,
                 Err(e) => {
                     if attempt == 1 { eprintln!("  skip {}: {e}", p.display()); }
                     continue;
                 }
             };
-            let dev = fitted.to_cuda(&stream)?;
+            let dev = scaled.image.to_cuda(&stream)?;
             let mut out = raco.alloc_result()?;
             match raco.submit(&dev, &mut out) {
                 Ok(()) => {
                     stream.synchronize()?;
-                    fitted_pair = Some((out, sx, sy));
+                    fitted_pair = Some((out, scaled));
                     break;
                 }
                 Err(vrt_raco_aliked::RaCoAlikedError::ShapeRejected { .. }) if attempt == 0 => {
@@ -163,20 +125,16 @@ fn main() -> Result<(), vrt::BoxError> {
                 }
             }
         }
-        let Some((out, sx, sy)) = fitted_pair else { continue };
+        let Some((out, scaled)) = fitted_pair else { continue };
 
-        // `keypoints_host` already returns SOURCE-image pixels — the extractor applies its own
-        // resize scale on the way out. Verified against `scale()`, which reports the ratio it used.
-        // Back into the CALLER's frame: undo this tool's own downscale. `keypoints_host` already
-        // undoes the extractor's internal 32 px fit, but it knows nothing about the resize above.
-        // Inverse of kornia's bilinear map, WITH the half-pixel term. The forward map is
-        // `dst = s*src + (s-1)/2` (see `resize/bilinear.rs`), so a bare `x / s` leaves a
-        // `(s-1)/(2s)` bias: -0.18 px on a preview-sized fit, but -1.03 px at 1080x1920 -> 352x640,
-        // which is a ~1 px principal-point shift landing straight in the map.
+        // `keypoints_host` already returns pixels in the image THIS tool handed the extractor — it
+        // applies its own internal 32 px fit on the way out — but it knows nothing about the
+        // downscale above. `to_source` undoes that one, half-pixel term included, and putting the
+        // inverse next to the forward map in the library is what keeps the two from drifting.
         let kpts: Vec<(f32, f32)> = out
             .keypoints_host()?
             .into_iter()
-            .map(|(x, y)| ((x + 0.5) / sx as f32 - 0.5, (y + 0.5) / sy as f32 - 0.5))
+            .map(|(x, y)| scaled.to_source(x, y))
             .collect();
         let descs = out.descriptors_host()?;
         let dim = out.desc_dim();
@@ -186,7 +144,7 @@ fn main() -> Result<(), vrt::BoxError> {
         }
         write_vrtk(&out_dir.join(format!("{stem}.vrtk")), &kpts, &descs, dim)?;
         done += 1;
-        if done % 50 == 0 {
+        if done.is_multiple_of(50) {
             eprintln!("  {done}/{}", names.len());
         }
     }
