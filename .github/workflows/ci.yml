@@ -32,9 +32,9 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - name: cargo check (stub)
-        run: cargo check -p trt-sys -p vrt -p vrt-hub -p vrt-xfeat -p vrt-raco-aliked -p vrt-lightglue -p vrt-rfdetr -p vrt-rfdetr-kpts -p vrt-dinov3
+        run: cargo check -p trt-sys -p vrt -p vrt-hub -p vrt-xfeat -p vrt-raco-aliked -p vrt-lightglue -p vrt-rfdetr -p vrt-rfdetr-kpts -p vrt-dinov3 -p vrt-depth-anything
       - name: cargo clippy (stub)
-        run: cargo clippy --all-targets -p trt-sys -p vrt -p vrt-hub -p vrt-xfeat -p vrt-raco-aliked -p vrt-lightglue -p vrt-rfdetr -p vrt-rfdetr-kpts -p vrt-dinov3 -- -D warnings
+        run: cargo clippy --all-targets -p trt-sys -p vrt -p vrt-hub -p vrt-xfeat -p vrt-raco-aliked -p vrt-lightglue -p vrt-rfdetr -p vrt-rfdetr-kpts -p vrt-dinov3 -p vrt-depth-anything -- -D warnings
       # The GPU-free tests, on the hosted runner. Everything the benchmark harness and
       # the match guards assert is arithmetic — no CUDA, no TensorRT — so gating it behind
       # the (currently disabled) Jetson job meant a width-guard or resize-scale regression
@@ -43,6 +43,11 @@ jobs:
         run: cargo test -p vrt-xfeat --lib
       - name: cargo test (benchmark harness)
         run: cargo test -p vrt-lightglue --tests --examples
+      # The out-of-process bridge tools' file formats. Their consumers are in another
+      # workspace and cannot be compiled here, so the on-disk layout is the only place
+      # the contract is checked at all — and every one of these is pure byte arithmetic.
+      - name: cargo test (batch bridge tools)
+        run: cargo test -p vrt-dinov3 -p vrt-depth-anything --examples
 
       - name: cargo clippy (builder + hub features)
         run: cargo clippy -p vrt -p vrt-hub -p vrt-xfeat -p vrt-raco-aliked -p vrt-lightglue --features vrt-xfeat/builder,vrt-xfeat/hub,vrt-raco-aliked/builder,vrt-raco-aliked/hub,vrt-lightglue/builder,vrt-lightglue/hub -- -D warnings

@@ -58,6 +58,21 @@ map spans the whole stretched frame, so box/mask coords scale to the map by
 crate reads S from the engine, so a 518 build works unchanged. Model credit to the
 upstream authors.
 
+## `depth_batch` — rasters for an out-of-process consumer
+
+```bash
+cargo run --release -p vrt-depth-anything --example depth_batch -- <engine> <img_dir> <out_dir>
+```
+
+One `<stem>.vrtd` per input image, preserving the caller's names so a gap in the input
+stays a gap. Each file is a 16-byte header (`"VRTD"`, `width`, `height`, reserved) then
+`width*height` f32 LE metric **metres**, row-major, at the model's grid — deliberately
+primitive so the consumer needs no codec. The depth leg of the same file bridge as
+`vrt-raco-aliked`'s `aliked_batch` and `vrt-lightglue`'s `lightglue_batch`, for consumers
+that pin a different kornia and so cannot link this crate. Values are written verbatim,
+NaN included: the network hallucinates at occlusion boundaries and on mirrors, and the
+consumer's robust statistics are what decide which values to trust.
+
 ## Benchmark
 
 Jetson Orin (MAXN_SUPER, fp16, `trtexec` engine-only GPU compute):
