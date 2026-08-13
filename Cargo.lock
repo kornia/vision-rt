@@ -2809,6 +2809,8 @@ version = "0.1.0"
 dependencies = [
  "cudarc",
  "half",
+ "kornia-image",
+ "kornia-imgproc",
  "kornia-tensor",
  "log",
  "thiserror 2.0.18",

@@ -19,3 +19,8 @@ log = "0.4"
 half = "2.4"
 cudarc = { workspace = true }
 kornia-tensor = { workspace = true }
+# For `fit`: sizing an arbitrary frame for a model's input grid. Lives here rather than in one model
+# crate because every model crate needs the SAME sizing — two copies drifted once and cost a
+# downstream map a quarter of its points.
+kornia-image = { workspace = true }
+kornia-imgproc = { workspace = true }

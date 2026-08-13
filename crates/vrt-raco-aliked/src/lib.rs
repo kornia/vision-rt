@@ -68,11 +68,15 @@ use kornia_imgproc::preprocess::Preprocessor;
 use kornia_tensor::{zeros_cuda, Tensor};
 use vrt::{BoxError, Engine, ModelSession};
 
-mod fit;
-pub use fit::{fit_to_engine, fit_to_engine_cuda, FitError, Scaled, FALLBACK_MAX_SIDE, FRAME_EXTS};
+// `fit` moved to the `vrt` core crate: XFeat needs the identical sizing, and a second copy is
+// exactly the drift these functions exist to prevent. Re-exported so existing paths still resolve.
+pub use vrt::{fit_to_engine, fit_to_engine_cuda, FitError, Scaled, FALLBACK_MAX_SIDE, FRAME_EXTS};
 
-mod identity;
-pub use identity::engine_fingerprint;
+// `engine_fingerprint` moved to `vrt` when `xfeat_batch` became a second bridge tool needing it:
+// it takes an engine path and knows nothing about ALIKED, and `vrt` is the only crate every
+// extractor already depends on unconditionally (`vrt-hub` is optional here, so it could not host
+// it). Re-exported so `vrt_raco_aliked::engine_fingerprint` keeps resolving.
+pub use vrt::engine_fingerprint;
 
 /// ALIKED descriptor dimensionality. Fixed by the `aliked-n16` weights the export
 /// wraps; the engine's `descriptors` output is validated against it at construction.
@@ -82,7 +86,7 @@ pub const DESC_DIM: usize = 128;
 ///
 /// Public so callers sizing images for this model reference the constant instead of
 /// hardcoding 32 and silently drifting if the export ever changes.
-pub const DIM_DIVISOR: usize = 32;
+pub use vrt::GRID_DIVISOR as DIM_DIVISOR;
 
 /// Minimum model dimension the reused buffers are seeded with in [`RaCoAliked::new`];
 /// the first frame reallocates them to its real floor-32 size.
