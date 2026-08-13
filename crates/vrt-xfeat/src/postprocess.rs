@@ -357,6 +357,19 @@ impl XFeatResult {
         self.stream.clone_dtoh(&self.scores.slice(0..n))
     }
 
+    /// Download the valid descriptors to host, row-major `count × `[`desc_dim`](Self::desc_dim).
+    /// Call after the sync.
+    ///
+    /// The counterpart to the other two `*_to_host` accessors, added because it was the only one
+    /// missing: a caller wanting descriptors had to slice the public [`descs`](Self::descs) buffer
+    /// itself, and doing that means writing `n * 64` at the call site — the one place the width is
+    /// *not* sourced from the data that produced it.
+    pub fn descs_to_host(&self) -> Result<Vec<f32>, cudarc::driver::DriverError> {
+        let n = self.count();
+        self.stream
+            .clone_dtoh(&self.descs.slice(0..n * XFEAT_DESC_DIM))
+    }
+
     /// Mutable pinned-count pointer (for the async count D2H in `launch_topk`).
     pub(crate) fn count_pin_mut(&mut self) -> *mut i32 {
         self.count_pin.as_mut_ptr()

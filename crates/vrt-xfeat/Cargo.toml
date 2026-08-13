@@ -32,3 +32,11 @@ thiserror   = "2.0"
 vrt-hub    = { path = "../vrt-hub", features = ["builder"] }
 kornia-io  = { workspace = true }
 env_logger = "0.11"
+
+# `xfeat_batch` writes the `.vrtk` file another process decodes by fixed byte offset, and the
+# encoder is the whole contract. `test = true` lets its `#[cfg(test)]` module run under
+# `cargo test`; the tests are pure host code (no GPU, no engine) and cover only the header/row
+# geometry, the engine fingerprint, and the frame filter.
+[[example]]
+name = "xfeat_batch"
+test = true
