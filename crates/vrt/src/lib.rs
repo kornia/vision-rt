@@ -44,7 +44,10 @@ pub use cudarc::driver::CudaStream;
 pub use dtype::{DType, Precision};
 pub use engine::{DataType, Engine, TensorMode, TensorSpec};
 pub use error::{Result, TrtError};
-pub use fit::{fit_to_engine, FitError, Scaled, FALLBACK_MAX_SIDE, FRAME_EXTS, GRID_DIVISOR};
+pub use fit::{
+    fit_to_engine, fit_to_engine_cuda, FitError, Scaled, FALLBACK_MAX_SIDE, FRAME_EXTS,
+    GRID_DIVISOR,
+};
 pub use identity::engine_fingerprint;
 pub use logger::Logger;
 pub use model::{ModelSession, TRTensorMap};

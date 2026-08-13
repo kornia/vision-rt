@@ -70,7 +70,7 @@ use vrt::{BoxError, Engine, ModelSession};
 
 // `fit` moved to the `vrt` core crate: XFeat needs the identical sizing, and a second copy is
 // exactly the drift these functions exist to prevent. Re-exported so existing paths still resolve.
-pub use vrt::{fit_to_engine, FitError, Scaled, FALLBACK_MAX_SIDE, FRAME_EXTS};
+pub use vrt::{fit_to_engine, fit_to_engine_cuda, FitError, Scaled, FALLBACK_MAX_SIDE, FRAME_EXTS};
 
 // `engine_fingerprint` moved to `vrt` when `xfeat_batch` became a second bridge tool needing it:
 // it takes an engine path and knows nothing about ALIKED, and `vrt` is the only crate every
