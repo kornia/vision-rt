@@ -127,6 +127,20 @@ The RTSP example enrols keyframes and re-matches them. The test that matters is 
 frame rate: walk the camera away from a scene and back, and confirm it re-matches the
 original keyframe on return.
 
+### `dino_batch` — descriptors for an out-of-process consumer
+
+```bash
+cargo run --release -p vrt-dinov3 --example dino_batch -- <engine> <img_dir> out.vrtb
+```
+
+One descriptor per image in the directory, into a single flat `.vrtb`: a 16-byte header
+(`"VRTB"`, `n`, `dim`, name-table length), `n*dim` f32 LE, then the input file stems the
+rows came from. The third leg of the same file bridge as `vrt-raco-aliked`'s
+`aliked_batch` and `vrt-lightglue`'s `lightglue_batch` — for consumers that pin a
+different kornia and so cannot link this crate. Rows are never dropped or reordered; the
+name table is what lets a consumer address a row by frame rather than by position. See
+the example's module doc for the layout and why it carries names.
+
 ## Benchmark
 
 Jetson Orin, bf16, `trtexec --iterations=200` (engine-only), at the box's default power
