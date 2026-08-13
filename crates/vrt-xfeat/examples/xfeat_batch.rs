@@ -35,8 +35,16 @@
 use std::io::Write;
 use std::path::Path;
 
+use kornia_imgproc::interpolation::InterpolationMode;
 use kornia_io::functional::read_image_any_rgb8;
-use vrt::engine_fingerprint;
+use vrt::{engine_fingerprint, fit_to_engine};
+
+/// Cap used ONLY after the engine rejects a frame's natural size.
+///
+/// NOT `vrt::FALLBACK_MAX_SIDE`, which is 640 — that is RaCo-ALIKED's shipped profile. XFeat's tops
+/// out at 1088x1920, so a 4K frame has to come down but 640 would throw away resolution this engine
+/// can use. Named distinctly so the two cannot be confused at a glance.
+const XFEAT_FALLBACK_MAX_SIDE: usize = 1920;
 use vrt_xfeat::{XFeat, XFeatParams};
 
 /// Matches `xfeat_detect` / `xfeat_bench` in this crate rather than inventing a third default.
@@ -136,18 +144,66 @@ fn main() -> Result<(), vrt::BoxError> {
                 continue;
             }
         };
-        // No resize here. `XFeat::submit` fits each frame to its own floor-of-32 size internally
-        // and `kpts_to_host` scales the keypoints back, so keypoints are already in SOURCE pixels.
-        // The tool this was ported from letterboxed every frame into a fixed 1280×736 and inverted
-        // that by hand; doing so now would rescale twice and put every coordinate in a frame the
-        // consumer has no knowledge of.
-        let dev = src.to_cuda(&stream)?;
-        xfeat.submit(&dev, &mut out)?;
+        // Sized through the SHARED `fit_to_engine`, the same one `aliked_batch` uses.
+        //
+        // Letting `XFeat::submit` do its own internal fit — which is what the ported tool did —
+        // leaves two problems. It floors each axis to 32 INDEPENDENTLY, which is a ~2.3%
+        // anisotropic squash: 1080x1920 loses 2.27% horizontally while 640x360 loses 2.27%
+        // VERTICALLY, so a map built from portrait phone frames and a query from a landscape camera
+        // have their descriptors computed on images stretched along opposite axes. And an
+        // oversized frame (a 4K walkthrough floors to 2144x3840, past the engine's 1088x1920
+        // profile) aborts the whole directory rather than falling back.
+        //
+        // `fit_to_engine` applies ONE scale to both axes and crops the remainder, so the internal
+        // fit becomes a no-op and its half-pixel rescale disappears with it. Natural size first,
+        // falling back to the cap only when the engine actually rejects the shape — the same ladder
+        // `aliked_batch` runs, so the two tools see the same pixels.
+        let mut fitted = None;
+        for (attempt, cap) in [src.cols().max(src.rows()), XFEAT_FALLBACK_MAX_SIDE]
+            .into_iter()
+            .enumerate()
+        {
+            let scaled = match fit_to_engine(&src, cap, InterpolationMode::Bilinear) {
+                Ok(v) => v,
+                Err(e) => {
+                    if attempt == 1 {
+                        eprintln!("  skip {}: {e}", p.display());
+                    }
+                    continue;
+                }
+            };
+            let dev = scaled.image.to_cuda(&stream)?;
+            match xfeat.submit(&dev, &mut out) {
+                Ok(()) => {
+                    fitted = Some(scaled);
+                    break;
+                }
+                // Engine profile does not cover this shape; retry under the cap.
+                Err(_) if attempt == 0 => {}
+                Err(e) => {
+                    eprintln!("  skip {}: {e}", p.display());
+                    break;
+                }
+            }
+        }
+        let Some(scaled) = fitted else { continue };
         // Sync per frame: `count()` reads a pinned scalar that is only valid after it, and both
         // downloads below are sized from it.
         stream.synchronize()?;
 
-        let kpts = out.kpts_to_host()?;
+        // `kpts_to_host` undoes XFeat's OWN fit (a no-op now that the input is already on the
+        // grid); `to_source` undoes this tool's downscale, half-pixel term included.
+        let mut kpts = out.kpts_to_host()?;
+        // Back into the CALLER's frame. `kpts_to_host` has already undone XFeat's own internal fit
+        // (a no-op now that the input arrives on the grid), but it knows nothing about the
+        // downscale applied above. `to_source` undoes that one, half-pixel term included — the
+        // bare `x / s` the ported tool used leaves a `(s-1)/(2s)` bias, which is negligible at
+        // natural size and is not once the 1920 cap engages.
+        for xy in kpts.chunks_exact_mut(2) {
+            let (x, y) = scaled.to_source(xy[0], xy[1]);
+            xy[0] = x;
+            xy[1] = y;
+        }
         let descs = out.descs_to_host()?;
         let dim = out.desc_dim();
         // Unreachable by the library's contract — the two downloads are both sized from the same

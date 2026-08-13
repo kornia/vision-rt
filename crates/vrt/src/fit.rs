@@ -1,6 +1,6 @@
 //! Sizing an arbitrary image for the extractor engine, in ONE place.
 //!
-//! RaCo needs both dimensions on a multiple of [`DIM_DIVISOR`], and TensorRT rejects anything
+//! RaCo needs both dimensions on a multiple of [`GRID_DIVISOR`], and TensorRT rejects anything
 //! outside the engine's built shape profile. Every tool that feeds this crate therefore needs the
 //! same two decisions — how far to downscale, and how to reach the grid — and they must agree
 //! *exactly*, not approximately.
@@ -18,7 +18,9 @@ use kornia_image::{Image, ImageError, ImageSize};
 use kornia_imgproc::interpolation::InterpolationMode;
 use kornia_imgproc::resize::resize_fast_u8_aa;
 
-use crate::DIM_DIVISOR;
+/// Model input grid: H and W must be multiples of this. RaCo's `input_dim_divisor` and XFeat's
+/// internal floor are both 32, so one constant serves every model crate here.
+pub const GRID_DIVISOR: usize = 32;
 
 /// Fallback cap, used ONLY after the engine rejects a frame's natural size.
 ///
@@ -77,7 +79,7 @@ impl Scaled {
 pub enum FitError {
     #[error(transparent)]
     Image(#[from] ImageError),
-    #[error("{w}x{h} scaled to {rw}x{rh} is under one {DIM_DIVISOR}px cell")]
+    #[error("{w}x{h} scaled to {rw}x{rh} is under one {GRID_DIVISOR}px cell")]
     TooSmall {
         w: usize,
         h: usize,
@@ -115,8 +117,8 @@ impl Plan {
             ((h as f64 * scale).round() as usize).max(1),
         );
         let (cw, ch) = (
-            rw / DIM_DIVISOR * DIM_DIVISOR,
-            rh / DIM_DIVISOR * DIM_DIVISOR,
+            rw / GRID_DIVISOR * GRID_DIVISOR,
+            rh / GRID_DIVISOR * GRID_DIVISOR,
         );
         if cw == 0 || ch == 0 {
             return Err(FitError::TooSmall { w, h, rw, rh });
@@ -126,7 +128,7 @@ impl Plan {
 }
 
 /// Downscale to fit `max_side` with a **uniform** scale, then crop to a multiple of
-/// [`DIM_DIVISOR`].
+/// [`GRID_DIVISOR`].
 ///
 /// Flooring each axis to a multiple of 32 independently — the obvious implementation — makes
 /// `scale_x != scale_y` by up to 2.9% on Oxford `bark`, turning an isotropic pixel threshold into
