@@ -1401,7 +1401,7 @@ dependencies = [
 [[package]]
 name = "kornia-algebra"
 version = "0.1.15-rc.5"
-source = "git+https://github.com/kornia/kornia-rs?tag=v0.1.15-rc.5#3ee6dfe40bcdad7077c77f8d16d8c5bea8240f0f"
+source = "git+https://github.com/kornia/kornia-rs?branch=main#e2148e864a1b63a8fe094b89175273ef08823183"
 dependencies = [
  "glam 0.33.2",
  "nalgebra",
@@ -1412,7 +1412,7 @@ dependencies = [
 [[package]]
 name = "kornia-image"
 version = "0.1.15-rc.5"
-source = "git+https://github.com/kornia/kornia-rs?tag=v0.1.15-rc.5#3ee6dfe40bcdad7077c77f8d16d8c5bea8240f0f"
+source = "git+https://github.com/kornia/kornia-rs?branch=main#e2148e864a1b63a8fe094b89175273ef08823183"
 dependencies = [
  "cudarc",
  "kornia-tensor",
@@ -1424,7 +1424,7 @@ dependencies = [
 [[package]]
 name = "kornia-imgproc"
 version = "0.1.15-rc.5"
-source = "git+https://github.com/kornia/kornia-rs?tag=v0.1.15-rc.5#3ee6dfe40bcdad7077c77f8d16d8c5bea8240f0f"
+source = "git+https://github.com/kornia/kornia-rs?branch=main#e2148e864a1b63a8fe094b89175273ef08823183"
 dependencies = [
  "cudarc",
  "half",
@@ -1440,7 +1440,7 @@ dependencies = [
 [[package]]
 name = "kornia-io"
 version = "0.1.15-rc.5"
-source = "git+https://github.com/kornia/kornia-rs?tag=v0.1.15-rc.5#3ee6dfe40bcdad7077c77f8d16d8c5bea8240f0f"
+source = "git+https://github.com/kornia/kornia-rs?branch=main#e2148e864a1b63a8fe094b89175273ef08823183"
 dependencies = [
  "image-webp",
  "jpeg-encoder",
@@ -1458,7 +1458,7 @@ dependencies = [
 [[package]]
 name = "kornia-tensor"
 version = "0.1.15-rc.5"
-source = "git+https://github.com/kornia/kornia-rs?tag=v0.1.15-rc.5#3ee6dfe40bcdad7077c77f8d16d8c5bea8240f0f"
+source = "git+https://github.com/kornia/kornia-rs?branch=main#e2148e864a1b63a8fe094b89175273ef08823183"
 dependencies = [
  "cudarc",
  "num-traits",

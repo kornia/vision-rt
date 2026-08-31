@@ -20,9 +20,9 @@ vrt-types = { path = "../../crates/vrt-types" }
 sensor-rtsp = { git = "https://github.com/kornia/sensor-rt", rev = "11737f555a3679f8e50d31fc6468f29e33f9dab2" }
 # For the optional overlay dump (device frame → host + PNG) and the colorized depth
 # map. Pinned to the same kornia rev as the workspace so cudarc unifies to one build.
-kornia-image = { git = "https://github.com/kornia/kornia-rs", tag = "v0.1.15-rc.5", features = ["cuda"] }
-kornia-imgproc = { git = "https://github.com/kornia/kornia-rs", tag = "v0.1.15-rc.5", features = ["cuda"] }
-kornia-io = { git = "https://github.com/kornia/kornia-rs", tag = "v0.1.15-rc.5" }
+kornia-image = { git = "https://github.com/kornia/kornia-rs", branch = "main", features = ["cuda"] }
+kornia-imgproc = { git = "https://github.com/kornia/kornia-rs", branch = "main", features = ["cuda"] }
+kornia-io = { git = "https://github.com/kornia/kornia-rs", branch = "main" }
 cudarc = { version = "0.19", default-features = false, features = [
   "cuda-version-from-build-system",
   "driver",
