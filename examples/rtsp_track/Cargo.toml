@@ -22,7 +22,7 @@ vrt-types = { path = "../../crates/vrt-types" }
 vrt-viz = { path = "../../crates/vrt-viz", features = ["h264"] }
 # Private git dep (kornia/sensor-rt) — needs CARGO_NET_GIT_FETCH_WITH_CLI=true.
 sensor-rtsp = { git = "https://github.com/kornia/sensor-rt", rev = "11737f555a3679f8e50d31fc6468f29e33f9dab2" }
-kornia-image = { git = "https://github.com/kornia/kornia-rs", tag = "v0.1.15-rc.5", features = ["cuda"] }
+kornia-image = { git = "https://github.com/kornia/kornia-rs", branch = "main", features = ["cuda"] }
 cudarc = { version = "0.19", default-features = false, features = [
   "cuda-version-from-build-system",
   "driver",
