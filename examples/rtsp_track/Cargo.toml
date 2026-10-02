@@ -47,6 +47,5 @@ log = "0.4"
 # and cargo refused to resolve at all. kornia/sensor-rt#9 moved `vrt` to dev-dependencies,
 # so that collision is gone; the reason above is why the patch stays.)
 [patch."https://github.com/kornia/vision-rt"]
-trt-sys    = { path = "../../crates/trt-sys" }
 vrt        = { path = "../../crates/vrt" }
 vrt-types  = { path = "../../crates/vrt-types" }

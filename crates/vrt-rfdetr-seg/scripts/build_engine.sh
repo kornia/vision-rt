@@ -18,7 +18,7 @@ OUT_DIR="${2:-models/engines}"
 MODEL="rfdetr-seg-preview"
 TRTEXEC="${TRTEXEC:-/usr/src/tensorrt/bin/trtexec}"
 
-# TRT version exactly as trt-sys parses NvInferVersion.h (MAJOR.MINOR.PATCH.BUILD);
+# TRT version exactly as tensorrt-rs parses NvInferVersion.h (MAJOR.MINOR.PATCH.BUILD);
 # GPU compute capability (sm) from torch — together they key the engine.
 HDR="$(ls /usr/include/*/NvInferVersion.h 2>/dev/null | head -1)"
 [ -n "$HDR" ] || { echo "NvInferVersion.h not found — is TensorRT installed?" >&2; exit 1; }

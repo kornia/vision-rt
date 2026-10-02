@@ -1831,6 +1831,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "adb6935a6f5c20170eeceb1a3835a49e12e19d792f6dd344ccc76a985ca5a6ca"
 
 [[package]]
+name = "tensorrt-rs"
+version = "0.1.0"
+source = "git+https://github.com/kornia/tensorrt-rs?tag=v0.1.0#688a1e8df2ee85042294d142e53961e897213449"
+dependencies = [
+ "bindgen",
+ "cc",
+]
+
+[[package]]
 name = "thiserror"
 version = "1.0.69"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1969,14 +1978,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d56353a2a665ad0f41a421187180aab746c8c325620617ad883a99a1cbe66d2"
 
 [[package]]
-name = "trt-sys"
-version = "0.1.0"
-dependencies = [
- "bindgen",
- "cc",
-]
-
-[[package]]
 name = "typenum"
 version = "1.20.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2016,8 +2017,8 @@ dependencies = [
  "kornia-imgproc",
  "kornia-tensor 0.2.0",
  "log",
+ "tensorrt-rs",
  "thiserror 2.0.19",
- "trt-sys",
 ]
 
 [[package]]

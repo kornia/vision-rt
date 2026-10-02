@@ -166,7 +166,6 @@ The 5th arg picks the sink: `serve` / `:PORT` (live stream), `out.png` (one fram
 
 | Crate | Role |
 |---|---|
-| `trt-sys` | Raw FFI: pure-C shim over TensorRT (bindgen never sees C++) |
 | `vrt` | Safe core: `Logger→Runtime→Engine→Session`, `ModelSession`, CUDA helpers |
 | `vrt-hub` | Model weights (HF Hub, sha256-pinned) + on-device engine cache |
 | `vrt-types` | Shared leaf: `CameraIntrinsics`/`Extrinsics`, GPU `Undistorter`, depth-at-mask sampling |
@@ -179,6 +178,9 @@ The 5th arg picks the sink: `serve` / `:PORT` (live stream), `out.png` (one fram
 | `vrt-lightglue` | LightGlue+ transformer matching over two `vrt-raco-aliked` results |
 | `vrt-track` | Pure-CPU **3D multi-object tracker** (ByteTrack assoc + depth-gated 3D Kalman) |
 | `vrt-viz` | CPU render (masks / boxes / BEV) + **H.264 / WebSocket live view** (WebCodecs) |
+
+The raw TensorRT FFI underneath `vrt` is `tensorrt-rs`, a git dependency from
+[`kornia/tensorrt-rs`](https://github.com/kornia/tensorrt-rs).
 
 `vrt-track` / `vrt-types` / `vrt-viz` are model-free and GPU-free — see
 [ARCHITECTURE.md](ARCHITECTURE.md) for the crate DAG, the async / caller-owned contract,

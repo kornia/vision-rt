@@ -11,8 +11,8 @@ from targeting one board family rather than a portable runtime.
 ## Crate stack
 
 ```
-trt-sys      pure-C shim over TensorRT C++ (bindgen never sees C++); TRT_STUB off-Jetson
-   ↓
+tensorrt-rs  pure-C shim over TensorRT C++ (bindgen never sees C++); TRT_STUB off-Jetson
+   ↓         (external: git dependency from kornia/tensorrt-rs)
 vrt          safe core: Logger→Runtime→Engine→Session (Arc chain), ModelSession,
              cuda launch cfgs, PinnedBuffer/Stream, error types
    ↓
@@ -165,7 +165,7 @@ runs on a worker thread off the capture loop.
 ONNX is the portable artifact (HF `kornia/*`, sha256-pinned). **Engines are
 machine-locked** (TRT version + GPU arch) — built on-device by `EngineCache` (cached
 under `~/.cache/vision-rt/engines/…`), or a prebuilt engine downloaded **only** when its
-`trt_version`+`sm` match the local box (`ModelHub::get_engine`). `trt-sys` parses the
+`trt_version`+`sm` match the local box (`ModelHub::get_engine`). `tensorrt-rs` parses the
 installed TRT version into `TENSORRT_VERSION` (feeds cache keys) and warns if it's
 outside the tested 10.3.x range.
 

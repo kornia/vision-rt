@@ -3,7 +3,7 @@
 //! Dependency-light home for the data types that model crates pass between each
 //! other, so the `Detection` triple stops being copy-pasted per crate and the
 //! depth/segmentation crates share one `Mask` / `DepthImage` vocabulary. This
-//! crate depends only on `kornia-image` / `kornia-tensor` (no `vrt` / `trt-sys`),
+//! crate depends only on `kornia-image` / `kornia-tensor` (no `vrt` / `tensorrt-rs`),
 //! so it is a leaf every model crate can depend on **downward** — and a clean
 //! candidate to upstream into kornia-rs.
 //!

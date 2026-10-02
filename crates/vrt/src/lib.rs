@@ -53,4 +53,4 @@ pub use logger::Logger;
 pub use model::{ModelSession, TRTensorMap};
 pub use runtime::Runtime;
 pub use session::{OutputView, Session};
-pub use trt_sys::TENSORRT_VERSION;
+pub use tensorrt_rs::TENSORRT_VERSION;

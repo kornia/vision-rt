@@ -8,25 +8,14 @@ committed bindings without any of this.
 
 ---
 
-## Files to change in `trt-sys`
+## The TensorRT shim lives in `kornia/tensorrt-rs`
 
-### `trt-sys/src/trt_bridge.cpp`
-
-This is the C++ bridge that wraps TRT's abstract C++ API and exposes a flat C surface (`btrt_*` functions). Each function has a comment referencing the exact TRT header and method it wraps.
-
-When TRT renames or changes a method, the C++ compiler reports an error here on `cargo build -p trt-sys`. Fix the error, then proceed.
-
-### `trt-sys/src/logger_shim.cpp`
-
-The ONLY hand-written C++ that cannot be replaced by code generation: `ShimLogger : public nvinfer1::ILogger`. Only change this file if TRT changes the `ILogger::log()` virtual signature.
-
-### `trt-sys/include/trt_bridge.h`
-
-The pure-C header that `bindgen` uses to generate `OUT_DIR/bridge_bindings.rs`. Only change this if the C API surface changes (new `btrt_*` function, changed return type, etc.). `bindgen` regenerates `bridge_bindings.rs` automatically on every build — never edit it by hand.
-
-### `trt-sys/build.rs`
-
-Nothing required — `TENSORRT_VERSION` is parsed from `NvInferVersion.h` at build time and feeds the engine-cache keys. If the new release is outside the tested 10.3.x range, the build emits a `cargo:warning` (it does not fail); bump the supported major.minor set here once the new version is validated.
+`tensorrt-rs` — the C++ bridge, the pure-C header bindgen reads, and the `build.rs` that
+parses `TENSORRT_VERSION` — is a git dependency from
+[`kornia/tensorrt-rs`](https://github.com/kornia/tensorrt-rs). When a TRT bump breaks
+the shim, the fix is a PR there; its
+[`UPDATING.md`](https://github.com/kornia/tensorrt-rs/blob/main/UPDATING.md) lists the
+files to change. Pull the fix in here with `cargo update -p tensorrt-rs`.
 
 ---
 
@@ -52,11 +41,13 @@ TRT 10.x minor releases: the named-tensor I/O API (`setTensorAddress`, `getIOTen
    grep NV_TENSORRT /usr/include/aarch64-linux-gnu/NvInferVersion.h
    ```
 
-2. Build `trt-sys` — the C++ compiler catches API breakage:
+2. Build `tensorrt-rs` — the C++ compiler catches API breakage:
    ```
-   cargo build -p trt-sys
+   cargo build -p tensorrt-rs
    ```
-   Fix any errors in `trt_bridge.cpp` (and rarely `logger_shim.cpp`).
+   Errors point into `trt_bridge.cpp` (rarely `logger_shim.cpp`) in the
+   `kornia/tensorrt-rs` checkout cargo fetched; fix them there, then
+   `cargo update -p tensorrt-rs`.
 
 3. Run the CPU unit tests (no GPU required):
    ```

@@ -8,7 +8,7 @@ Safe Rust core for real-time TensorRT inference on Jetson. The base of the
   `cudaStreamSynchronize` per call.
 - `cuda` launch-config helpers (`cfg_1d`/`cfg_2d`/`cfg_per_item`), `buffer`
   (`PinnedBuffer`/`Stream`), and typed `engine`/`session` access.
-- `builder` feature: in-process ONNX→engine builder via `trt-sys`'s nvonnxparser
+- `builder` feature: in-process ONNX→engine builder via `tensorrt-rs`'s nvonnxparser
   shim.
 
 Model crates (e.g. [`vrt-xfeat`](../vrt-xfeat)) build on this core; weight

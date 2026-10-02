@@ -5,7 +5,7 @@ use crate::{
 };
 use std::path::Path;
 use std::sync::Arc;
-use trt_sys::*;
+use tensorrt_rs::*;
 
 /// I/O mode of a tensor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
