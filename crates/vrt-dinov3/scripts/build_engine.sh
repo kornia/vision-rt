@@ -65,7 +65,7 @@ case "$PREC" in
     *)    echo "PREC must be one of: bf16 (default), fp32, fp16 — got '$PREC'" >&2; exit 1 ;;
 esac
 
-# TRT version exactly as trt-sys parses NvInferVersion.h (MAJOR.MINOR.PATCH.BUILD);
+# TRT version exactly as tensorrt-rs parses NvInferVersion.h (MAJOR.MINOR.PATCH.BUILD);
 # GPU compute capability (sm) from torch — together they key the engine.
 HDR="$(ls /usr/include/*/NvInferVersion.h 2>/dev/null | head -1)"
 [ -n "$HDR" ] || { echo "NvInferVersion.h not found — is TensorRT installed?" >&2; exit 1; }

@@ -16,7 +16,7 @@ etc.) — so every image op still applies, but the type name carries mask / dept
 semantics.
 
 Deliberately **dependency-light** (`kornia-image` / `kornia-tensor` / `cudarc`
-only — no `vrt` / `trt-sys`), so it is a leaf every model crate depends on
+only — no `vrt` / `tensorrt-rs`), so it is a leaf every model crate depends on
 **downward**, and a clean candidate to upstream into kornia-rs.
 
 License: Apache-2.0.

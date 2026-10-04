@@ -12,7 +12,7 @@ name = "vrt_types"
 
 # Deliberately dependency-light (kornia-image/tensor + cudarc only) so this crate
 # stays a leaf the model crates depend on downward — and can later be upstreamed
-# into kornia-rs. No vrt / trt-sys dependency.
+# into kornia-rs. No vrt / tensorrt-rs dependency.
 [dependencies]
 kornia-image  = { workspace = true }
 kornia-tensor = { workspace = true }

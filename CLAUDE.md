@@ -8,16 +8,17 @@ separate `sensor-rt` repo; GPU image/tensor types come from `kornia-rs`
 
 ## Workspace layout
 
-Package `vrt` (core) + `vrt-*` / `trt-sys` satellites. Short crate names — code
-uses `use vrt::`, `use vrt_xfeat::`, `use trt_sys::`. Errors: per-crate
+Package `vrt` (core) + `vrt-*` satellites. Short crate names — code
+uses `use vrt::`, `use vrt_xfeat::`, `use tensorrt_rs::`. Errors: per-crate
 `thiserror` enums; `vrt::BoxError` for algorithm constructors that aggregate kinds.
+The raw TensorRT FFI (`tensorrt-rs`) is a git dependency from `kornia/tensorrt-rs`,
+consumed only by `vrt`.
 
 This repo is being open-sourced under the kornia org incrementally, one model
 crate per PR.
 
 | Crate | Role |
 |-------|------|
-| `crates/trt-sys` | Raw FFI: pure-C shim over TensorRT C++ (bindgen never sees C++ headers) |
 | `crates/vrt` | Safe core: Logger→Runtime→Engine→Session Arc chain, `ModelSession`, `cuda` launch helpers |
 | `crates/vrt-hub` | Model weights (HF Hub, sha256-pinned) + on-device engine cache |
 | `crates/vrt-types` | Model-free leaf (no TRT/GPU-model): `CameraIntrinsics`/`Extrinsics`, GPU `Undistorter`, depth-at-mask sampling |
@@ -132,7 +133,7 @@ cargo test -p vrt-xfeat --release -- --ignored         # GPU kernel tests (on-de
 TRT_STUB=1 cargo clippy --all-targets -- -D warnings   # off-Jetson check (no CUDA/TRT)
 ```
 
-Off-Jetson / CI: `TRT_STUB=1` makes `trt-sys` use committed bindings —
+Off-Jetson / CI: `TRT_STUB=1` makes `tensorrt-rs` use committed bindings —
 `cargo check`/`clippy`/`doc` work with nothing native compiled. kornia builds
 via cudarc's `fallback-*` features (no CUDA needed to check).
 

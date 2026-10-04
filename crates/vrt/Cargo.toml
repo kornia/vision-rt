@@ -9,11 +9,14 @@ readme = "README.md"
 
 [features]
 default = []
-# In-process ONNX -> engine builder (links libnvonnxparser via trt-sys)
-builder = ["trt-sys/builder"]
+# In-process ONNX -> engine builder (links libnvonnxparser via tensorrt-rs)
+builder = ["tensorrt-rs/builder"]
 
 [dependencies]
-trt-sys = { path = "../trt-sys" }
+# Raw TensorRT FFI, from kornia/tensorrt-rs. It declares `links = "nvinfer"` and cargo
+# keys a git source on the exact spec string, so every crate in a graph must name it
+# this same way — a second spelling is a second copy and the graph will not resolve.
+tensorrt-rs = { git = "https://github.com/kornia/tensorrt-rs", tag = "v0.1.0" }
 thiserror = "2.0"
 log = "0.4"
 half = "2.4"

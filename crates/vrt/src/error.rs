@@ -23,7 +23,7 @@ pub type Result<T> = std::result::Result<T, TrtError>;
 // Helper: pull the thread-local last error from the shim.
 pub(crate) fn last_trt_error() -> String {
     unsafe {
-        let ptr = trt_sys::btrt_last_error();
+        let ptr = tensorrt_rs::btrt_last_error();
         if ptr.is_null() {
             return String::new();
         }

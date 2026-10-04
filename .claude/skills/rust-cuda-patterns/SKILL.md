@@ -1,6 +1,6 @@
 ---
 name: rust-cuda-patterns
-description: Use when writing or modifying CUDA code from Rust in this repo — kornia CudaKernel JIT, cudarc launches/memory/events, device pointers from TRT, or the trt-sys C FFI shim. Covers this repo's conventions, not general CUDA.
+description: Use when writing or modifying CUDA code from Rust in this repo — kornia CudaKernel JIT, cudarc launches/memory/events, device pointers from TRT, or the tensorrt-rs C FFI shim. Covers this repo's conventions, not general CUDA.
 ---
 
 # Rust↔CUDA Patterns in vision-rt
@@ -12,8 +12,9 @@ Two distinct FFI layers exist — don't mix them:
    fallback-latest`) — device memory, streams, events, kernel launches. One
    cudarc across the workspace, matched to kornia-rs's set so `CudaStream`/
    `CudaSlice` types unify for zero-copy interop.
-2. **trt-sys C shim** (`trt_bridge.h/cpp`) — TensorRT only (no C ABI exists).
-   New CUDA work goes through cudarc/kornia, NOT new shim functions.
+2. **tensorrt-rs C shim** (`trt_bridge.h/cpp`, in `kornia/tensorrt-rs`) — TensorRT
+   only (no C ABI exists). New CUDA work goes through cudarc/kornia, NOT new
+   shim functions.
 
 ## Kernel authoring — kornia `CudaKernel`
 
@@ -70,7 +71,10 @@ my_kernel
   then silently reports 0 GPU time — this bug shipped once). Prefer the
   jetson-benchmarking skill's harness for reported numbers.
 
-## trt-sys shim rules (only when touching TensorRT FFI)
+## tensorrt-rs shim rules (only when touching TensorRT FFI)
+
+The shim lives in `kornia/tensorrt-rs` (`crates/tensorrt-rs`); changes to it are PRs
+there, picked up here with `cargo update -p tensorrt-rs`.
 
 - Header `trt_bridge.h` is pure C (opaque handles + stdint) — bindgen never sees
   C++/TRT headers. Keep it that way.

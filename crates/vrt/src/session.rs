@@ -10,7 +10,7 @@ use crate::{
 };
 use cudarc::driver::CudaStream;
 use std::ffi::c_void;
-use trt_sys::*;
+use tensorrt_rs::*;
 
 /// Map an engine I/O [`DataType`] to a tensor [`DType`].
 ///
