@@ -14,6 +14,8 @@ stream. Construct it whichever way fits:
   Hugging Face (`kornia/xfeat`), build/cache the engine on-device, construct.
 - `XFeat::from_onnx(path, stream, params)` — feature `hub` (trtexec build) or
   `builder` (in-process build): build/cache from a local ONNX.
+- `XFeat::from_onnx_stereo` / `XFeat::from_hub_stereo` — same, with a batch-2
+  engine for `submit_pair` (see Stereo pairs).
 - `XFeat::from_engine_file(path, stream, params)` — no feature: load a prebuilt
   `.engine`.
 - `XFeat::new(engine, stream, params)` — pass an `Engine` you already own.
@@ -26,6 +28,30 @@ xfeat.submit(&image, &mut res)?;          // enqueue, returns immediately
 stream.synchronize()?;                     // the caller owns the one sync
 let kpts = res.kpts_to_host()?;     // original-image pixels
 ```
+
+### Stereo pairs
+
+`submit_pair` runs a same-size left/right pair as **one** batch-2 backbone run, with
+every post-processing stage launched once for both. It needs a stereo engine built for
+the camera's resolution (`from_onnx_stereo` / `from_hub_stereo`, or `stereo_shapes(w, h)`
+for your own profile); the default engine is batch 1.
+
+```rust
+let mut xfeat = XFeat::from_onnx_stereo(onnx, stream.clone(), params, 640, 480)?;
+let (mut l, mut r) = (xfeat.alloc_result()?, xfeat.alloc_result()?);
+xfeat.submit_pair(&left, &right, &mut l, &mut r)?;
+stream.synchronize()?;
+```
+
+Orin Nano (MAXN_SUPER), top_k 2048, p50 per pair (`examples/xfeat_stereo`):
+
+| model size | 2× `submit`, default engine | `submit_pair`, stereo engine |
+|---|---|---|
+| 640×480 | 6.05 ms | 5.35 ms (1.13×) |
+| 736×480 | 6.78 ms | 6.15 ms (1.10×) |
+
+Opt-in because a batch-2 profile with a generic opt shape slows batch-1 runs 13–16%
+and loses the pair's gain away from opt; sized to the camera it costs batch 1 nothing.
 
 Match two results with `Matcher::new(stream)` →
 `submit(Descriptors::new(&a.descs, a.count(), a.desc_dim()), ..., cossim, &mut MatchResult)`

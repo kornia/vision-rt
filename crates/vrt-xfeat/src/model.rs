@@ -3,7 +3,7 @@
 use crate::postprocess::{XFeatError, XFeatPostproc, XFeatResult};
 use cudarc::driver::CudaSlice;
 use kornia_image::Image;
-use kornia_imgproc::preprocess::Preprocessor;
+use kornia_imgproc::preprocess::{PreprocessError, Preprocessor};
 use kornia_tensor::{zeros_cuda, Tensor};
 use std::sync::Arc;
 use vrt::{BoxError, CudaStream, Engine, ModelSession};
@@ -13,7 +13,7 @@ use vrt::{BoxError, CudaStream, Engine, ModelSession};
 /// Configuration for the XFeat feature extractor.
 ///
 /// The backbone input size is NOT configured here — matching upstream XFeat, each
-/// frame is resized to its own floor-of-32 dimensions (see [`XFeat::run`]).
+/// frame is resized to its own floor-of-32 dimensions (see [`XFeat::submit`]).
 #[derive(Debug, Clone)]
 pub struct XFeatParams {
     /// Maximum keypoints returned per frame.
@@ -49,12 +49,25 @@ pub struct XFeat {
     stream: Arc<CudaStream>,
     /// NMS score buffer, sized to the current model dims; reallocated on size change.
     score_dev: CudaSlice<f32>,
-    /// Model input tensor `[1,3,mh,mw]` CHW FP32 device, written by `preproc.run`.
+    /// Model input tensor `[B,3,mh,mw]` CHW FP32 device, written by the preprocessor.
     input: Tensor<f32, 4>,
-    /// Model dims `(mh, mw)` the buffers are currently sized for.
-    cur: (usize, usize),
-    /// Keypoint capacity for results allocated by [`run`](Self::run).
+    /// Batch and model dims `(B, mh, mw)` the buffers are currently sized for.
+    cur: (usize, usize, usize),
+    /// Keypoint capacity for results allocated by [`alloc_result`](Self::alloc_result).
     top_k: usize,
+}
+
+/// `image` input min/opt/max of the default engine profile: one frame of any size.
+pub const ENGINE_SHAPES: [[i64; 4]; 3] = [[1, 3, 240, 320], [1, 3, 640, 640], [1, 3, 1088, 1920]];
+
+/// `image` min/opt/max for a stereo engine serving [`XFeat::submit_pair`] on
+/// `width × height` frames: batch 1..=2 at exactly that frame's floor-of-32 size.
+///
+/// Opt-in rather than the default because the batch-2 profile costs batch-1 runs
+/// 13–16% on Orin, while the pair only gains ~6% — and only at the opt shape.
+pub fn stereo_shapes(width: usize, height: usize) -> [[i64; 4]; 3] {
+    let (mw, mh) = ((width / 32 * 32) as i64, (height / 32 * 32) as i64);
+    [[1, 3, mh, mw], [2, 3, mh, mw], [2, 3, mh, mw]]
 }
 
 /// Minimum model dimension (a multiple of 32) the reused buffers are seeded with
@@ -84,7 +97,7 @@ impl XFeat {
             stream,
             score_dev,
             input,
-            cur: (SEED_DIM, SEED_DIM),
+            cur: (1, SEED_DIM, SEED_DIM),
             top_k: params.top_k,
         })
     }
@@ -107,17 +120,23 @@ impl XFeat {
         Self::new(Engine::load(engine_path)?, stream, params)
     }
 
-    /// The engine build profile — XFeat backbone: dynamic H×W input (downsampled
-    /// ×8), fp16. min/opt/max mirror `examples/xfeat_match` (opt = 640×640).
+    /// The default engine build profile — XFeat backbone: one frame, dynamic H×W
+    /// input (downsampled ×8), fp16. See [`ENGINE_SHAPES`].
     #[cfg(any(feature = "hub", feature = "builder"))]
-    fn engine_profile() -> vrt_hub::EngineProfile {
+    pub fn engine_profile() -> vrt_hub::EngineProfile {
+        Self::profile(ENGINE_SHAPES)
+    }
+
+    /// The stereo engine build profile for `width × height` frames. See [`stereo_shapes`].
+    #[cfg(any(feature = "hub", feature = "builder"))]
+    pub fn stereo_profile(width: usize, height: usize) -> vrt_hub::EngineProfile {
+        Self::profile(stereo_shapes(width, height))
+    }
+
+    #[cfg(any(feature = "hub", feature = "builder"))]
+    fn profile([min, opt, max]: [[i64; 4]; 3]) -> vrt_hub::EngineProfile {
         vrt_hub::EngineProfile {
-            inputs: vec![(
-                "image".into(),
-                vec![1, 3, 240, 320],
-                vec![1, 3, 640, 640],
-                vec![1, 3, 1088, 1920],
-            )],
+            inputs: vec![("image".into(), min.to_vec(), opt.to_vec(), max.to_vec())],
             fp16: true,
             bf16: false,
             workspace_mb: 2048,
@@ -134,15 +153,36 @@ impl XFeat {
         stream: Arc<CudaStream>,
         params: XFeatParams,
     ) -> Result<Self, BoxError> {
+        Self::from_onnx_profile(onnx_path, stream, params, &Self::engine_profile())
+    }
+
+    /// [`from_onnx`](Self::from_onnx) with a stereo engine for `width × height`
+    /// frames, enabling [`submit_pair`](Self::submit_pair) at that size.
+    #[cfg(any(feature = "hub", feature = "builder"))]
+    pub fn from_onnx_stereo(
+        onnx_path: impl AsRef<std::path::Path>,
+        stream: Arc<CudaStream>,
+        params: XFeatParams,
+        width: usize,
+        height: usize,
+    ) -> Result<Self, BoxError> {
+        let profile = Self::stereo_profile(width, height);
+        Self::from_onnx_profile(onnx_path, stream, params, &profile)
+    }
+
+    #[cfg(any(feature = "hub", feature = "builder"))]
+    fn from_onnx_profile(
+        onnx_path: impl AsRef<std::path::Path>,
+        stream: Arc<CudaStream>,
+        params: XFeatParams,
+        profile: &vrt_hub::EngineProfile,
+    ) -> Result<Self, BoxError> {
         let model_path = onnx_path
             .as_ref()
             .to_str()
             .ok_or_else(|| BoxError::from("onnx path is not valid UTF-8"))?;
-        let engine_path = vrt_hub::EngineCache::default().resolve(
-            "xfeat-backbone",
-            model_path,
-            &Self::engine_profile(),
-        )?;
+        let engine_path =
+            vrt_hub::EngineCache::default().resolve("xfeat-backbone", model_path, profile)?;
         Self::from_engine_file(engine_path, stream, params)
     }
 
@@ -157,15 +197,64 @@ impl XFeat {
         Self::from_engine_file(engine, stream, params)
     }
 
+    /// [`from_hub`](Self::from_hub) with a stereo engine for `width × height`
+    /// frames (built on-device on first use; no prebuilt is published).
+    #[cfg(feature = "hub")]
+    pub fn from_hub_stereo(
+        stream: Arc<CudaStream>,
+        params: XFeatParams,
+        width: usize,
+        height: usize,
+    ) -> Result<Self, BoxError> {
+        let profile = Self::stereo_profile(width, height);
+        let engine = vrt_hub::resolve_engine("xfeat-backbone", &profile)?;
+        Self::from_engine_file(engine, stream, params)
+    }
+
     /// Submit one frame's async GPU work — resize/normalize → backbone → NMS →
     /// top-K — into the caller-owned `out`, all enqueued on the shared stream with
     /// **no sync** (VPI-style). Sync the stream once (covering any other work on
     /// it), then read `out` (its `count()`/`kpts_to_host` are valid after the
     /// sync). Reuse one `out` per frame, or hold several to keep multiple frames
-    /// outstanding. [`run`](Self::run) wraps alloc + submit + sync.
+    /// outstanding.
     pub fn submit(&mut self, img: &Image<u8, 3>, out: &mut XFeatResult) -> Result<(), XFeatError> {
+        self.submit_batch(&[img], &mut [out])
+    }
+
+    /// Submit a same-size stereo pair as **one** batch-2 backbone run — every
+    /// stage (preprocess, TensorRT, NMS, top-K, sampling) is enqueued once for
+    /// both images instead of twice. Same async contract as
+    /// [`submit`](Self::submit): sync the stream once, then read both results.
+    ///
+    /// Needs a stereo engine ([`from_onnx_stereo`](Self::from_onnx_stereo),
+    /// [`stereo_shapes`]) for this frame size; the default engine is batch 1 and
+    /// TensorRT rejects the batch-2 shape.
+    pub fn submit_pair(
+        &mut self,
+        left: &Image<u8, 3>,
+        right: &Image<u8, 3>,
+        out_left: &mut XFeatResult,
+        out_right: &mut XFeatResult,
+    ) -> Result<(), XFeatError> {
+        if (left.width(), left.height()) != (right.width(), right.height()) {
+            return Err(XFeatError::StereoSizeMismatch(
+                left.width(),
+                left.height(),
+                right.width(),
+                right.height(),
+            ));
+        }
+        self.submit_batch(&[left, right], &mut [out_left, out_right])
+    }
+
+    fn submit_batch(
+        &mut self,
+        imgs: &[&Image<u8, 3>],
+        outs: &mut [&mut XFeatResult],
+    ) -> Result<(), XFeatError> {
+        let batch = imgs.len();
         // Upstream XFeat: resize to floor-of-32 dims, keypoints scaled back by (rw,rh).
-        let (sw, sh) = (img.width(), img.height());
+        let (sw, sh) = (imgs[0].width(), imgs[0].height());
         let (mw, mh) = ((sw / 32) * 32, (sh / 32) * 32);
         if mw == 0 || mh == 0 {
             return Err(XFeatError::InputTooSmall(sw, sh));
@@ -176,24 +265,25 @@ impl XFeat {
         // the output-buffer reallocation are host-side calls, not stream-ordered, so
         // performing them while a previous `enqueue_v3` is still in flight mutates a live
         // context and frees buffers it is reading. Draining here makes every caller safe
-        // by construction — the alternative is a rule every call site must remember, and
-        // three of this repo's own harnesses forgot it.
-        //
-        // Costs one sync only when the size actually changes, which for a video stream is
-        // the first frame and nothing else.
-        if self.cur != (mh, mw) {
+        // by construction. Costs one sync only when the shape (size or batch) changes.
+        if self.cur != (batch, mh, mw) {
             self.stream.synchronize()?;
-        }
-        // (Re)allocate the reused buffers on the shared stream when the frame's
-        // model size changes — stream-ordered so they're valid in submit order.
-        if self.cur != (mh, mw) {
-            self.input = zeros_cuda::<f32, 4>([1, 3, mh, mw], &self.stream)?;
-            self.score_dev = self.stream.alloc_zeros::<f32>(mh * mw)?;
-            self.cur = (mh, mw);
+            self.input = zeros_cuda::<f32, 4>([batch, 3, mh, mw], &self.stream)?;
+            self.score_dev = self.stream.alloc_zeros::<f32>(batch * mh * mw)?;
+            self.cur = (batch, mh, mw);
         }
 
         // Preprocess (stretch resize + /255) into the reused input, then backbone.
-        self.preproc.run(img, &mut self.input)?;
+        if batch == 1 {
+            self.preproc.run(imgs[0], &mut self.input)?;
+        } else {
+            let mut frames = Vec::with_capacity(batch);
+            for img in imgs {
+                frames.push(img.as_cudaslice().ok_or(PreprocessError::NotDeviceImage)?);
+            }
+            self.preproc
+                .run_raw_batch(&frames, sw, sh, &mut self.input)?;
+        }
         let tmap = self.model.run(&self.input)?;
         let desc_ptr = tmap
             .get("descriptors")
@@ -208,10 +298,12 @@ impl XFeat {
             .ok_or(XFeatError::MissingOutput("reliability"))?
             .f32_ptr()?;
         self.postproc
-            .launch_score_nms(heat_ptr, rel_ptr, &self.score_dev, mh, mw)?;
+            .launch_score_nms(heat_ptr, rel_ptr, &self.score_dev, batch, mh, mw)?;
         self.postproc
-            .launch_topk(desc_ptr, &self.score_dev, mh, mw, out)?;
-        out.set_scale((rw, rh));
+            .launch_topk_batch(desc_ptr, &self.score_dev, mh, mw, outs)?;
+        for out in outs.iter_mut() {
+            out.set_scale((rw, rh));
+        }
         Ok(())
     }
 }
