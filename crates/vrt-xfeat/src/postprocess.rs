@@ -66,10 +66,12 @@ pub enum XFeatError {
     #[error("batched results must share one capacity: got {0}, expected {1}")]
     BatchCapacity(usize, usize),
     #[error(
-        "result was allocated on a different CUDA stream than the extractor; allocate it \
-         with alloc_result() on the extractor that will fill it"
+        "result was allocated on a different Arc<CudaStream> than the one filling it; \
+         allocate it with XFeat::alloc_result() or XFeatResult::alloc() on that same Arc"
     )]
     StreamMismatch,
+    #[error("score map holds {got} floats but {need} are needed (batch × h × w)")]
+    ScoreMapTooSmall { got: usize, need: usize },
     #[error(
         "descriptor width {0} is not supported — it must be a non-zero multiple of 32 and \
          at most 128 (the query array is held in registers, and 256 floats exceeds CUDA's \
@@ -403,7 +405,7 @@ impl XFeatResult {
             .clone_dtoh(&self.descs.slice(0..n * XFEAT_DESC_DIM))
     }
 
-    /// Mutable pinned-count pointer (for the async count D2H in `launch_topk`).
+    /// Mutable pinned-count pointer (for the async count D2H in `launch_topk_batch`).
     pub(crate) fn count_pin_mut(&mut self) -> *mut i32 {
         self.count_pin.as_mut_ptr()
     }
@@ -474,7 +476,7 @@ impl XFeatPostproc {
     /// (async — caller must sync before reading).
     ///
     /// `heat_ptr`/`rel_ptr` point at `[batch,1,h,w]` tensors; `score_dev` must hold
-    /// at least `batch * h * w` f32 elements.
+    /// at least `batch * h * w` f32 elements (checked).
     pub fn launch_score_nms(
         &self,
         heat_ptr: *const f32,
@@ -486,6 +488,7 @@ impl XFeatPostproc {
     ) -> Result<(), XFeatError> {
         use cudarc::driver::DevicePtr;
         check_batch(batch)?;
+        check_score_len(score_dev, batch, h, w)?;
         let heat_raw: CUdeviceptr = heat_ptr as usize as CUdeviceptr;
         let rel_raw: CUdeviceptr = rel_ptr as usize as CUdeviceptr;
         let score_raw: CUdeviceptr = score_dev.device_ptr(self.stream.as_ref()).0;
@@ -519,6 +522,21 @@ impl XFeatPostproc {
         self.launch_topk_batch(desc_ptr, score_dev, h, w, &mut [out])
     }
 
+    /// All `outs` must share one capacity and this stream (a foreign stream races silently).
+    pub(crate) fn check_outs(&self, outs: &[&mut XFeatResult]) -> Result<(), XFeatError> {
+        check_batch(outs.len())?;
+        let k = outs[0].top_k;
+        for o in outs {
+            if o.top_k != k {
+                return Err(XFeatError::BatchCapacity(o.top_k, k));
+            }
+            if !Arc::ptr_eq(&o.stream, &self.stream) {
+                return Err(XFeatError::StreamMismatch);
+            }
+        }
+        Ok(())
+    }
+
     /// Launch the entire top-K + descriptor postproc **asynchronously** for
     /// `outs.len()` stacked images — GPU histogram-cutoff top-K, descriptor
     /// sampling, L2-norm, and the async D2H of each keypoint count into its
@@ -538,18 +556,10 @@ impl XFeatPostproc {
         outs: &mut [&mut XFeatResult],
     ) -> Result<(), XFeatError> {
         use cudarc::driver::DevicePtr;
+        self.check_outs(outs)?;
         let batch = outs.len();
-        check_batch(batch)?;
         let k = outs[0].top_k;
-        for o in outs.iter() {
-            if o.top_k != k {
-                return Err(XFeatError::BatchCapacity(o.top_k, k));
-            }
-            // A result on another stream would race this pass silently.
-            if !Arc::ptr_eq(&o.stream, &self.stream) {
-                return Err(XFeatError::StreamMismatch);
-            }
-        }
+        check_score_len(score_dev, batch, h, w)?;
         let (hd, wd) = (h / 8, w / 8);
         let n_pixels = h * w;
 
@@ -652,6 +662,22 @@ fn check_batch(batch: usize) -> Result<(), XFeatError> {
     Ok(())
 }
 
+fn check_score_len(
+    score_dev: &CudaSlice<f32>,
+    batch: usize,
+    h: usize,
+    w: usize,
+) -> Result<(), XFeatError> {
+    let need = batch * h * w;
+    if score_dev.len() < need {
+        return Err(XFeatError::ScoreMapTooSmall {
+            got: score_dev.len(),
+            need,
+        });
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod gpu_compact_tests {
     use super::*;
@@ -729,6 +755,115 @@ mod gpu_compact_tests {
                 row[0],
                 expect0
             );
+        }
+    }
+
+    /// A score map shorter than `batch × h × w` must be rejected before any launch.
+    #[test]
+    #[ignore]
+    fn gpu_short_score_map_is_rejected() {
+        let ctx = cudarc::driver::CudaContext::new(0).unwrap();
+        let stream = ctx.new_stream().unwrap();
+        let mut pp = XFeatPostproc::new(stream.clone(), 0.05).unwrap();
+        let (h, w) = (32usize, 32usize);
+        let score_dev = stream.alloc_zeros::<f32>(h * w).unwrap();
+        let (mut r0, mut r1) = (
+            XFeatResult::alloc(&stream, 2).unwrap(),
+            XFeatResult::alloc(&stream, 2).unwrap(),
+        );
+        let null = std::ptr::null::<f32>();
+        let err = pp
+            .launch_score_nms(null, null, &score_dev, 2, h, w)
+            .unwrap_err();
+        assert!(matches!(err, XFeatError::ScoreMapTooSmall { .. }), "{err}");
+        let err = pp
+            .launch_topk_batch(null, &score_dev, h, w, &mut [&mut r0, &mut r1])
+            .unwrap_err();
+        assert!(matches!(err, XFeatError::ScoreMapTooSmall { .. }), "{err}");
+    }
+
+    /// Batch 2 through NMS -> top-K: each result must get exactly its own image's
+    /// keypoints, scores and descriptors (catches plane-offset / slot-routing bugs).
+    #[test]
+    #[ignore]
+    fn gpu_batch2_routes_each_image_to_its_slot() {
+        use cudarc::driver::DevicePtr;
+        let ctx = cudarc::driver::CudaContext::new(0).unwrap();
+        let stream = ctx.new_stream().unwrap();
+        let mut pp = XFeatPostproc::new(stream.clone(), 0.05).unwrap();
+        let (h, w) = (32usize, 32usize);
+        let (hd, wd, n) = (h / 8, w / 8, h * w);
+        let d = XFEAT_DESC_DIM;
+
+        // Isolated peaks (>2 px apart, so all survive NMS); top-2 per image is the first two.
+        let peaks: [[(usize, f32); 3]; 2] = [
+            [(100, 0.9), (999, 0.7), (500, 0.1)],
+            [(37, 0.8), (700, 0.6), (300, 0.2)],
+        ];
+        let rel_val = [1.0f32, 0.5]; // per-image reliability: proves the rel plane offset
+        let mut heat = vec![0.0f32; 2 * n];
+        let mut rel = vec![0.0f32; 2 * n];
+        for b in 0..2 {
+            rel[b * n..(b + 1) * n].fill(rel_val[b]);
+            for &(i, s) in &peaks[b] {
+                heat[b * n + i] = s;
+            }
+        }
+        // Per-image constant-per-channel desc maps with different directions.
+        let chan = |b: usize, c: usize| {
+            if b == 0 {
+                (c + 1) as f32
+            } else {
+                (d - c) as f32
+            }
+        };
+        let mut desc = vec![0.0f32; 2 * d * hd * wd];
+        for b in 0..2 {
+            for c in 0..d {
+                let o = (b * d + c) * hd * wd;
+                desc[o..o + hd * wd].fill(chan(b, c));
+            }
+        }
+        let (heat_dev, rel_dev, desc_dev) = (
+            stream.clone_htod(&heat).unwrap(),
+            stream.clone_htod(&rel).unwrap(),
+            stream.clone_htod(&desc).unwrap(),
+        );
+        let score_dev = stream.alloc_zeros::<f32>(2 * n).unwrap();
+        let ptr = |s: &CudaSlice<f32>| s.device_ptr(stream.as_ref()).0 as *const f32;
+
+        let (mut r0, mut r1) = (
+            XFeatResult::alloc(&stream, 2).unwrap(),
+            XFeatResult::alloc(&stream, 2).unwrap(),
+        );
+        pp.launch_score_nms(ptr(&heat_dev), ptr(&rel_dev), &score_dev, 2, h, w)
+            .unwrap();
+        pp.launch_topk_batch(ptr(&desc_dev), &score_dev, h, w, &mut [&mut r0, &mut r1])
+            .unwrap();
+        stream.synchronize().unwrap();
+
+        for (b, res) in [&r0, &r1].into_iter().enumerate() {
+            assert_eq!(res.count(), 2, "image {b}");
+            let (kpts, scores) = (res.kpts_to_host().unwrap(), res.scores_to_host().unwrap());
+            let mut got: Vec<(u32, u32, f32)> = kpts
+                .chunks_exact(2)
+                .zip(&scores)
+                .map(|(xy, &s)| (xy[0] as u32, xy[1] as u32, s))
+                .collect();
+            got.sort_by(|a, b| b.2.total_cmp(&a.2));
+            let want: Vec<(u32, u32, f32)> = peaks[b][..2]
+                .iter()
+                .map(|&(i, s)| ((i % w) as u32, (i / w) as u32, s * rel_val[b]))
+                .collect();
+            assert_eq!(got, want, "image {b}");
+
+            let norm = (0..d).map(|c| chan(b, c).powi(2)).sum::<f32>().sqrt();
+            for row in res.descs_to_host().unwrap().chunks_exact(d) {
+                for (c, v) in row.iter().enumerate() {
+                    let e = chan(b, c) / norm;
+                    assert!((v - e).abs() < 1e-5, "image {b} ch {c}: {v} vs {e}");
+                }
+            }
         }
     }
 }

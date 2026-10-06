@@ -68,6 +68,8 @@ jobs:
         run: cargo test -p vrt-hub -p vrt-raco-aliked -p vrt-lightglue
       - name: CPU unit tests (vrt-xfeat + harness)
         run: cargo test -p vrt-xfeat --lib && cargo test -p vrt-lightglue --tests --examples
-      # gpu_pair (submit_pair vs 2x submit) needs XFEAT_ONNX=<xfeat_backbone.onnx>.
       - name: GPU tests (kernels vs CPU reference)
-        run: cargo test -p vrt-xfeat --release -- --ignored
+        run: cargo test -p vrt-xfeat --release --lib -- --ignored
+      # gpu_pair needs XFEAT_ONNX=<xfeat_backbone.onnx> in the step env.
+      - name: GPU test (submit_pair vs 2x submit)
+        run: cargo test -p vrt-xfeat --release --features builder --test gpu_pair -- --ignored

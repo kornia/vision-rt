@@ -39,7 +39,8 @@ impl XFeatParams {
 ///
 /// Preprocess, TRT backbone, and post-processing all enqueue on the one CUDA
 /// `stream` shared at construction — [`submit`](Self::submit) is fully async (no
-/// sync); the caller owns the `stream.synchronize()`, then reads the result.
+/// sync) while the batch and frame size stay fixed; the caller owns the
+/// `stream.synchronize()`, then reads the result.
 pub struct XFeat {
     model: ModelSession,
     preproc: Preprocessor,
@@ -63,8 +64,8 @@ pub const ENGINE_SHAPES: [[i64; 4]; 3] = [[1, 3, 240, 320], [1, 3, 640, 640], [1
 /// `image` min/opt/max for a stereo engine serving [`XFeat::submit_pair`] on
 /// `width × height` frames: batch 1..=2 at exactly that frame's floor-of-32 size.
 ///
-/// Opt-in rather than the default because the batch-2 profile costs batch-1 runs
-/// 13–16% on Orin, while the pair only gains ~6% — and only at the opt shape.
+/// Sized to the camera because a generic-opt batch-2 profile slows batch-1 runs
+/// 13–16% on Orin; at the frame's size batch 1 is unaffected (see README, Stereo pairs).
 pub fn stereo_shapes(width: usize, height: usize) -> [[i64; 4]; 3] {
     let (mw, mh) = ((width / 32 * 32) as i64, (height / 32 * 32) as i64);
     [[1, 3, mh, mw], [2, 3, mh, mw], [2, 3, mh, mw]]
@@ -123,14 +124,17 @@ impl XFeat {
     /// The default engine build profile — XFeat backbone: one frame, dynamic H×W
     /// input (downsampled ×8), fp16. See [`ENGINE_SHAPES`].
     #[cfg(any(feature = "hub", feature = "builder"))]
-    pub fn engine_profile() -> vrt_hub::EngineProfile {
+    fn engine_profile() -> vrt_hub::EngineProfile {
         Self::profile(ENGINE_SHAPES)
     }
 
-    /// The stereo engine build profile for `width × height` frames. See [`stereo_shapes`].
+    /// The stereo engine build profile for `width × height` frames (each side ≥ 32).
     #[cfg(any(feature = "hub", feature = "builder"))]
-    pub fn stereo_profile(width: usize, height: usize) -> vrt_hub::EngineProfile {
-        Self::profile(stereo_shapes(width, height))
+    fn stereo_profile(width: usize, height: usize) -> Result<vrt_hub::EngineProfile, XFeatError> {
+        if width < 32 || height < 32 {
+            return Err(XFeatError::InputTooSmall(width, height));
+        }
+        Ok(Self::profile(stereo_shapes(width, height)))
     }
 
     #[cfg(any(feature = "hub", feature = "builder"))]
@@ -156,8 +160,9 @@ impl XFeat {
         Self::from_onnx_profile(onnx_path, stream, params, &Self::engine_profile())
     }
 
-    /// [`from_onnx`](Self::from_onnx) with a stereo engine for `width × height`
-    /// frames, enabling [`submit_pair`](Self::submit_pair) at that size.
+    /// [`from_onnx`](Self::from_onnx) with a stereo engine for `width × height` frames
+    /// (each side ≥ 32). The engine accepts only `width/32*32 × height/32*32` model
+    /// input, for [`submit`](Self::submit) as well as [`submit_pair`](Self::submit_pair).
     #[cfg(any(feature = "hub", feature = "builder"))]
     pub fn from_onnx_stereo(
         onnx_path: impl AsRef<std::path::Path>,
@@ -166,7 +171,7 @@ impl XFeat {
         width: usize,
         height: usize,
     ) -> Result<Self, BoxError> {
-        let profile = Self::stereo_profile(width, height);
+        let profile = Self::stereo_profile(width, height)?;
         Self::from_onnx_profile(onnx_path, stream, params, &profile)
     }
 
@@ -197,8 +202,10 @@ impl XFeat {
         Self::from_engine_file(engine, stream, params)
     }
 
-    /// [`from_hub`](Self::from_hub) with a stereo engine for `width × height`
-    /// frames (built on-device on first use; no prebuilt is published).
+    /// [`from_hub`](Self::from_hub) with a stereo engine for `width × height` frames
+    /// (built on-device on first use; no prebuilt is published). The engine accepts
+    /// only `width/32*32 × height/32*32` model input, for [`submit`](Self::submit) as
+    /// well as [`submit_pair`](Self::submit_pair).
     #[cfg(feature = "hub")]
     pub fn from_hub_stereo(
         stream: Arc<CudaStream>,
@@ -206,7 +213,7 @@ impl XFeat {
         width: usize,
         height: usize,
     ) -> Result<Self, BoxError> {
-        let profile = Self::stereo_profile(width, height);
+        let profile = Self::stereo_profile(width, height)?;
         let engine = vrt_hub::resolve_engine("xfeat-backbone", &profile)?;
         Self::from_engine_file(engine, stream, params)
     }
@@ -229,6 +236,10 @@ impl XFeat {
     /// Needs a stereo engine ([`from_onnx_stereo`](Self::from_onnx_stereo),
     /// [`stereo_shapes`]) for this frame size; the default engine is batch 1 and
     /// TensorRT rejects the batch-2 shape.
+    ///
+    /// Switching between `submit` and `submit_pair` (or changing frame size) on one
+    /// instance drains the stream and reallocates the buffers; keep one `XFeat` per
+    /// batch size if you mix them.
     pub fn submit_pair(
         &mut self,
         left: &Image<u8, 3>,
@@ -252,6 +263,8 @@ impl XFeat {
         imgs: &[&Image<u8, 3>],
         outs: &mut [&mut XFeatResult],
     ) -> Result<(), XFeatError> {
+        // Validate before anything is enqueued or reallocated.
+        self.postproc.check_outs(outs)?;
         let batch = imgs.len();
         // Upstream XFeat: resize to floor-of-32 dims, keypoints scaled back by (rw,rh).
         let (sw, sh) = (imgs[0].width(), imgs[0].height());
@@ -274,16 +287,12 @@ impl XFeat {
         }
 
         // Preprocess (stretch resize + /255) into the reused input, then backbone.
-        if batch == 1 {
-            self.preproc.run(imgs[0], &mut self.input)?;
-        } else {
-            let mut frames = Vec::with_capacity(batch);
-            for img in imgs {
-                frames.push(img.as_cudaslice().ok_or(PreprocessError::NotDeviceImage)?);
-            }
-            self.preproc
-                .run_raw_batch(&frames, sw, sh, &mut self.input)?;
-        }
+        let frames = imgs
+            .iter()
+            .map(|i| i.as_cudaslice().ok_or(PreprocessError::NotDeviceImage))
+            .collect::<Result<Vec<_>, _>>()?;
+        self.preproc
+            .run_raw_batch(&frames, sw, sh, &mut self.input)?;
         let tmap = self.model.run(&self.input)?;
         let desc_ptr = tmap
             .get("descriptors")

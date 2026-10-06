@@ -34,7 +34,8 @@ let kpts = res.kpts_to_host()?;     // original-image pixels
 `submit_pair` runs a same-size left/right pair as **one** batch-2 backbone run, with
 every post-processing stage launched once for both. It needs a stereo engine built for
 the camera's resolution (`from_onnx_stereo` / `from_hub_stereo`, or `stereo_shapes(w, h)`
-for your own profile); the default engine is batch 1.
+for your own profile); the default engine is batch 1. A stereo engine serves only that
+one size, for `submit` as well as `submit_pair`.
 
 ```rust
 let mut xfeat = XFeat::from_onnx_stereo(onnx, stream.clone(), params, 640, 480)?;
@@ -51,7 +52,9 @@ Orin Nano (MAXN_SUPER), top_k 2048, p50 per pair (`examples/xfeat_stereo`):
 | 736×480 | 6.78 ms | 6.15 ms (1.10×) |
 
 Opt-in because a batch-2 profile with a generic opt shape slows batch-1 runs 13–16%
-and loses the pair's gain away from opt; sized to the camera it costs batch 1 nothing.
+and loses the pair's gain away from opt; sized to the camera it costs batch 1 nothing
+— but use a separate `XFeat` for batch-1 calls: alternating `submit` and `submit_pair`
+on one instance drains the stream at every switch.
 
 Match two results with `Matcher::new(stream)` →
 `submit(Descriptors::new(&a.descs, a.count(), a.desc_dim()), ..., cossim, &mut MatchResult)`

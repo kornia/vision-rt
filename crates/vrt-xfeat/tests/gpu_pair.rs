@@ -1,14 +1,13 @@
 //! `submit_pair` must return what two `submit`s return, image for image.
 //!
 //! Needs a GPU and the backbone ONNX: `XFEAT_ONNX=/path/xfeat_backbone.onnx
-//! cargo test -p vrt-xfeat --release --test gpu_pair -- --ignored --nocapture`.
+//! cargo test -p vrt-xfeat --release --features builder --test gpu_pair -- --ignored --nocapture`.
 //! Both paths share one stereo engine, but TensorRT may pick different fp16 tactics for
 //! batch 1 and 2, so equality is checked against a tolerance, not bit-exactly.
+#![cfg(any(feature = "hub", feature = "builder"))]
 
 use kornia_io::functional::read_image_any_rgb8;
-use vrt::logger::Severity;
-use vrt::{Engine, Logger, Runtime};
-use vrt_xfeat::{stereo_shapes, XFeat, XFeatParams, XFeatResult};
+use vrt_xfeat::{XFeat, XFeatParams, XFeatResult};
 
 const TOP_K: usize = 2048;
 const IMAGE: &str = concat!(
@@ -51,26 +50,21 @@ fn agreement(a: &Host, b: &Host) -> (f64, f32) {
 }
 
 #[test]
-#[ignore]
+#[ignore = "needs a GPU, XFEAT_ONNX, and --features builder"]
 fn pair_matches_single() {
     let onnx = std::env::var("XFEAT_ONNX").expect("set XFEAT_ONNX to xfeat_backbone.onnx");
     let left = read_image_any_rgb8(IMAGE).unwrap();
     let mut right = left.clone();
     kornia_imgproc::flip::horizontal_flip(&left, &mut right).unwrap();
-    let [min, opt, max] = stereo_shapes(left.width(), left.height());
-    let profile = vrt_hub::EngineProfile {
-        inputs: vec![("image".into(), min.to_vec(), opt.to_vec(), max.to_vec())],
-        fp16: true,
-        bf16: false,
-        workspace_mb: 2048,
-    };
-    let path = vrt_hub::EngineCache::default()
-        .resolve("xfeat-backbone", &onnx, &profile)
-        .unwrap();
-    let runtime = Runtime::new(Logger::new(Severity::Warning).unwrap()).unwrap();
-    let engine = Engine::from_file(runtime, &path).unwrap();
     let stream = vrt::Stream::new_standalone().unwrap().cuda_stream().clone();
-    let mut xfeat = XFeat::new(engine, stream.clone(), XFeatParams::new(TOP_K, 0.05)).unwrap();
+    let mut xfeat = XFeat::from_onnx_stereo(
+        &onnx,
+        stream.clone(),
+        XFeatParams::new(TOP_K, 0.05),
+        left.width(),
+        left.height(),
+    )
+    .unwrap();
 
     let (l, r) = (
         left.to_cuda(&stream).unwrap(),

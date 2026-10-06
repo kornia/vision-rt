@@ -563,7 +563,7 @@ mod tests {
 
     /// GPU tiled-argmax matching must agree with the CPU reference.
     /// Needs the Jetson GPU; run explicitly:
-    ///   cargo test -p vrt-xfeat -- --ignored
+    ///   cargo test -p vrt-xfeat --lib -- --ignored
     #[test]
     #[ignore]
     fn gpu_match_agrees_with_cpu_reference() {
@@ -619,7 +619,7 @@ mod tests {
     /// Only an independent reference catches it. Also checks that a buffer too short
     /// for its claimed count is rejected rather than silently strided.
     ///
-    /// Run: cargo test -p vrt-xfeat --release -- --ignored --nocapture
+    /// Run: cargo test -p vrt-xfeat --release --lib -- --ignored --nocapture
     #[test]
     #[ignore]
     fn gpu_match_128d_agrees_with_cpu_reference() {
@@ -721,7 +721,7 @@ mod tests {
     }
 
     /// Kernel-only timing: pre-allocated buffers, CUDA-event bracketed, averaged
-    /// over 20 launches. Run: cargo test -p vrt-xfeat --release -- --ignored --nocapture
+    /// over 20 launches. Run: cargo test -p vrt-xfeat --release --lib -- --ignored --nocapture
     #[test]
     #[ignore]
     fn gpu_match_kernel_only_timing() {
