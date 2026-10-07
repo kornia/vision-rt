@@ -82,6 +82,16 @@ fn pair_matches_single() {
     }
     stream.synchronize().unwrap();
 
+    // Device-side outputs a stereo matcher consumes without a host sync: the clamped
+    // count, and keypoints in image pixels (720 rows floor to 704 → y scale != 1).
+    for r in s.iter().chain(p.iter()) {
+        let n = r.count();
+        assert_eq!(stream.clone_dtoh(r.count_device()).unwrap(), vec![n as i32]);
+        let dev = stream.clone_dtoh(&r.kpts_px().slice(0..2 * n)).unwrap();
+        let bits = |v: &[f32]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+        assert_eq!(bits(&dev), bits(&r.kpts_to_host().unwrap()));
+    }
+
     for (side, (a, b)) in ["left", "right"].iter().zip(s.iter().zip(p.iter())) {
         let (ha, hb) = (host(a), host(b));
         let (shared, min_cos) = agreement(&ha, &hb);
