@@ -11,5 +11,5 @@ pub mod postprocess;
 
 pub use kornia_imgproc::preprocess::Preprocessor;
 pub use matching::{Descriptors, MatchResult, Matcher};
-pub use model::{XFeat, XFeatParams};
+pub use model::{stereo_shapes, XFeat, XFeatParams, ENGINE_SHAPES};
 pub use postprocess::{XFeatError, XFeatPostproc, XFeatResult};

@@ -142,10 +142,9 @@ pub static REGISTRY: &[ModelSpec] = &[
     // 3x the keypoints. Hence one entry per K rather than a single default.
     //
     // Engines are pinned to the shape profile RaCoAliked::engine_profile() declares
-    // (min 1x3x256x256 / opt 2x3x512x512 / max 2x3x640x640). pick_artifact matches on
-    // trt_version + sm + precision ONLY and does not check the profile, so an engine
-    // built at any other profile would be served here and then reject frames it cannot
-    // handle. Do not add one without matching the declared profile.
+    // (min 1x3x256x256 / opt 2x3x512x512 / max 2x3x640x640). pick_artifact skips an
+    // artifact whose shape_profile differs from the request, so a mismatched engine is
+    // never served — it is just dead weight that forces an on-device build.
     ModelSpec {
         name: "raco-aliked-extractor-k3072",
         hf_repo: "kornia/raco-aliked",
