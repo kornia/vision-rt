@@ -154,25 +154,37 @@ extern "C" __global__ void xfeat_score_nms(
 /* xfeat_sample_descs — bilinear descriptor sampling.
    For each of K keypoints (pixel-space x, y), sample the 64-channel descriptor
    map (stored CHW: [64, Hd, Wd]) using align_corners=False bilinear interpolation.
+   Also publishes, per image, the clamped count and the keypoints in original-image
+   pixels (x*sx, y*sy — the same single multiply kpts_to_host does on the host).
    Launch config: grid=(K,1,B), block=(64,1,1); slots past count[b] exit. */
 extern "C" __global__ void xfeat_sample_descs(
     const float* __restrict__ desc_map,
     const float* __restrict__ kpts0, const float* __restrict__ kpts1,
     float* __restrict__ descs0, float* __restrict__ descs1,
     const int* __restrict__ count,
+    int* __restrict__ count_out0, int* __restrict__ count_out1,
+    float* __restrict__ kpx0, float* __restrict__ kpx1,
+    float sx, float sy,
     int Hd, int Wd,
     int H,  int W, int K
 ) {
     int k = blockIdx.x;
     int c = threadIdx.x;
     int b = blockIdx.z;
-    if (k >= min(count[b], K)) return;
+    int n = min(count[b], K);
+    if (k == 0 && c == 0) *(b ? count_out1 : count_out0) = n;
+    if (k >= n) return;
     desc_map += (size_t)b * XFEAT_D * Hd * Wd;
     const float* kpts = b ? kpts1 : kpts0;
     float* descs_out  = b ? descs1 : descs0;
 
     float px = __ldg(&kpts[k * 2 + 0]);
     float py = __ldg(&kpts[k * 2 + 1]);
+    if (c == 0) {
+        float* kpx = b ? kpx1 : kpx0;
+        kpx[k * 2 + 0] = px * sx;
+        kpx[k * 2 + 1] = py * sy;
+    }
     float dx = (px + 0.5f) / (float)W * (float)Wd - 0.5f;
     float dy = (py + 0.5f) / (float)H * (float)Hd - 0.5f;
 
@@ -321,6 +333,10 @@ pub struct XFeatResult {
     pub descs: CudaSlice<f32>,
     /// Combined NMS scores on device, capacity `top_k`.
     pub scores: CudaSlice<f32>,
+    /// Keypoint count on device, clamped to `top_k`; see [`count_device`](Self::count_device).
+    count_dev: CudaSlice<i32>,
+    /// Device (x, y) in original-image pixels; see [`kpts_px`](Self::kpts_px).
+    kpts_px: CudaSlice<f32>,
     /// Pinned host target for the count scalar (the only D2H), written by `submit`.
     count_pin: vrt::PinnedBuffer<i32>,
     /// The stream these buffers live on (used for the readout D2H).
@@ -337,6 +353,8 @@ impl XFeatResult {
             kpts: stream.alloc_zeros::<f32>(top_k * 2)?,
             descs: unsafe { stream.alloc::<f32>(top_k * XFEAT_DESC_DIM)? },
             scores: stream.alloc_zeros::<f32>(top_k)?,
+            count_dev: stream.alloc_zeros::<i32>(1)?,
+            kpts_px: stream.alloc_zeros::<f32>(top_k * 2)?,
             count_pin: vrt::PinnedBuffer::<i32>::alloc(1)?,
             stream: stream.clone(),
             top_k,
@@ -405,12 +423,31 @@ impl XFeatResult {
             .clone_dtoh(&self.descs.slice(0..n * XFEAT_DESC_DIM))
     }
 
+    /// Valid keypoint count on the device, already clamped to
+    /// [`capacity`](Self::capacity). Valid in stream order after
+    /// [`XFeat::submit`](crate::XFeat::submit) — a consumer on the same stream (e.g.
+    /// kornia-3d's stereo matcher via `KeypointCount::Device`) reads it with no host
+    /// sync; [`count`](Self::count) is the host copy, valid only after a sync.
+    pub fn count_device(&self) -> &CudaSlice<i32> {
+        &self.count_dev
+    }
+
+    /// Device keypoints in **original-image pixels**, interleaved `[x0, y0, …]`,
+    /// capacity `top_k × 2`; the first `count` are valid. Bit-identical to
+    /// [`kpts_to_host`](Self::kpts_to_host). Use these, not [`kpts`](Self::kpts) (model
+    /// space), wherever coordinates must match the image, e.g. stereo matching against
+    /// the rectified frames when the width is not a multiple of 32.
+    pub fn kpts_px(&self) -> &CudaSlice<f32> {
+        &self.kpts_px
+    }
+
     /// Mutable pinned-count pointer (for the async count D2H in `launch_topk_batch`).
     pub(crate) fn count_pin_mut(&mut self) -> *mut i32 {
         self.count_pin.as_mut_ptr()
     }
 
-    /// Stamp the model→original keypoint scale (set by [`XFeat::submit`]).
+    /// Stamp the model→original keypoint scale. Set by [`XFeat::submit`] BEFORE the
+    /// post-processing launch, which bakes it into [`kpts_px`](Self::kpts_px).
     pub(crate) fn set_scale(&mut self, scale: (f32, f32)) {
         self.scale = scale;
     }
@@ -579,6 +616,11 @@ impl XFeatPostproc {
         let (kxy0, kxy1) = (raw(&outs[0].kpts), raw(&outs[o1].kpts));
         let (sco0, sco1) = (raw(&outs[0].scores), raw(&outs[o1].scores));
         let (dsc0, dsc1) = (raw(&outs[0].descs), raw(&outs[o1].descs));
+        let (kpx0, kpx1) = (raw(&outs[0].kpts_px), raw(&outs[o1].kpts_px));
+        let raw_i = |s: &CudaSlice<i32>| -> CUdeviceptr { s.device_ptr(self.stream.as_ref()).0 };
+        let (cnt0, cnt1) = (raw_i(&outs[0].count_dev), raw_i(&outs[o1].count_dev));
+        // Same-size images (submit_pair enforces it), so one scale serves the batch.
+        let (sx, sy) = outs[0].scale;
         let desc_raw = desc_ptr as usize as CUdeviceptr;
         let total = n_pixels as i32;
         let (k_i, h_i, w_i) = (k as i32, h as i32, w as i32);
@@ -624,6 +666,12 @@ impl XFeatPostproc {
             .arg(&dsc0)
             .arg(&dsc1)
             .arg(&cnt_raw)
+            .arg(&cnt0)
+            .arg(&cnt1)
+            .arg(&kpx0)
+            .arg(&kpx1)
+            .arg(&sx)
+            .arg(&sy)
             .arg(&hd_i)
             .arg(&wd_i)
             .arg(&h_i)
@@ -685,6 +733,51 @@ mod gpu_compact_tests {
     /// GPU top-K must select the right keypoints from a synthetic score map and
     /// produce L2-normalized descriptors.  The GPU `select` gathers via atomic
     /// append, so the output order is unspecified — assertions are order-free.
+    /// The device count is clamped to capacity even when more survivors pass the
+    /// cutoff, and `kpts_px` is bit-identical to the host-scaled `kpts_to_host`.
+    #[test]
+    #[ignore]
+    fn gpu_device_count_and_pixel_kpts() {
+        use cudarc::driver::DevicePtr;
+        let ctx = cudarc::driver::CudaContext::new(0).unwrap();
+        let stream = ctx.new_stream().unwrap();
+        let mut pp = XFeatPostproc::new(stream.clone(), 0.05).unwrap();
+        let mut res = XFeatResult::alloc(&stream, 2).unwrap();
+        res.set_scale((1.0217391, 0.75)); // 752/736 and an arbitrary y scale
+
+        let (h, w) = (32usize, 32usize);
+        // Three equal-score survivors land in one histogram bin, so all three pass the
+        // cutoff and the raw atomic count (3) exceeds top_k (2).
+        let mut scores = vec![0.0f32; h * w];
+        for i in [100, 517, 999] {
+            scores[i] = 0.5;
+        }
+        let score_dev = stream.clone_htod(&scores).unwrap();
+        let desc_dev = stream
+            .clone_htod(&vec![1.0f32; 64 * (h / 8) * (w / 8)])
+            .unwrap();
+        let desc_ptr = desc_dev.device_ptr(stream.as_ref()).0 as *const f32;
+        pp.launch_topk(desc_ptr, &score_dev, h, w, &mut res)
+            .unwrap();
+        stream.synchronize().unwrap();
+
+        assert_eq!(res.count(), 2);
+        assert_eq!(stream.clone_dtoh(res.count_device()).unwrap(), vec![2]);
+        let host: Vec<u32> = res
+            .kpts_to_host()
+            .unwrap()
+            .iter()
+            .map(|v| v.to_bits())
+            .collect();
+        let dev: Vec<u32> = stream
+            .clone_dtoh(&res.kpts_px().slice(0..4))
+            .unwrap()
+            .iter()
+            .map(|v| v.to_bits())
+            .collect();
+        assert_eq!(dev, host);
+    }
+
     #[test]
     #[ignore]
     fn gpu_topk_selects_correct_keypoints() {
@@ -844,6 +937,12 @@ mod gpu_compact_tests {
 
         for (b, res) in [&r0, &r1].into_iter().enumerate() {
             assert_eq!(res.count(), 2, "image {b}");
+            // Each slot publishes its own device count.
+            assert_eq!(
+                stream.clone_dtoh(res.count_device()).unwrap(),
+                vec![2],
+                "image {b}"
+            );
             let (kpts, scores) = (res.kpts_to_host().unwrap(), res.scores_to_host().unwrap());
             let mut got: Vec<(u32, u32, f32)> = kpts
                 .chunks_exact(2)

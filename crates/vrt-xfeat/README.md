@@ -56,6 +56,11 @@ and loses the pair's gain away from opt; sized to the camera it costs batch 1 no
 — but use a separate `XFeat` for batch-1 calls: alternating `submit` and `submit_pair`
 on one instance drains the stream at every switch.
 
+For a GPU consumer on the same stream (e.g. kornia-3d's stereo matcher), each result also
+exposes `count_device()` (the count on the device, clamped to capacity, so no host sync is
+needed between extraction and matching) and `kpts_px()` (device keypoints in original-image
+pixels; `kpts` is model space, which differs whenever a side is not a multiple of 32).
+
 Match two results with `Matcher::new(stream)` →
 `submit(Descriptors::new(&a.descs, a.count(), a.desc_dim()), ..., cossim, &mut MatchResult)`
 → `stream.synchronize()` → `MatchResult::pairs()`. The descriptor width travels with the

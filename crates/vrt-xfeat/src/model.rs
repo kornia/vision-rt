@@ -308,11 +308,12 @@ impl XFeat {
             .f32_ptr()?;
         self.postproc
             .launch_score_nms(heat_ptr, rel_ptr, &self.score_dev, batch, mh, mw)?;
-        self.postproc
-            .launch_topk_batch(desc_ptr, &self.score_dev, mh, mw, outs)?;
+        // Before the launch: the post-processing bakes the scale into `kpts_px`.
         for out in outs.iter_mut() {
             out.set_scale((rw, rh));
         }
+        self.postproc
+            .launch_topk_batch(desc_ptr, &self.score_dev, mh, mw, outs)?;
         Ok(())
     }
 }
